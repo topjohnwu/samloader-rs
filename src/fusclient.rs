@@ -16,6 +16,7 @@ use crate::auth;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, USER_AGENT};
 
+#[derive(Clone)]
 pub struct FusClient {
     client: Client,
     pub auth: String,
@@ -87,7 +88,12 @@ impl FusClient {
         resp.error_for_status()?.text()
     }
 
-    pub fn downloadfile(&self, filename: &str, start: u64) -> Result<Response, reqwest::Error> {
+    pub fn downloadfile(
+        &self,
+        filename: &str,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> Result<Response, reqwest::Error> {
         let auth_val = format!(
             "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
             self.encnonce, self.auth
@@ -96,12 +102,17 @@ impl FusClient {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
         headers.insert(USER_AGENT, HeaderValue::from_static("Kies2.0_FUS"));
-        if start > 0 {
-            headers.insert(
+        match (start, end) {
+            (Some(s), Some(e)) => headers.insert(
                 "Range",
-                HeaderValue::from_str(&format!("bytes={}-", start)).unwrap(),
-            );
-        }
+                HeaderValue::from_str(&format!("bytes={}-{}", s, e)).unwrap(),
+            ),
+            (Some(s), None) => headers.insert(
+                "Range",
+                HeaderValue::from_str(&format!("bytes={}-", s)).unwrap(),
+            ),
+            _ => None,
+        };
 
         let url = format!(
             "http://cloud-neofussvr.samsungmobile.com/NF_DownloadBinaryForMass.do?file={filename}"

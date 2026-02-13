@@ -20,11 +20,13 @@ mod request;
 mod versionfetch;
 
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use roxmltree::Document;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
-use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "samloader")]
@@ -156,6 +158,8 @@ fn main() {
                 format!("{}/{}", dir, filename)
             });
 
+            let dl_path = format!("{}{}", path, filename);
+
             println!("Downloading {} to {}", filename, final_out);
 
             let init_xml = request::binaryinit(filename, &client.nonce);
@@ -163,38 +167,68 @@ fn main() {
                 .makereq("NF_DownloadBinaryInitForMass.do", &init_xml)
                 .expect("Init failed");
 
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .write(true)
                 .create(true)
-                .append(true)
+                .truncate(true)
                 .open(&final_out)
                 .unwrap();
 
-            let existing_size = file.metadata().unwrap().len();
+            file.set_len(size).unwrap(); // Pre-allocate file size
+            let file_mutex = Arc::new(Mutex::new(file));
 
-            let mut resp = client
-                .downloadfile(&format!("{}{}", path, filename), existing_size)
-                .unwrap();
+            let threads = 8;
+            let chunk_size = size / threads;
+            let mut handles = vec![];
 
             let pb = ProgressBar::new(size);
             pb.set_style(ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")
                 .unwrap());
-
-            pb.set_position(existing_size);
-            pb.reset_eta();
             pb.enable_steady_tick(Duration::from_secs(1));
 
-            let mut buf = [0; 16384];
-            while let Ok(n) = resp.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                file.write_all(&buf[..n]).unwrap();
-                pb.inc(n as u64);
+            for i in 0..threads {
+                let client = client.clone();
+                let pb = pb.clone();
+                let file_mutex = file_mutex.clone();
+                let dl_path = dl_path.clone();
+
+                let start = i * chunk_size;
+                // Ensure the last thread covers the remainder of the file
+                let end = if i == threads - 1 {
+                    None
+                } else {
+                    Some((i + 1) * chunk_size - 1)
+                };
+
+                handles.push(thread::spawn(move || {
+                    let mut resp = client
+                        .downloadfile(&dl_path, Some(start), end)
+                        .expect("Download request failed");
+
+                    let mut buf = [0u8; 16384];
+                    let mut current_pos = start;
+
+                    while let Ok(n) = resp.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        // Critical section: write to file
+                        {
+                            let mut f = file_mutex.lock().unwrap();
+                            f.seek(SeekFrom::Start(current_pos)).unwrap();
+                            f.write_all(&buf[..n]).unwrap();
+                        }
+                        current_pos += n as u64;
+                        pb.inc(n as u64);
+                    }
+                }));
             }
-            pb.finish();
-            println!("Download complete.");
+
+            for h in handles {
+                h.join().unwrap();
+            }
+            pb.finish_with_message("Download complete");
 
             if final_out.ends_with(".enc4") {
                 let decrypted_name = final_out.replace(".enc4", "");
