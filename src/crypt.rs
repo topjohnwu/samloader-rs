@@ -20,7 +20,7 @@ use roxmltree::Document;
 use std::fs::File;
 use std::io::{Read, Write};
 
-type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+pub type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 pub fn getv4key(version: &str, model: &str, region: &str, imei: &str) -> Vec<u8> {
     let mut client = FusClient::new();
@@ -53,6 +53,10 @@ pub fn getv4key(version: &str, model: &str, region: &str, imei: &str) -> Vec<u8>
 pub fn getv2key(version: &str, model: &str, region: &str) -> Vec<u8> {
     let deckey = format!("{}:{}:{}", region, model, version);
     Md5::digest(deckey.as_bytes()).to_vec()
+}
+
+pub fn get_decryptor(key: &[u8]) -> Aes128EcbDec {
+    Aes128EcbDec::new(key.into())
 }
 
 pub fn decrypt_progress(mut inf: File, mut outf: File, key: &[u8], length: u64) {

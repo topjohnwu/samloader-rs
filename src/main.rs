@@ -22,11 +22,12 @@ mod versionfetch;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use roxmltree::Document;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use aes::cipher::{BlockDecryptMut};
 
 #[derive(Parser)]
 #[command(name = "samloader")]
@@ -69,6 +70,19 @@ enum Commands {
         #[arg(short = 'o', long)]
         out_file: String,
     },
+}
+
+fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total_read = 0;
+    while total_read < buf.len() {
+        match file.read(&mut buf[total_read..]) {
+            Ok(0) => break, // EOF
+            Ok(n) => total_read += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total_read)
 }
 
 fn main() {
@@ -153,10 +167,21 @@ fn main() {
                 .parse()
                 .unwrap();
 
-            let final_out = out_file.unwrap_or_else(|| {
-                let dir = out_dir.unwrap_or_else(|| ".".to_string());
-                format!("{}/{}", dir, filename)
-            });
+            // Check if decryption is needed and prepare filename/key
+            let (final_out, key) = if filename.ends_with(".enc4") {
+                let k = crypt::getv4key(&version, &args.model, &args.region, &imei_val);
+                let name = out_file.unwrap_or_else(|| {
+                    let dir = out_dir.clone().unwrap_or_else(|| ".".to_string());
+                    format!("{}/{}", dir, filename.replace(".enc4", ""))
+                });
+                (name, Some(k))
+            } else {
+                let name = out_file.unwrap_or_else(|| {
+                    let dir = out_dir.clone().unwrap_or_else(|| ".".to_string());
+                    format!("{}/{}", dir, filename)
+                });
+                (name, None)
+            };
 
             let dl_path = format!("{}{}", path, filename);
 
@@ -178,7 +203,7 @@ fn main() {
             let file_mutex = Arc::new(Mutex::new(file));
 
             let threads = 8;
-            let chunk_size = size / threads;
+            let chunk_size = (size / threads / 16) * 16;
             let mut handles = vec![];
 
             let pb = ProgressBar::new(size);
@@ -192,10 +217,13 @@ fn main() {
                 let pb = pb.clone();
                 let file_mutex = file_mutex.clone();
                 let dl_path = dl_path.clone();
+                let key = key.clone();
+
+                let is_last_worker = i == threads - 1;
 
                 let start = i * chunk_size;
                 // Ensure the last thread covers the remainder of the file
-                let end = if i == threads - 1 {
+                let end = if is_last_worker {
                     None
                 } else {
                     Some((i + 1) * chunk_size - 1)
@@ -206,18 +234,47 @@ fn main() {
                         .downloadfile(&dl_path, Some(start), end)
                         .expect("Download request failed");
 
+                    let mut decryptor = key.map(|k| crypt::get_decryptor(&k));
                     let mut buf = [0u8; 16384];
                     let mut current_pos = start;
 
-                    while let Ok(n) = resp.read(&mut buf) {
+                    while let Ok(n) = fill_buf(&mut resp, &mut buf) {
                         if n == 0 {
                             break;
                         }
+
+                        let mut write_len = n;
+
+                        // Decrypt if key is present
+                        if let Some(dec) = &mut decryptor {
+                            for chunk in &mut buf[..n].chunks_mut(16) {
+                                if chunk.len() == 16 {
+                                    let mut block = *aes::Block::from_slice(chunk);
+                                    dec.decrypt_block_mut(&mut block);
+                                    chunk.copy_from_slice(block.as_slice());
+                                }
+                            }
+
+                            // Handle padding removal on the very last chunk
+                            if is_last_worker && (current_pos + n as u64 == size) {
+                                let last_byte = buf[n - 1];
+                                let pad_len = last_byte as usize;
+                                if pad_len > 0 && pad_len <= 16 {
+                                    write_len = n.saturating_sub(pad_len);
+                                }
+                            }
+                        }
+
                         // Critical section: write to file
                         {
                             let mut f = file_mutex.lock().unwrap();
                             f.seek(SeekFrom::Start(current_pos)).unwrap();
-                            f.write_all(&buf[..n]).unwrap();
+                            f.write_all(&buf[..write_len]).unwrap();
+
+                            // Truncate file if we removed padding
+                            if write_len < n {
+                                f.set_len(current_pos + write_len as u64).unwrap();
+                            }
                         }
                         current_pos += n as u64;
                         pb.inc(n as u64);
@@ -229,16 +286,6 @@ fn main() {
                 h.join().unwrap();
             }
             pb.finish_with_message("Download complete");
-
-            if final_out.ends_with(".enc4") {
-                let decrypted_name = final_out.replace(".enc4", "");
-                println!("Decrypting to {}", decrypted_name);
-                let key = crypt::getv4key(&version, &args.model, &args.region, &imei_val);
-                let inf = File::open(&final_out).unwrap();
-                let outf = File::create(&decrypted_name).unwrap();
-                crypt::decrypt_progress(inf, outf, &key, size);
-                fs::remove_file(final_out).unwrap();
-            }
         }
     }
 }
