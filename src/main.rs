@@ -23,6 +23,8 @@ use clap::{Parser, Subcommand};
 use roxmltree::Document;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::time::Duration;
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "samloader")]
@@ -164,16 +166,24 @@ fn main() {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create(true)
+                .append(true)
                 .open(&final_out)
                 .unwrap();
+
+            let existing_size = file.metadata().unwrap().len();
+
             let mut resp = client
-                .downloadfile(&format!("{}{}", path, filename), 0)
+                .downloadfile(&format!("{}{}", path, filename), existing_size)
                 .unwrap();
 
-            let pb = indicatif::ProgressBar::new(size);
-            pb.set_style(indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            let pb = ProgressBar::new(size);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")
                 .unwrap());
+
+            pb.set_position(existing_size);
+            pb.reset_eta();
+            pb.enable_steady_tick(Duration::from_secs(1));
 
             let mut buf = [0; 16384];
             while let Ok(n) = resp.read(&mut buf) {
