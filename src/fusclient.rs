@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::auth;
+use crate::{auth, imei, xml, DeviceId};
+use md5::{Digest, Md5};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, USER_AGENT};
+use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct FusClient {
@@ -23,6 +26,29 @@ pub struct FusClient {
     pub sessid: String,
     pub nonce: String,
     pub encnonce: String,
+}
+
+pub struct BinaryInform {
+    pub filename: String,
+    pub path: String,
+    pub size: u64,
+    pub key: Vec<u8>,
+}
+
+impl BinaryInform {
+    fn new(mut kv: HashMap<String, String>) -> Option<BinaryInform> {
+        let size: u64 = kv.get("BINARY_BYTE_SIZE")?.parse().ok()?;
+        let fw_ver = kv.remove("LATEST_FW_VERSION")?;
+        let logic_val = kv.remove("LOGIC_VALUE_FACTORY")?;
+        let key = xml::getlogiccheck(&fw_ver, &logic_val);
+
+        Some(Self {
+            filename: kv.remove("BINARY_NAME").unwrap(),
+            path: kv.remove("MODEL_PATH").unwrap(),
+            size,
+            key: Md5::digest(key.as_bytes()).to_vec(),
+        })
+    }
 }
 
 impl FusClient {
@@ -35,11 +61,55 @@ impl FusClient {
             encnonce: String::new(),
         };
         // Initialize nonce
-        let _ = client.makereq("NF_DownloadGenerateNonce.do", "");
+        let _ = client.make_req("NF_DownloadGenerateNonce.do", "");
         client
     }
 
-    pub fn makereq(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
+    pub fn fetch_binary_info(
+        &mut self,
+        ver: &str,
+        model: &str,
+        region: &str,
+        imei: &DeviceId,
+    ) -> BinaryInform {
+        let kv: HashMap<String, String>;
+
+        match imei {
+            DeviceId::Imei(s) | DeviceId::Serial(s) => {
+                let req_xml = xml::binary_inform_req_xml(ver, model, region, s, &self.nonce);
+
+                let xml = self
+                    .make_req("NF_DownloadBinaryInform.do", &req_xml)
+                    .expect("Info request failed");
+
+                kv = xml::parse_xml_data(&xml).expect("Info request invalid, maybe invalid IMEI?");
+            }
+            DeviceId::Tac(tac) => loop {
+                let rand_imei = imei::generate_random_imei(tac);
+                let req_xml =
+                    xml::binary_inform_req_xml(ver, model, region, &rand_imei, &self.nonce);
+
+                let xml = self
+                    .make_req("NF_DownloadBinaryInform.do", &req_xml)
+                    .expect("Info request failed");
+
+                match xml::parse_xml_data(&xml) {
+                    None => {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    Some(data) => {
+                        println!("Generated valid IMEI: {rand_imei}");
+                        kv = data;
+                        break;
+                    }
+                }
+            },
+        }
+
+        BinaryInform::new(kv).expect("Info request invalid")
+    }
+
+    fn make_req(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
         let auth_header_val = format!(
             "FUS nonce=\"\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
             self.auth
@@ -88,7 +158,13 @@ impl FusClient {
         resp.error_for_status()?.text()
     }
 
-    pub fn downloadfile(
+    pub fn init_download(&mut self, filename: &str) {
+        let init_xml = xml::binary_init_req_xml(filename, &self.nonce);
+        self.make_req("NF_DownloadBinaryInitForMass.do", &init_xml)
+            .expect("Download init failed");
+    }
+
+    pub fn download_file(
         &self,
         filename: &str,
         start: Option<u64>,
@@ -106,6 +182,10 @@ impl FusClient {
             (Some(s), Some(e)) => headers.insert(
                 "Range",
                 HeaderValue::from_str(&format!("bytes={}-{}", s, e)).unwrap(),
+            ),
+            (None, Some(e)) => headers.insert(
+                "Range",
+                HeaderValue::from_str(&format!("bytes=0-{}", e)).unwrap(),
             ),
             (Some(s), None) => headers.insert(
                 "Range",

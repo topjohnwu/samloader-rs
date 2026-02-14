@@ -13,16 +13,14 @@
 // limitations under the License.
 
 mod auth;
-mod crypt;
 mod fusclient;
 mod imei;
-mod request;
 mod versionfetch;
+mod xml;
 
 use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use roxmltree::Document;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
@@ -47,6 +45,9 @@ struct Cli {
     #[arg(short = 's', long)]
     serial: Option<String>,
 
+    #[arg(short = 't', long, default_value_t = 8)]
+    threads: u64,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -60,6 +61,12 @@ enum Commands {
         out_file: Option<String>,
     },
     Check,
+}
+
+pub enum DeviceId {
+    Imei(String),
+    Tac(String),
+    Serial(String),
 }
 
 fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -78,17 +85,16 @@ fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 fn main() {
     let args = Cli::parse();
 
-    let imei_val = if let Some(i) = args.imei {
-        if i.len() == 8 {
-            println!("Generating random IMEI from TAC...");
-            imei::generate_random_imei(&i)
-        } else {
-            i
+    let imei = match (args.imei.as_ref(), args.serial.as_ref()) {
+        (Some(imei), _) => {
+            if imei.len() == 8 {
+                DeviceId::Tac(imei.to_string())
+            } else {
+                DeviceId::Imei(imei.to_string())
+            }
         }
-    } else if let Some(s) = args.serial {
-        s
-    } else {
-        panic!("IMEI or Serial required (use -i or -s)");
+        (_, Some(serial)) => DeviceId::Serial(serial.to_string()),
+        _ => panic!("IMEI or Serial required (use -i or -s)"),
     };
 
     match args.command {
@@ -101,63 +107,26 @@ fn main() {
             println!("Firmware Version: {}", version);
 
             let mut client = fusclient::FusClient::new();
-            let req_xml = request::binaryinform(
-                &version,
-                &args.model,
-                &args.region,
-                &imei_val,
-                &client.nonce,
-            );
-            let resp = client
-                .makereq("NF_DownloadBinaryInform.do", &req_xml)
-                .expect("Info request failed");
 
-            let doc = Document::parse(&resp).expect("Invalid XML");
-            let filename = doc
-                .descendants()
-                .find(|n| n.has_tag_name("BINARY_NAME"))
-                .and_then(|n| n.descendants().find(|d| d.has_tag_name("Data")))
-                .and_then(|n| n.text())
-                .expect("Filename not found");
-            let path = doc
-                .descendants()
-                .find(|n| n.has_tag_name("MODEL_PATH"))
-                .and_then(|n| n.descendants().find(|d| d.has_tag_name("Data")))
-                .and_then(|n| n.text())
-                .expect("Path not found");
-            let size: u64 = doc
-                .descendants()
-                .find(|n| n.has_tag_name("BINARY_BYTE_SIZE"))
-                .and_then(|n| n.descendants().find(|d| d.has_tag_name("Data")))
-                .and_then(|n| n.text())
-                .unwrap()
-                .parse()
-                .unwrap();
+            let info = client.fetch_binary_info(&version, &args.model, &args.region, &imei);
 
-            // Check if decryption is needed and prepare filename/key
-            let (final_out, key) = if filename.ends_with(".enc4") {
-                let k = crypt::getv4key(&version, &args.model, &args.region, &imei_val);
-                let name = out_file.unwrap_or_else(|| {
-                    let dir = out_dir.clone().unwrap_or_else(|| ".".to_string());
-                    format!("{}/{}", dir, filename.replace(".enc4", ""))
-                });
-                (name, Some(k))
+            let key: Option<Vec<u8>>;
+
+            let default_name = if info.filename.ends_with(".enc4") {
+                key = Some(info.key);
+                info.filename.replace(".enc4", "")
             } else {
-                let name = out_file.unwrap_or_else(|| {
-                    let dir = out_dir.clone().unwrap_or_else(|| ".".to_string());
-                    format!("{}/{}", dir, filename)
-                });
-                (name, None)
+                key = None;
+                info.filename.clone()
             };
 
-            let dl_path = format!("{}{}", path, filename);
+            let final_out = match (out_file, out_dir) {
+                (Some(name), _) => name,
+                (None, Some(dir)) => format!("{}/{}", dir, default_name),
+                _ => default_name,
+            };
 
-            println!("Downloading {} to {}", filename, final_out);
-
-            let init_xml = request::binaryinit(filename, &client.nonce);
-            client
-                .makereq("NF_DownloadBinaryInitForMass.do", &init_xml)
-                .expect("Init failed");
+            println!("Downloading {} to {}", info.filename, final_out);
 
             let file = OpenOptions::new()
                 .write(true)
@@ -166,27 +135,30 @@ fn main() {
                 .open(&final_out)
                 .unwrap();
 
-            file.set_len(size).unwrap(); // Pre-allocate file size
+            // Pre-allocate file size
+            file.set_len(info.size).unwrap();
             let file_mutex = Arc::new(Mutex::new(file));
 
-            let threads = 8;
-            let chunk_size = (size / threads / 16) * 16;
+            let chunk_size = (info.size / args.threads / 16) * 16;
+            let dl_path = format!("{}{}", info.path, info.filename);
             let mut handles = vec![];
 
-            let pb = ProgressBar::new(size);
+            let pb = ProgressBar::new(info.size);
             pb.set_style(ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")
                 .unwrap());
             pb.enable_steady_tick(Duration::from_secs(1));
 
-            for i in 0..threads {
+            client.init_download(&info.filename);
+
+            for i in 0..args.threads {
                 let client = client.clone();
                 let pb = pb.clone();
                 let file_mutex = file_mutex.clone();
                 let dl_path = dl_path.clone();
                 let key = key.clone();
 
-                let is_last_worker = i == threads - 1;
+                let is_last_worker = i == args.threads - 1;
 
                 let start = i * chunk_size;
                 // Ensure the last thread covers the remainder of the file
@@ -198,7 +170,7 @@ fn main() {
 
                 handles.push(thread::spawn(move || {
                     let mut resp = client
-                        .downloadfile(&dl_path, Some(start), end)
+                        .download_file(&dl_path, Some(start), end)
                         .expect("Download request failed");
 
                     let mut decryptor = key.map(|k| Aes128EcbDec::new(k.as_slice().into()));
@@ -223,7 +195,7 @@ fn main() {
                             }
 
                             // Handle padding removal on the very last chunk
-                            if is_last_worker && (current_pos + n as u64 == size) {
+                            if is_last_worker && (current_pos + n as u64 == info.size) {
                                 let last_byte = buf[n - 1];
                                 let pad_len = last_byte as usize;
                                 if pad_len > 0 && pad_len <= 16 {
@@ -252,6 +224,7 @@ fn main() {
             for h in handles {
                 h.join().unwrap();
             }
+            pb.disable_steady_tick();
             pb.finish_with_message("Download complete");
         }
     }
