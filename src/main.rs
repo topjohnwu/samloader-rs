@@ -19,15 +19,17 @@ mod imei;
 mod request;
 mod versionfetch;
 
+use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use roxmltree::Document;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use aes::cipher::{BlockDecryptMut};
+
+type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 #[derive(Parser)]
 #[command(name = "samloader")]
@@ -52,24 +54,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Download {
-        #[arg(short = 'v', long)]
-        fw_ver: Option<String>,
         #[arg(short = 'O', long)]
         out_dir: Option<String>,
         #[arg(short = 'o', long)]
         out_file: Option<String>,
     },
-    Checkupdate,
-    Decrypt {
-        #[arg(short = 'v', long)]
-        fw_ver: String,
-        #[arg(short = 'V', long, default_value_t = 4)]
-        enc_ver: i32,
-        #[arg(short = 'i', long)]
-        in_file: String,
-        #[arg(short = 'o', long)]
-        out_file: String,
-    },
+    Check,
 }
 
 fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -102,35 +92,12 @@ fn main() {
     };
 
     match args.command {
-        Commands::Checkupdate => {
+        Commands::Check => {
             let ver = versionfetch::getlatestver(&args.model, &args.region);
             println!("{}", ver);
         }
-        Commands::Decrypt {
-            fw_ver,
-            enc_ver,
-            in_file,
-            out_file,
-        } => {
-            let key = if enc_ver == 4 {
-                crypt::getv4key(&fw_ver, &args.model, &args.region, &imei_val)
-            } else {
-                crypt::getv2key(&fw_ver, &args.model, &args.region)
-            };
-
-            let inf = File::open(&in_file).expect("Input file not found");
-            let outf = File::create(&out_file).expect("Cannot create output file");
-            let len = inf.metadata().unwrap().len();
-
-            crypt::decrypt_progress(inf, outf, &key, len);
-        }
-        Commands::Download {
-            fw_ver,
-            out_dir,
-            out_file,
-        } => {
-            let version =
-                fw_ver.unwrap_or_else(|| versionfetch::getlatestver(&args.model, &args.region));
+        Commands::Download { out_dir, out_file } => {
+            let version = versionfetch::getlatestver(&args.model, &args.region);
             println!("Firmware Version: {}", version);
 
             let mut client = fusclient::FusClient::new();
@@ -234,7 +201,7 @@ fn main() {
                         .downloadfile(&dl_path, Some(start), end)
                         .expect("Download request failed");
 
-                    let mut decryptor = key.map(|k| crypt::get_decryptor(&k));
+                    let mut decryptor = key.map(|k| Aes128EcbDec::new(k.as_slice().into()));
                     let mut buf = [0u8; 16384];
                     let mut current_pos = start;
 

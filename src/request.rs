@@ -24,7 +24,6 @@ pub fn getlogiccheck(inp: &str, nonce: &str) -> String {
     out
 }
 
-// FIX: Made function public so it can be used in crypt.rs
 pub fn binaryinform(fwv: &str, model: &str, region: &str, imei: &str, nonce: &str) -> String {
     let logic_check = getlogiccheck(fwv, nonce);
 
@@ -75,7 +74,6 @@ pub fn binaryinform(fwv: &str, model: &str, region: &str, imei: &str, nonce: &st
     )
 }
 
-// FIX: Made function public
 pub fn binaryinit(filename: &str, nonce: &str) -> String {
     let name_part = filename.split('.').next().unwrap_or(filename);
     let start = if name_part.len() > 16 {
