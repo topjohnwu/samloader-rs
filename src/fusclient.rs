@@ -19,15 +19,17 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, USER_AGENT}
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[derive(Clone)]
+#[derive(Default)]
 pub struct FusClient {
     client: Client,
     pub auth: String,
     pub sessid: String,
     pub nonce: String,
     pub encnonce: String,
+    pub info: BinaryInform,
 }
 
+#[derive(Default)]
 pub struct BinaryInform {
     pub filename: String,
     pub path: String,
@@ -53,25 +55,13 @@ impl BinaryInform {
 
 impl FusClient {
     pub fn new() -> Self {
-        let mut client = FusClient {
-            client: Client::new(),
-            auth: String::new(),
-            sessid: String::new(),
-            nonce: String::new(),
-            encnonce: String::new(),
-        };
+        let mut client = FusClient::default();
         // Initialize nonce
         let _ = client.make_req("NF_DownloadGenerateNonce.do", "");
         client
     }
 
-    pub fn fetch_binary_info(
-        &mut self,
-        ver: &str,
-        model: &str,
-        region: &str,
-        imei: &DeviceId,
-    ) -> BinaryInform {
+    pub fn fetch_binary_info(&mut self, ver: &str, model: &str, region: &str, imei: &DeviceId) {
         let kv: HashMap<String, String>;
 
         match imei {
@@ -106,7 +96,7 @@ impl FusClient {
             },
         }
 
-        BinaryInform::new(kv).expect("Info request invalid")
+        self.info = BinaryInform::new(kv).expect("Info request invalid");
     }
 
     fn make_req(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
@@ -158,15 +148,14 @@ impl FusClient {
         resp.error_for_status()?.text()
     }
 
-    pub fn init_download(&mut self, filename: &str) {
-        let init_xml = xml::binary_init_req_xml(filename, &self.nonce);
+    pub fn init_download(&mut self) {
+        let init_xml = xml::binary_init_req_xml(&self.info.filename, &self.nonce);
         self.make_req("NF_DownloadBinaryInitForMass.do", &init_xml)
             .expect("Download init failed");
     }
 
     pub fn download_file(
         &self,
-        filename: &str,
         start: Option<u64>,
         end: Option<u64>,
     ) -> Result<Response, reqwest::Error> {
@@ -195,7 +184,8 @@ impl FusClient {
         };
 
         let url = format!(
-            "http://cloud-neofussvr.samsungmobile.com/NF_DownloadBinaryForMass.do?file={filename}"
+            "http://cloud-neofussvr.samsungmobile.com/NF_DownloadBinaryForMass.do?file={}{}",
+            self.info.path, self.info.filename
         );
         self.client
             .get(url)

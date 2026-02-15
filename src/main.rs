@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -86,15 +86,15 @@ fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 fn main() {
     let args = Cli::parse();
 
-    let imei = match (args.imei.as_ref(), args.serial.as_ref()) {
+    let imei = match (args.imei, args.serial) {
         (Some(imei), _) => {
             if imei.len() == 8 {
-                DeviceId::Tac(imei.to_string())
+                DeviceId::Tac(imei)
             } else {
-                DeviceId::Imei(imei.to_string())
+                DeviceId::Imei(imei)
             }
         }
-        (_, Some(serial)) => DeviceId::Serial(serial.to_string()),
+        (None, Some(serial)) => DeviceId::Serial(serial),
         _ => panic!("IMEI or Serial required (use -i or -s)"),
     };
 
@@ -109,16 +109,14 @@ fn main() {
 
             let mut client = fusclient::FusClient::new();
 
-            let info = client.fetch_binary_info(&version, &args.model, &args.region, &imei);
+            client.fetch_binary_info(&version, &args.model, &args.region, &imei);
 
-            let key: Option<Vec<u8>>;
-
-            let default_name = if info.filename.ends_with(".enc4") {
-                key = Some(info.key);
-                info.filename.replace(".enc4", "")
+            let mut decrypt = false;
+            let default_name = if client.info.filename.ends_with(".enc4") {
+                decrypt = true;
+                client.info.filename.replace(".enc4", "")
             } else {
-                key = None;
-                info.filename.clone()
+                client.info.filename.clone()
             };
 
             let final_out = match (out_file, out_dir) {
@@ -127,7 +125,7 @@ fn main() {
                 _ => default_name,
             };
 
-            println!("Downloading {} to {}", info.filename, final_out);
+            println!("Downloading {} to {}", client.info.filename, final_out);
 
             let file = OpenOptions::new()
                 .write(true)
@@ -137,19 +135,18 @@ fn main() {
                 .unwrap();
 
             // Pre-allocate file size
-            file.set_len(info.size).unwrap();
-            let file_mutex = Arc::new(Mutex::new(file));
+            file.set_len(client.info.size).unwrap();
+            let file_mutex = Mutex::new(file);
 
-            let chunk_size = (info.size / args.threads / 16) * 16;
-            let dl_path = format!("{}{}", info.path, info.filename);
+            let chunk_size = (client.info.size / args.threads / 16) * 16;
 
-            let pb = ProgressBar::new(info.size);
+            let pb = ProgressBar::new(client.info.size);
             pb.set_style(ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")
                 .unwrap());
             pb.enable_steady_tick(Duration::from_secs(1));
 
-            client.init_download(&info.filename);
+            client.init_download();
 
             thread::scope(|s| {
                 for i in 0..args.threads {
@@ -164,15 +161,20 @@ fn main() {
                     };
 
                     let mut resp = client
-                        .download_file(&dl_path, Some(start), end)
+                        .download_file(Some(start), end)
                         .expect("Download request failed");
 
-                    let key = key.as_ref();
+                    let mut decryptor = if decrypt {
+                        Some(Aes128EcbDec::new(client.info.key.as_slice().into()))
+                    } else {
+                        None
+                    };
+
                     let file_mutex = &file_mutex;
                     let pb = &pb;
+                    let file_size = client.info.size;
 
                     s.spawn(move || {
-                        let mut decryptor = key.map(|k| Aes128EcbDec::new(k.as_slice().into()));
                         let mut buf = [0u8; 65536];
                         let mut current_pos = start;
 
@@ -193,7 +195,7 @@ fn main() {
                                 dec.decrypt_blocks_inout_mut(blocks);
 
                                 // Handle padding removal on the very last chunk
-                                if is_last_worker && (current_pos + n as u64 == info.size) {
+                                if is_last_worker && (current_pos + n as u64 == file_size) {
                                     let last_byte = buf[n - 1];
                                     let pad_len = last_byte as usize;
                                     if pad_len > 0 && pad_len <= 16 {
