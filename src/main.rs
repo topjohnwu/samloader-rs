@@ -18,6 +18,7 @@ mod imei;
 mod versionfetch;
 mod xml;
 
+use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -141,7 +142,6 @@ fn main() {
 
             let chunk_size = (info.size / args.threads / 16) * 16;
             let dl_path = format!("{}{}", info.path, info.filename);
-            let mut handles = vec![];
 
             let pb = ProgressBar::new(info.size);
             pb.set_style(ProgressStyle::default_bar()
@@ -151,79 +151,78 @@ fn main() {
 
             client.init_download(&info.filename);
 
-            for i in 0..args.threads {
-                let client = client.clone();
-                let pb = pb.clone();
-                let file_mutex = file_mutex.clone();
-                let dl_path = dl_path.clone();
-                let key = key.clone();
+            thread::scope(|s| {
+                for i in 0..args.threads {
+                    let is_last_worker = i == args.threads - 1;
 
-                let is_last_worker = i == args.threads - 1;
+                    let start = i * chunk_size;
+                    // Ensure the last thread covers the remainder of the file
+                    let end = if is_last_worker {
+                        None
+                    } else {
+                        Some((i + 1) * chunk_size - 1)
+                    };
 
-                let start = i * chunk_size;
-                // Ensure the last thread covers the remainder of the file
-                let end = if is_last_worker {
-                    None
-                } else {
-                    Some((i + 1) * chunk_size - 1)
-                };
-
-                handles.push(thread::spawn(move || {
                     let mut resp = client
                         .download_file(&dl_path, Some(start), end)
                         .expect("Download request failed");
 
-                    let mut decryptor = key.map(|k| Aes128EcbDec::new(k.as_slice().into()));
-                    let mut buf = [0u8; 16384];
-                    let mut current_pos = start;
+                    let key = key.as_ref();
+                    let file_mutex = &file_mutex;
+                    let pb = &pb;
 
-                    while let Ok(n) = fill_buf(&mut resp, &mut buf) {
-                        if n == 0 {
-                            break;
-                        }
+                    s.spawn(move || {
+                        let mut decryptor = key.map(|k| Aes128EcbDec::new(k.as_slice().into()));
+                        let mut buf = [0u8; 65536];
+                        let mut current_pos = start;
 
-                        let mut write_len = n;
+                        while let Ok(n) = fill_buf(&mut resp, &mut buf) {
+                            if n == 0 {
+                                break;
+                            }
 
-                        // Decrypt if key is present
-                        if let Some(dec) = &mut decryptor {
-                            for chunk in &mut buf[..n].chunks_mut(16) {
-                                if chunk.len() == 16 {
-                                    let mut block = *aes::Block::from_slice(chunk);
-                                    dec.decrypt_block_mut(&mut block);
-                                    chunk.copy_from_slice(block.as_slice());
+                            let mut write_len = n;
+
+                            // Decrypt if key is present
+                            if let Some(dec) = &mut decryptor {
+                                let bytes: InOutBuf<u8> = buf[..n].as_mut().into();
+                                let (blocks, tail) = bytes.into_chunks();
+                                if !tail.is_empty() {
+                                    panic!("Download corrupted, cannot decrypt");
+                                }
+                                dec.decrypt_blocks_inout_mut(blocks);
+
+                                // Handle padding removal on the very last chunk
+                                if is_last_worker && (current_pos + n as u64 == info.size) {
+                                    let last_byte = buf[n - 1];
+                                    let pad_len = last_byte as usize;
+                                    if pad_len > 0 && pad_len <= 16 {
+                                        write_len = n.saturating_sub(pad_len);
+                                    }
                                 }
                             }
 
-                            // Handle padding removal on the very last chunk
-                            if is_last_worker && (current_pos + n as u64 == info.size) {
-                                let last_byte = buf[n - 1];
-                                let pad_len = last_byte as usize;
-                                if pad_len > 0 && pad_len <= 16 {
-                                    write_len = n.saturating_sub(pad_len);
+                            // Critical section: write to file
+                            {
+                                let mut f = file_mutex.lock().unwrap();
+                                f.seek(SeekFrom::Start(current_pos)).unwrap();
+                                f.write_all(&buf[..write_len]).unwrap();
+
+                                // Truncate file if we removed padding
+                                if write_len < n {
+                                    f.set_len(current_pos + write_len as u64).unwrap();
                                 }
                             }
+                            current_pos += n as u64;
+                            pb.inc(n as u64);
                         }
+                    });
 
-                        // Critical section: write to file
-                        {
-                            let mut f = file_mutex.lock().unwrap();
-                            f.seek(SeekFrom::Start(current_pos)).unwrap();
-                            f.write_all(&buf[..write_len]).unwrap();
+                    // Wait 100ms between each request
+                    thread::sleep(Duration::from_millis(100));
+                }
+            });
 
-                            // Truncate file if we removed padding
-                            if write_len < n {
-                                f.set_len(current_pos + write_len as u64).unwrap();
-                            }
-                        }
-                        current_pos += n as u64;
-                        pb.inc(n as u64);
-                    }
-                }));
-            }
-
-            for h in handles {
-                h.join().unwrap();
-            }
             pb.disable_steady_tick();
             pb.finish_with_message("Download complete");
         }
