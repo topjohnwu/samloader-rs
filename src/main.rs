@@ -21,10 +21,10 @@ mod xml;
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
+use file::ParallelFile;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::Mutex;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
@@ -68,6 +68,74 @@ pub enum DeviceId {
     Imei(String),
     Tac(String),
     Serial(String),
+}
+
+#[cfg(not(unix))]
+mod file {
+    use std::fs::File;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::Mutex;
+
+    pub struct ParallelFile {
+        file: Mutex<File>,
+    }
+
+    impl ParallelFile {
+        pub fn new(file: File) -> Self {
+            Self {
+                file: Mutex::new(file),
+            }
+        }
+
+        pub fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+            let mut file = self.file.lock().unwrap();
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(buf)
+        }
+
+        pub fn set_len(&self, size: u64) -> std::io::Result<()> {
+            let file = self.file.lock().unwrap();
+            file.set_len(size)
+        }
+    }
+}
+
+#[cfg(unix)]
+mod file {
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
+
+    pub struct ParallelFile(File);
+
+    impl ParallelFile {
+        pub fn new(file: File) -> Self {
+            Self(file)
+        }
+
+        pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+            while !buf.is_empty() {
+                match self.0.write_at(buf, offset) {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ));
+                    }
+                    Ok(n) => {
+                        offset += n as u64;
+                        buf = &buf[n..]
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+
+        pub fn set_len(&self, size: u64) -> std::io::Result<()> {
+            self.0.set_len(size)
+        }
+    }
 }
 
 fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -136,7 +204,7 @@ fn main() {
 
             // Pre-allocate file size
             file.set_len(client.info.size).unwrap();
-            let file_mutex = Mutex::new(file);
+            let file = ParallelFile::new(file);
 
             let chunk_size = (client.info.size / args.threads / 16) * 16;
 
@@ -170,7 +238,7 @@ fn main() {
                         None
                     };
 
-                    let file_mutex = &file_mutex;
+                    let file = &file;
                     let pb = &pb;
                     let file_size = client.info.size;
 
@@ -195,7 +263,7 @@ fn main() {
                                 dec.decrypt_blocks_inout_mut(blocks);
 
                                 // Handle padding removal on the very last chunk
-                                if is_last_worker && (current_pos + n as u64 == file_size) {
+                                if current_pos + n as u64 == file_size {
                                     let last_byte = buf[n - 1];
                                     let pad_len = last_byte as usize;
                                     if pad_len > 0 && pad_len <= 16 {
@@ -204,16 +272,10 @@ fn main() {
                                 }
                             }
 
-                            // Critical section: write to file
-                            {
-                                let mut f = file_mutex.lock().unwrap();
-                                f.seek(SeekFrom::Start(current_pos)).unwrap();
-                                f.write_all(&buf[..write_len]).unwrap();
-
-                                // Truncate file if we removed padding
-                                if write_len < n {
-                                    f.set_len(current_pos + write_len as u64).unwrap();
-                                }
+                            file.write_all_at(&buf[..write_len], current_pos).unwrap();
+                            // Truncate file if we removed padding
+                            if write_len < n {
+                                file.set_len(current_pos + write_len as u64).unwrap();
                             }
                             current_pos += n as u64;
                             pb.inc(n as u64);
