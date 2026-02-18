@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rand::Rng;
+use rand::RngExt;
 
 fn luhn_checksum(imei_prefix: &str) -> u32 {
     let mut sum = 0;
@@ -38,12 +38,12 @@ pub fn generate_random_imei(tac: &str) -> String {
         panic!("Invalid TAC length");
     }
 
-    let mut rng = rand::thread_rng();
-    let r1 = [0, 5, 7][rng.gen_range(0..3)];
-    let r2 = rng.gen_range(4..=9);
-    let r3 = [0, 1, 3, 5, 6, 7][rng.gen_range(0..6)];
-    let r4 = rng.gen_range(0..=9);
-    let r56 = rng.gen_range(0..100);
+    let mut rng = rand::rng();
+    let r1 = [0, 5, 7][rng.random_range(0..3)];
+    let r2 = rng.random_range(4..=9);
+    let r3 = [0, 1, 3, 5, 6, 7][rng.random_range(0..6)];
+    let r4 = rng.random_range(0..=9);
+    let r56 = rng.random_range(0..100);
 
     let tac_rng = format!("{}{}{}{}{}{:02}", tac, r1, r2, r3, r4, r56);
     let check = luhn_checksum(&tac_rng);
