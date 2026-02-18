@@ -29,6 +29,8 @@ use std::thread;
 use std::time::Duration;
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+const PROGRESS_TEMPLATE: &str =
+    "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
 #[derive(Parser)]
 #[command(name = "samloader")]
@@ -76,26 +78,33 @@ mod file {
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::Mutex;
 
+    struct Inner {
+        file: File,
+        len: usize,
+    }
+
     pub struct ParallelFile {
-        file: Mutex<File>,
+        inner: Mutex<Inner>,
     }
 
     impl ParallelFile {
         pub fn new(file: File) -> Self {
             Self {
-                file: Mutex::new(file),
+                inner: Mutex::new(Inner { file, len: 0 }),
             }
         }
 
         pub fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
-            let mut file = self.file.lock().unwrap();
-            file.seek(SeekFrom::Start(offset))?;
-            file.write_all(buf)
+            let mut inner = self.inner.lock().unwrap();
+            inner.file.seek(SeekFrom::Start(offset))?;
+            inner.file.write_all(buf)?;
+            inner.len += buf.len();
+            Ok(())
         }
 
-        pub fn set_len(&self, size: u64) -> std::io::Result<()> {
-            let file = self.file.lock().unwrap();
-            file.set_len(size)
+        pub fn truncate(&self) -> std::io::Result<()> {
+            let inner = self.inner.lock().unwrap();
+            inner.file.set_len(inner.len as u64)
         }
     }
 }
@@ -104,17 +113,25 @@ mod file {
 mod file {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    pub struct ParallelFile(File);
+    pub struct ParallelFile {
+        file: File,
+        len: AtomicUsize,
+    }
 
     impl ParallelFile {
         pub fn new(file: File) -> Self {
-            Self(file)
+            Self {
+                file,
+                len: AtomicUsize::new(0),
+            }
         }
 
         pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+            let len = buf.len();
             while !buf.is_empty() {
-                match self.0.write_at(buf, offset) {
+                match self.file.write_at(buf, offset) {
                     Ok(0) => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::WriteZero,
@@ -125,15 +142,16 @@ mod file {
                         offset += n as u64;
                         buf = &buf[n..]
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),
                 }
             }
+            self.len.fetch_add(len, Ordering::AcqRel);
             Ok(())
         }
 
-        pub fn set_len(&self, size: u64) -> std::io::Result<()> {
-            self.0.set_len(size)
+        pub fn truncate(&self) -> std::io::Result<()> {
+            self.file.set_len(self.len.load(Ordering::Acquire) as u64)
         }
     }
 }
@@ -149,6 +167,25 @@ fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
         }
     }
     Ok(total_read)
+}
+
+fn decrypt_bytes(dec: &mut Aes128EcbDec, buf: &mut [u8], is_last: bool) -> usize {
+    let bytes: InOutBuf<u8> = buf.into();
+    let (blocks, tail) = bytes.into_chunks();
+    if !tail.is_empty() {
+        panic!("Download corrupted, cannot decrypt");
+    }
+    dec.decrypt_blocks_inout_mut(blocks);
+
+    // Handle padding removal on the very last chunk
+    if is_last {
+        let last_byte = *buf.last().unwrap();
+        let pad_len = last_byte as usize;
+        if pad_len > 0 && pad_len <= 16 {
+            return buf.len().saturating_sub(pad_len);
+        }
+    }
+    buf.len()
 }
 
 fn main() {
@@ -202,16 +239,15 @@ fn main() {
                 .open(&final_out)
                 .unwrap();
 
-            // Pre-allocate file size
-            file.set_len(client.info.size).unwrap();
+            // Pre-allocate file
+            file.set_len(client.info.size)
+                .expect("Cannot pre-allocate file");
             let file = ParallelFile::new(file);
 
             let chunk_size = (client.info.size / args.threads / 16) * 16;
 
-            let pb = ProgressBar::new(client.info.size);
-            pb.set_style(ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")
-                .unwrap());
+            let pb = ProgressBar::new(client.info.size)
+                .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
             pb.enable_steady_tick(Duration::from_secs(1));
 
             client.init_download();
@@ -246,39 +282,24 @@ fn main() {
                         let mut buf = [0u8; 65536];
                         let mut current_pos = start;
 
-                        while let Ok(n) = fill_buf(&mut resp, &mut buf) {
-                            if n == 0 {
+                        loop {
+                            let dl_len = fill_buf(&mut resp, &mut buf).expect("Download failed");
+                            if dl_len == 0 {
                                 break;
                             }
 
-                            let mut write_len = n;
+                            // Decrypt if required
+                            let write_len = if let Some(dec) = &mut decryptor {
+                                let is_last = current_pos + dl_len as u64 == file_size;
+                                decrypt_bytes(dec, &mut buf[..dl_len], is_last)
+                            } else {
+                                dl_len
+                            };
 
-                            // Decrypt if key is present
-                            if let Some(dec) = &mut decryptor {
-                                let bytes: InOutBuf<u8> = buf[..n].as_mut().into();
-                                let (blocks, tail) = bytes.into_chunks();
-                                if !tail.is_empty() {
-                                    panic!("Download corrupted, cannot decrypt");
-                                }
-                                dec.decrypt_blocks_inout_mut(blocks);
-
-                                // Handle padding removal on the very last chunk
-                                if current_pos + n as u64 == file_size {
-                                    let last_byte = buf[n - 1];
-                                    let pad_len = last_byte as usize;
-                                    if pad_len > 0 && pad_len <= 16 {
-                                        write_len = n.saturating_sub(pad_len);
-                                    }
-                                }
-                            }
-
-                            file.write_all_at(&buf[..write_len], current_pos).unwrap();
-                            // Truncate file if we removed padding
-                            if write_len < n {
-                                file.set_len(current_pos + write_len as u64).unwrap();
-                            }
-                            current_pos += n as u64;
-                            pb.inc(n as u64);
+                            file.write_all_at(&buf[..write_len], current_pos)
+                                .expect("Failed to write to output file");
+                            current_pos += dl_len as u64;
+                            pb.inc(dl_len as u64);
                         }
                     });
 
@@ -287,8 +308,9 @@ fn main() {
                 }
             });
 
-            pb.disable_steady_tick();
-            pb.finish_with_message("Download complete");
+            // Truncate file if needed
+            file.truncate().expect("Failed to truncate file");
+            pb.finish();
         }
     }
 }
