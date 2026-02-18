@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.13", features = ["blocking"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "native-tls-no-alpn",
+    "native-tls-vendored",
+] }
 aes = "0.8"
 cbc = "0.1"
 ecb = "0.1"
@@ -15,3 +19,8 @@ rand = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 roxmltree = "0.21"
 indicatif = "0.18"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = 3
