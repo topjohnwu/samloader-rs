@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{auth, imei, xml, DeviceId};
+use crate::{DeviceId, auth, imei, xml};
 use md5::{Digest, Md5};
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 use std::collections::HashMap;
 use std::time::Duration;
 
