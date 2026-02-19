@@ -12,7 +12,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 aes = "0.8"
 cbc = "0.1"
 ecb = "0.1"
-block-padding = "0.4"
 md-5 = "0.10"
 base64 = "0.22"
 rand = "0.10"
