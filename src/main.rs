@@ -21,8 +21,8 @@ mod xml;
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
-use file::ParallelFile;
 use indicatif::{ProgressBar, ProgressStyle};
+use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::thread;
@@ -72,122 +72,6 @@ pub enum DeviceId {
     Serial(String),
 }
 
-#[cfg(not(unix))]
-mod file {
-    use std::fs::File;
-    use std::io::{Seek, SeekFrom, Write};
-    use std::sync::Mutex;
-
-    struct Inner {
-        file: File,
-        len: usize,
-    }
-
-    pub struct ParallelFile {
-        inner: Mutex<Inner>,
-    }
-
-    impl ParallelFile {
-        pub fn new(file: File) -> Self {
-            Self {
-                inner: Mutex::new(Inner { file, len: 0 }),
-            }
-        }
-
-        pub fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
-            let mut inner = self.inner.lock().unwrap();
-            inner.file.seek(SeekFrom::Start(offset))?;
-            inner.file.write_all(buf)?;
-            inner.len += buf.len();
-            Ok(())
-        }
-
-        pub fn truncate(&self) -> std::io::Result<()> {
-            let inner = self.inner.lock().unwrap();
-            inner.file.set_len(inner.len as u64)
-        }
-    }
-}
-
-#[cfg(unix)]
-mod file {
-    use std::fs::File;
-    use std::os::unix::fs::FileExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    pub struct ParallelFile {
-        file: File,
-        len: AtomicUsize,
-    }
-
-    impl ParallelFile {
-        pub fn new(file: File) -> Self {
-            Self {
-                file,
-                len: AtomicUsize::new(0),
-            }
-        }
-
-        pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
-            let len = buf.len();
-            while !buf.is_empty() {
-                match self.file.write_at(buf, offset) {
-                    Ok(0) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "failed to write whole buffer",
-                        ));
-                    }
-                    Ok(n) => {
-                        offset += n as u64;
-                        buf = &buf[n..]
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-            self.len.fetch_add(len, Ordering::AcqRel);
-            Ok(())
-        }
-
-        pub fn truncate(&self) -> std::io::Result<()> {
-            self.file.set_len(self.len.load(Ordering::Acquire) as u64)
-        }
-    }
-}
-
-fn fill_buf(mut file: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut total_read = 0;
-    while total_read < buf.len() {
-        match file.read(&mut buf[total_read..]) {
-            Ok(0) => break, // EOF
-            Ok(n) => total_read += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(total_read)
-}
-
-fn decrypt_bytes(dec: &mut Aes128EcbDec, buf: &mut [u8], is_last: bool) -> usize {
-    let bytes: InOutBuf<u8> = buf.into();
-    let (blocks, tail) = bytes.into_chunks();
-    if !tail.is_empty() {
-        panic!("Download corrupted, cannot decrypt");
-    }
-    dec.decrypt_blocks_inout_mut(blocks);
-
-    // Handle padding removal on the very last chunk
-    if is_last {
-        let last_byte = *buf.last().unwrap();
-        let pad_len = last_byte as usize;
-        if pad_len > 0 && pad_len <= 16 {
-            return buf.len().saturating_sub(pad_len);
-        }
-    }
-    buf.len()
-}
-
 fn main() {
     let args = Cli::parse();
 
@@ -216,23 +100,22 @@ fn main() {
 
             client.fetch_binary_info(&version, &args.model, &args.region, &imei);
 
-            let mut decrypt = false;
-            let default_name = if client.info.filename.ends_with(".enc4") {
-                decrypt = true;
-                client.info.filename.replace(".enc4", "")
-            } else {
-                client.info.filename.clone()
-            };
+            let default_name = client
+                .info
+                .filename
+                .strip_suffix(".enc4")
+                .unwrap_or(client.info.filename.as_str());
 
             let final_out = match (out_file, out_dir) {
                 (Some(name), _) => name,
                 (None, Some(dir)) => format!("{}/{}", dir, default_name),
-                _ => default_name,
+                _ => default_name.to_string(),
             };
 
             println!("Downloading {} to {}", client.info.filename, final_out);
 
             let file = OpenOptions::new()
+                .read(true)
                 .write(true)
                 .create(true)
                 .truncate(true)
@@ -242,9 +125,11 @@ fn main() {
             // Pre-allocate file
             file.set_len(client.info.size)
                 .expect("Cannot pre-allocate file");
-            let file = ParallelFile::new(file);
 
-            let chunk_size = (client.info.size / args.threads / 16) * 16;
+            let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
+
+            // Round up to the nearest 16 byte boundary
+            let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
 
             let pb = ProgressBar::new(client.info.size)
                 .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
@@ -253,7 +138,8 @@ fn main() {
             client.init_download();
 
             thread::scope(|s| {
-                for i in 0..args.threads {
+                for (i, chunk) in map.chunks_mut(chunk_size as usize).enumerate() {
+                    let i = i as u64;
                     let is_last_worker = i == args.threads - 1;
 
                     let start = i * chunk_size;
@@ -261,55 +147,59 @@ fn main() {
                     let end = if is_last_worker {
                         None
                     } else {
-                        Some((i + 1) * chunk_size - 1)
+                        Some(start + chunk_size - 1)
                     };
 
                     let mut resp = client
                         .download_file(Some(start), end)
                         .expect("Download request failed");
 
-                    let mut decryptor = if decrypt {
-                        Some(Aes128EcbDec::new(client.info.key.as_slice().into()))
-                    } else {
-                        None
-                    };
-
-                    let file = &file;
                     let pb = &pb;
-                    let file_size = client.info.size;
-
+                    let key = client.info.key.as_slice();
                     s.spawn(move || {
-                        let mut buf = [0u8; 65536];
-                        let mut current_pos = start;
+                        let mut dl_pos = 0_usize;
+                        let mut dec_pos = 0_usize;
+                        let mut dec = Aes128EcbDec::new(key.into());
 
                         loop {
-                            let dl_len = fill_buf(&mut resp, &mut buf).expect("Download failed");
-                            if dl_len == 0 {
-                                break;
+                            match resp.read(&mut chunk[dl_pos..]) {
+                                Ok(0) => break, // EOF
+                                Ok(n) => {
+                                    dl_pos += n;
+                                    pb.inc(n as u64);
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                                    continue;
+                                }
+                                Err(e) => panic!("Download failed: {e:?}"),
                             }
 
-                            // Decrypt if required
-                            let write_len = if let Some(dec) = &mut decryptor {
-                                let is_last = current_pos + dl_len as u64 == file_size;
-                                decrypt_bytes(dec, &mut buf[..dl_len], is_last)
-                            } else {
-                                dl_len
-                            };
-
-                            file.write_all_at(&buf[..write_len], current_pos)
-                                .expect("Failed to write to output file");
-                            current_pos += dl_len as u64;
-                            pb.inc(dl_len as u64);
+                            let encrypted = InOutBuf::from(&mut chunk[dec_pos..dl_pos]);
+                            let (blocks, tail) = encrypted.into_chunks();
+                            dec.decrypt_blocks_inout_mut(blocks);
+                            dec_pos = dl_pos - tail.len();
                         }
                     });
-
                     // Wait 100ms between each request
                     thread::sleep(Duration::from_millis(100));
                 }
             });
 
-            // Truncate file if needed
-            file.truncate().expect("Failed to truncate file");
+            let last_byte = *map.last().unwrap();
+            map.flush().ok();
+            drop(map);
+
+            // Handle padding removal if needed
+            if last_byte > 0 && last_byte <= 16 {
+                let file_len = file
+                    .metadata()
+                    .ok()
+                    .map(|m| m.len())
+                    .unwrap_or(client.info.size);
+                file.set_len(file_len - last_byte as u64)
+                    .expect("Failed to truncate file");
+            }
+
             pb.finish();
         }
     }
