@@ -1,0 +1,84 @@
+name: samloader build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Build for Linux
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Build samloader
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install musl-tools
+          rustup update
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --target x86_64-unknown-linux-musl --release
+          tar c -C target/x86_64-unknown-linux-musl/release samloader | \
+            xz --x86 --lzma2 > samloader-linux-x86_64.tar.xz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: samloader-*.tar.xz
+          archive: false
+
+  windows:
+    name: Build for Windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Build samloader
+        run: |
+          rustup update
+          cargo build --release
+          tar c -C target/release samloader.exe | \
+            xz --x86 --lzma2 > samloader-windows-x86_64.tar.xz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: samloader-*.tar.xz
+          archive: false
+
+  macos:
+    name: Build for macOS
+    runs-on: macos-26
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Build samloader
+        run: |
+          rustup update
+          rustup target add x86_64-apple-darwin
+          cargo build --target aarch64-apple-darwin --release
+          cargo build --target x86_64-apple-darwin --release
+          lipo -create -output samloader \
+            target/aarch64-apple-darwin/release/samloader \
+            target/x86_64-apple-darwin/release/samloader
+          codesign -s - samloader
+          tar c samloader | xz --x86 --lzma2 > samloader-macos-universal.tar.xz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: samloader-*.tar.xz
+          archive: false
