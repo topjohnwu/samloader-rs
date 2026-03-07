@@ -1,7 +1,12 @@
 [package]
 name = "samloader"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "Download firmware for Samsung devices"
+repository = "https://github.com/topjohnwu/samloader-rs"
+keywords = ["samsung", "firmware"]
+exclude = [".cargo/**", ".github/**"]
 
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = [

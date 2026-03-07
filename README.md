@@ -17,6 +17,7 @@ Options:
   -s, --serial <SERIAL>    Serial number of the device
   -j, --threads <THREADS>  Number of parallel connections [default: 8]
   -h, --help               Print help
+  -V, --version            Print version
 ```
 
 ## Features

@@ -34,7 +34,7 @@ const PROGRESS_TEMPLATE: &str =
 
 #[derive(Parser)]
 #[command(name = "samloader")]
-#[command(about = "Download firmware for Samsung devices", long_about = None)]
+#[command(about = "Download firmware for Samsung devices", long_about = None, version)]
 struct Cli {
     /// The model name (e.g. SM-S931U1)
     #[arg(short = 'm', long)]
