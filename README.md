@@ -6,16 +6,16 @@ Download firmware for Samsung devices from official Samsung servers.
 Usage: samloader [OPTIONS] --model <MODEL> --region <REGION> <COMMAND>
 
 Commands:
-  download
-  check
+  download  Download the latest firmware
+  check     Check the latest version
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -m, --model <MODEL>
-  -r, --region <REGION>
-  -i, --imei <IMEI>
-  -s, --serial <SERIAL>
-  -t, --threads <THREADS>  [default: 8]
+  -m, --model <MODEL>      The model name (e.g. SM-S931U1)
+  -r, --region <REGION>    Region CSC code (e.g. XAA)
+  -i, --imei <IMEI>        IMEI number of the device, or an 8 digit TAC
+  -s, --serial <SERIAL>    Serial number of the device
+  -j, --threads <THREADS>  Number of parallel connections [default: 8]
   -h, --help               Print help
 ```
 

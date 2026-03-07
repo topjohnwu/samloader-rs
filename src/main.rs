@@ -36,19 +36,24 @@ const PROGRESS_TEMPLATE: &str =
 #[command(name = "samloader")]
 #[command(about = "Download firmware for Samsung devices", long_about = None)]
 struct Cli {
+    /// The model name (e.g. SM-S931U1)
     #[arg(short = 'm', long)]
     model: String,
 
+    /// Region CSC code (e.g. XAA)
     #[arg(short = 'r', long)]
     region: String,
 
+    /// IMEI number of the device, or an 8 digit TAC
     #[arg(short = 'i', long)]
     imei: Option<String>,
 
+    /// Serial number of the device
     #[arg(short = 's', long)]
     serial: Option<String>,
 
-    #[arg(short = 't', long, default_value_t = 8)]
+    /// Number of parallel connections
+    #[arg(short = 'j', long, default_value_t = 8)]
     threads: u64,
 
     #[command(subcommand)]
@@ -57,12 +62,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Download the latest firmware
     Download {
         #[arg(short = 'O', long)]
         out_dir: Option<String>,
         #[arg(short = 'o', long)]
         out_file: Option<String>,
     },
+    /// Check the latest version
     Check,
 }
 
