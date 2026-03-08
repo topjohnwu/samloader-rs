@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{DeviceId, auth, imei, xml};
+use crate::{auth, xml};
 use md5::{Digest, Md5};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[derive(Default)]
 pub struct FusClient {
@@ -31,6 +30,7 @@ pub struct FusClient {
 
 #[derive(Default)]
 pub struct BinaryInform {
+    pub version: String,
     pub filename: String,
     pub path: String,
     pub size: u64,
@@ -45,6 +45,7 @@ impl BinaryInform {
         let key = xml::getlogiccheck(&fw_ver, &logic_val);
 
         Some(Self {
+            version: fw_ver,
             filename: kv.remove("BINARY_NAME").unwrap(),
             path: kv.remove("MODEL_PATH").unwrap(),
             size,
@@ -61,47 +62,22 @@ impl FusClient {
         client
     }
 
-    pub fn fetch_binary_info(&mut self, ver: &str, model: &str, region: &str, imei: &DeviceId) {
-        let kv: HashMap<String, String>;
+    pub fn fetch_binary_info(&mut self, model: &str, region: &str) {
+        let req_xml = xml::binary_inform_req_xml(model, region);
 
-        match imei {
-            DeviceId::Imei(s) | DeviceId::Serial(s) => {
-                let req_xml = xml::binary_inform_req_xml(ver, model, region, s, &self.nonce);
+        let xml = self
+            .make_req("NF_DownloadBinaryInform.do", &req_xml)
+            .expect("Info request failed");
 
-                let xml = self
-                    .make_req("NF_DownloadBinaryInform.do", &req_xml)
-                    .expect("Info request failed");
-
-                kv = xml::parse_xml_data(&xml).expect("Info request invalid, maybe invalid IMEI?");
-            }
-            DeviceId::Tac(tac) => loop {
-                let rand_imei = imei::generate_random_imei(tac);
-                let req_xml =
-                    xml::binary_inform_req_xml(ver, model, region, &rand_imei, &self.nonce);
-
-                let xml = self
-                    .make_req("NF_DownloadBinaryInform.do", &req_xml)
-                    .expect("Info request failed");
-
-                match xml::parse_xml_data(&xml) {
-                    None => {
-                        std::thread::sleep(Duration::from_millis(250));
-                    }
-                    Some(data) => {
-                        println!("Generated valid IMEI: {rand_imei}");
-                        kv = data;
-                        break;
-                    }
-                }
-            },
-        }
+        let kv = xml::parse_xml_data(&xml).expect("Info request invalid");
 
         self.info = BinaryInform::new(kv).expect("Info request invalid");
     }
 
     fn make_req(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
         let auth_header_val = format!(
-            "FUS nonce=\"\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
+            "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
+            self.encnonce,
             self.auth
         );
 
@@ -138,8 +114,9 @@ impl FusClient {
             if cookie_str.contains("JSESSIONID") {
                 let parts: Vec<&str> = cookie_str.split(';').collect();
                 for part in parts {
-                    if part.trim().starts_with("JSESSIONID=") {
-                        self.sessid = part.trim().split('=').nth(1).unwrap().to_string();
+                    let part = part.trim();
+                    if part.starts_with("JSESSIONID=") || part.starts_with("JSESSIONID_SVR=") {
+                        self.sessid = part.split('=').nth(1).unwrap().to_string();
                     }
                 }
             }

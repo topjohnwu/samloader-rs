@@ -13,8 +13,6 @@ Commands:
 Options:
   -m, --model <MODEL>      The model name (e.g. SM-S931U1)
   -r, --region <REGION>    Region CSC code (e.g. XAA)
-  -i, --imei <IMEI>        IMEI number of the device, or an 8 digit TAC
-  -s, --serial <SERIAL>    Serial number of the device
   -j, --threads <THREADS>  Number of parallel connections [default: 8]
   -h, --help               Print help
   -V, --version            Print version
