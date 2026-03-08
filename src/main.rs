@@ -14,8 +14,6 @@
 
 mod auth;
 mod fusclient;
-mod imei;
-mod versionfetch;
 mod xml;
 
 use aes::cipher::inout::InOutBuf;
@@ -44,14 +42,6 @@ struct Cli {
     #[arg(short = 'r', long)]
     region: String,
 
-    /// IMEI number of the device, or an 8 digit TAC
-    #[arg(short = 'i', long)]
-    imei: Option<String>,
-
-    /// Serial number of the device
-    #[arg(short = 's', long)]
-    serial: Option<String>,
-
     /// Number of parallel connections
     #[arg(short = 'j', long, default_value_t = 8)]
     threads: u64,
@@ -73,39 +63,20 @@ enum Commands {
     Check,
 }
 
-pub enum DeviceId {
-    Imei(String),
-    Tac(String),
-    Serial(String),
-}
-
 fn main() {
     let args = Cli::parse();
 
-    let imei = match (args.imei, args.serial) {
-        (Some(imei), _) => {
-            if imei.len() == 8 {
-                DeviceId::Tac(imei)
-            } else {
-                DeviceId::Imei(imei)
-            }
-        }
-        (None, Some(serial)) => DeviceId::Serial(serial),
-        _ => panic!("IMEI or Serial required (use -i or -s)"),
-    };
-
     match args.command {
         Commands::Check => {
-            let ver = versionfetch::getlatestver(&args.model, &args.region);
-            println!("{}", ver);
+            let mut client = fusclient::FusClient::new();
+            client.fetch_binary_info(&args.model, &args.region);
+            println!("{}", client.info.version);
         }
         Commands::Download { out_dir, out_file } => {
-            let version = versionfetch::getlatestver(&args.model, &args.region);
-            println!("Firmware Version: {}", version);
-
             let mut client = fusclient::FusClient::new();
+            client.fetch_binary_info(&args.model, &args.region);
 
-            client.fetch_binary_info(&version, &args.model, &args.region, &imei);
+            println!("Firmware Version: {}", client.info.version);
 
             let default_name = client
                 .info
