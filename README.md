@@ -25,6 +25,16 @@ Options:
 - Samsung server throttles the download speed per connection. This tool downloads the firmware with multiple connections (default: 8) to fully utilize your network bandwidth.
 - Decryption happens on-the-fly. There are no separate download and decryption steps.
 
+## Install
+
+If you have a working Rust toolchain installed, you can simply install with the following command:
+
+```bash
+cargo install samloader
+```
+
+You can also download the prebuilt executables for Linux, macOS, and Windows in the [latest GitHub release](https://github.com/topjohnwu/samloader-rs/releases/latest).
+
 ## Notes
 
 This is not an officially supported Google product. This project is not
