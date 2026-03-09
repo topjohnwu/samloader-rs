@@ -19,7 +19,6 @@ cbc = "0.1"
 ecb = "0.1"
 md-5 = "0.10"
 base64 = "0.22"
-rand = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 roxmltree = "0.21"
 indicatif = "0.18"

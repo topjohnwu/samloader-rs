@@ -27,10 +27,7 @@ pub fn getlogiccheck(inp: &str, nonce: &str) -> String {
     out
 }
 
-pub fn binary_inform_req_xml(
-    model: &str,
-    region: &str,
-) -> String {
+pub fn binary_inform_req_xml(model: &str, region: &str) -> String {
     format!(
         r#"<FUSMsg>
 <FUSHdr><ProtoVer>1.0</ProtoVer></FUSHdr>

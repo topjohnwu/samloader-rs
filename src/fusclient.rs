@@ -77,8 +77,7 @@ impl FusClient {
     fn make_req(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
         let auth_header_val = format!(
             "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-            self.encnonce,
-            self.auth
+            self.encnonce, self.auth
         );
 
         let mut headers = HeaderMap::new();
