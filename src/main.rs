@@ -55,7 +55,7 @@ struct Cli {
 enum Commands {
     /// Download the latest firmware
     Download {
-        #[arg(short = 'O', long)]
+        #[arg(short = 'd', long)]
         out_dir: Option<String>,
         #[arg(short = 'o', long)]
         out_file: Option<String>,
