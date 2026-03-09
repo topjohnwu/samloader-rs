@@ -67,25 +67,17 @@ impl FusClient {
         // Initialize nonce
         let resp = client.make_req("NF_DownloadGenerateNonce.do", "")?;
 
-        if let Some(nonce_header) = resp.headers().get("NONCE") {
-            let nonce_str = nonce_header.to_str().unwrap_or("").to_string();
-            client.encnonce = nonce_str;
+        if let Some(nonce) = resp.headers().get("NONCE").and_then(|n| n.to_str().ok()) {
+            client.encnonce = nonce.to_string();
             client.nonce = auth::decryptnonce(&client.encnonce);
             client.auth = auth::getauth(&client.nonce);
         }
 
-        if let Some(cookie) = resp.headers().get("SET-COOKIE") {
-            let cookie_str = cookie.to_str().unwrap_or("");
-            if cookie_str.contains("JSESSIONID") {
-                let parts: Vec<&str> = cookie_str.split(';').collect();
-                for part in parts {
-                    let part = part.trim();
-                    if part.starts_with("JSESSIONID=") || part.starts_with("JSESSIONID_SVR=") {
-                        client.sessid = part.split('=').nth(1).unwrap().to_string();
-                    }
-                }
-            }
-        }
+        client.sessid = resp
+            .cookies()
+            .find(|c| c.name().starts_with("JSESSIONID"))
+            .map(|c| c.value().to_string())
+            .unwrap_or_default();
 
         Ok(client)
     }
