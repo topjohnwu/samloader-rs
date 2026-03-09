@@ -15,16 +15,15 @@
 use crate::{auth, xml};
 use md5::{Digest, Md5};
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use std::collections::HashMap;
 
-#[derive(Default)]
 pub struct FusClient {
     client: Client,
-    pub auth: String,
-    pub sessid: String,
-    pub nonce: String,
-    pub encnonce: String,
+    auth: String,
+    sessid: String,
+    nonce: String,
+    encnonce: String,
     pub info: BinaryInform,
 }
 
@@ -46,8 +45,8 @@ impl BinaryInform {
 
         Some(Self {
             version: fw_ver,
-            filename: kv.remove("BINARY_NAME").unwrap(),
-            path: kv.remove("MODEL_PATH").unwrap(),
+            filename: kv.remove("BINARY_NAME")?,
+            path: kv.remove("MODEL_PATH")?,
             size,
             key: Md5::digest(key.as_bytes()).to_vec(),
         })
@@ -55,11 +54,40 @@ impl BinaryInform {
 }
 
 impl FusClient {
-    pub fn new() -> Self {
-        let mut client = FusClient::default();
+    pub fn new() -> reqwest::Result<Self> {
+        let mut client = FusClient {
+            client: Default::default(),
+            auth: Default::default(),
+            sessid: Default::default(),
+            nonce: Default::default(),
+            encnonce: Default::default(),
+            info: Default::default(),
+        };
+
         // Initialize nonce
-        let _ = client.make_req("NF_DownloadGenerateNonce.do", "");
-        client
+        let resp = client.make_req("NF_DownloadGenerateNonce.do", "")?;
+
+        if let Some(nonce_header) = resp.headers().get("NONCE") {
+            let nonce_str = nonce_header.to_str().unwrap_or("").to_string();
+            client.encnonce = nonce_str;
+            client.nonce = auth::decryptnonce(&client.encnonce);
+            client.auth = auth::getauth(&client.nonce);
+        }
+
+        if let Some(cookie) = resp.headers().get("SET-COOKIE") {
+            let cookie_str = cookie.to_str().unwrap_or("");
+            if cookie_str.contains("JSESSIONID") {
+                let parts: Vec<&str> = cookie_str.split(';').collect();
+                for part in parts {
+                    let part = part.trim();
+                    if part.starts_with("JSESSIONID=") || part.starts_with("JSESSIONID_SVR=") {
+                        client.sessid = part.split('=').nth(1).unwrap().to_string();
+                    }
+                }
+            }
+        }
+
+        Ok(client)
     }
 
     pub fn fetch_binary_info(&mut self, model: &str, region: &str) {
@@ -67,24 +95,21 @@ impl FusClient {
 
         let xml = self
             .make_req("NF_DownloadBinaryInform.do", &req_xml)
+            .and_then(Response::text)
             .expect("Info request failed");
 
         let kv = xml::parse_xml_data(&xml).expect("Info request invalid");
-
         self.info = BinaryInform::new(kv).expect("Info request invalid");
     }
 
-    fn make_req(&mut self, path: &str, data: &str) -> Result<String, reqwest::Error> {
-        let auth_header_val = format!(
+    fn make_headers(&self) -> HeaderMap {
+        let auth_val = format!(
             "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
             self.encnonce, self.auth
         );
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth_header_val).unwrap(),
-        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
         headers.insert(USER_AGENT, HeaderValue::from_static("Kies2.0_FUS"));
         if !self.sessid.is_empty() {
             headers.insert(
@@ -92,39 +117,20 @@ impl FusClient {
                 HeaderValue::from_str(&format!("JSESSIONID={}", self.sessid)).unwrap(),
             );
         }
-
-        let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
-        let resp = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .body(data.to_string())
-            .send()?;
-
-        if let Some(nonce_header) = resp.headers().get("NONCE") {
-            let nonce_str = nonce_header.to_str().unwrap().to_string();
-            self.encnonce = nonce_str;
-            self.nonce = auth::decryptnonce(&self.encnonce);
-            self.auth = auth::getauth(&self.nonce);
-        }
-
-        if let Some(cookie) = resp.headers().get("SET-COOKIE") {
-            let cookie_str = cookie.to_str().unwrap();
-            if cookie_str.contains("JSESSIONID") {
-                let parts: Vec<&str> = cookie_str.split(';').collect();
-                for part in parts {
-                    let part = part.trim();
-                    if part.starts_with("JSESSIONID=") || part.starts_with("JSESSIONID_SVR=") {
-                        self.sessid = part.split('=').nth(1).unwrap().to_string();
-                    }
-                }
-            }
-        }
-
-        resp.error_for_status()?.text()
+        headers
     }
 
-    pub fn init_download(&mut self) {
+    fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
+        let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
+        self.client
+            .post(&url)
+            .headers(self.make_headers())
+            .body(data.to_string())
+            .send()?
+            .error_for_status()
+    }
+
+    pub fn init_download(&self) {
         let init_xml = xml::binary_init_req_xml(&self.info.filename, &self.nonce);
         self.make_req("NF_DownloadBinaryInitForMass.do", &init_xml)
             .expect("Download init failed");
@@ -135,25 +141,18 @@ impl FusClient {
         start: Option<u64>,
         end: Option<u64>,
     ) -> Result<Response, reqwest::Error> {
-        let auth_val = format!(
-            "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-            self.encnonce, self.auth
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
-        headers.insert(USER_AGENT, HeaderValue::from_static("Kies2.0_FUS"));
+        let mut headers = self.make_headers();
         match (start, end) {
             (Some(s), Some(e)) => headers.insert(
-                "Range",
+                RANGE,
                 HeaderValue::from_str(&format!("bytes={}-{}", s, e)).unwrap(),
             ),
             (None, Some(e)) => headers.insert(
-                "Range",
+                RANGE,
                 HeaderValue::from_str(&format!("bytes=0-{}", e)).unwrap(),
             ),
             (Some(s), None) => headers.insert(
-                "Range",
+                RANGE,
                 HeaderValue::from_str(&format!("bytes={}-", s)).unwrap(),
             ),
             _ => None,

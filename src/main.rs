@@ -19,6 +19,7 @@ mod xml;
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
+use fusclient::FusClient;
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
@@ -68,12 +69,12 @@ fn main() {
 
     match args.command {
         Commands::Check => {
-            let mut client = fusclient::FusClient::new();
+            let mut client = FusClient::new().expect("Unable to establish FusClient");
             client.fetch_binary_info(&args.model, &args.region);
             println!("{}", client.info.version);
         }
         Commands::Download { out_dir, out_file } => {
-            let mut client = fusclient::FusClient::new();
+            let mut client = FusClient::new().expect("Unable to establish FusClient");
             client.fetch_binary_info(&args.model, &args.region);
 
             println!("Firmware Version: {}", client.info.version);
