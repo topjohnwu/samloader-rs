@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use crate::{auth, xml};
+use aes::cipher::KeyInit;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use xml::BinaryInform;
+
+type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 pub struct FusClient {
     client: Client,
@@ -100,11 +103,7 @@ impl FusClient {
             .expect("Download init failed");
     }
 
-    pub fn download_file(
-        &self,
-        start: Option<u64>,
-        end: Option<u64>,
-    ) -> Result<Response, reqwest::Error> {
+    pub fn download_file(&self, start: Option<u64>, end: Option<u64>) -> reqwest::Result<Response> {
         let mut headers = self.make_headers();
         match (start, end) {
             (Some(s), Some(e)) => headers.insert(
@@ -131,5 +130,9 @@ impl FusClient {
             .headers(headers)
             .send()?
             .error_for_status()
+    }
+
+    pub fn get_decryptor(&self) -> Aes128EcbDec {
+        Aes128EcbDec::new(self.info.key.as_slice().into())
     }
 }

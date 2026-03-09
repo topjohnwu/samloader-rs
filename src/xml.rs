@@ -114,7 +114,7 @@ pub struct BinaryInform {
 }
 
 impl BinaryInform {
-    pub fn parse(xml: &str) -> Option<BinaryInform> {
+    pub(crate) fn parse(xml: &str) -> Option<BinaryInform> {
         let mut kv = parse_xml_data(xml)?;
         let size: u64 = kv.get("BINARY_BYTE_SIZE")?.parse().ok()?;
         let fw_ver = kv.remove("LATEST_FW_VERSION")?;

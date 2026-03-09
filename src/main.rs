@@ -12,22 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod auth;
-mod fusclient;
-mod xml;
-
-use aes::cipher::inout::InOutBuf;
-use aes::cipher::{BlockDecryptMut, KeyInit};
 use clap::{Parser, Subcommand};
-use fusclient::FusClient;
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::MmapMut;
+use samloader::FusClient;
+use samloader::aes::cipher::BlockDecryptMut;
+use samloader::aes::cipher::inout::InOutBuf;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
-type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 const PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
@@ -134,11 +129,10 @@ fn main() {
                         .expect("Download request failed");
 
                     let pb = &pb;
-                    let key = client.info.key.as_slice();
+                    let mut dec = client.get_decryptor();
                     s.spawn(move || {
                         let mut dl_pos = 0_usize;
                         let mut dec_pos = 0_usize;
-                        let mut dec = Aes128EcbDec::new(key.into());
 
                         loop {
                             match resp.read(&mut chunk[dl_pos..]) {
