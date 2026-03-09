@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use md5::{Digest, Md5};
 use roxmltree::Document;
 use std::collections::HashMap;
 
-pub fn getlogiccheck(inp: &str, nonce: &str) -> String {
-    if inp.len() < 16 {
-        panic!("getlogiccheck() input too short");
-    }
+fn get_logic_check(inp: &str, nonce: &str) -> String {
     let mut out = String::new();
     for c in nonce.chars() {
         let idx = (c as u32) & 0xf;
@@ -59,7 +57,7 @@ pub fn binary_init_req_xml(filename: &str, nonce: &str) -> String {
     };
     let checkinp = &name_part[start..];
 
-    let logic_check = getlogiccheck(checkinp, nonce);
+    let logic_check = get_logic_check(checkinp, nonce);
 
     format!(
         r#"<FUSMsg>
@@ -74,7 +72,7 @@ pub fn binary_init_req_xml(filename: &str, nonce: &str) -> String {
     )
 }
 
-pub fn parse_xml_data(xml: &str) -> Option<HashMap<String, String>> {
+fn parse_xml_data(xml: &str) -> Option<HashMap<String, String>> {
     let doc = Document::parse(xml).expect("Invalid XML");
 
     let status: i32 = doc
@@ -104,4 +102,31 @@ pub fn parse_xml_data(xml: &str) -> Option<HashMap<String, String>> {
             }
         });
     Some(kv)
+}
+
+#[derive(Default)]
+pub struct BinaryInform {
+    pub version: String,
+    pub filename: String,
+    pub path: String,
+    pub size: u64,
+    pub key: Vec<u8>,
+}
+
+impl BinaryInform {
+    pub fn parse(xml: &str) -> Option<BinaryInform> {
+        let mut kv = parse_xml_data(xml)?;
+        let size: u64 = kv.get("BINARY_BYTE_SIZE")?.parse().ok()?;
+        let fw_ver = kv.remove("LATEST_FW_VERSION")?;
+        let logic_val = kv.remove("LOGIC_VALUE_FACTORY")?;
+        let key = get_logic_check(&fw_ver, &logic_val);
+
+        Some(Self {
+            version: fw_ver,
+            filename: kv.remove("BINARY_NAME")?,
+            path: kv.remove("MODEL_PATH")?,
+            size,
+            key: Md5::digest(key.as_bytes()).to_vec(),
+        })
+    }
 }

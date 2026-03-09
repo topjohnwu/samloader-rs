@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::{auth, xml};
-use md5::{Digest, Md5};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, RANGE, USER_AGENT};
-use std::collections::HashMap;
+use xml::BinaryInform;
 
 pub struct FusClient {
     client: Client,
@@ -25,32 +24,6 @@ pub struct FusClient {
     nonce: String,
     encnonce: String,
     pub info: BinaryInform,
-}
-
-#[derive(Default)]
-pub struct BinaryInform {
-    pub version: String,
-    pub filename: String,
-    pub path: String,
-    pub size: u64,
-    pub key: Vec<u8>,
-}
-
-impl BinaryInform {
-    fn new(mut kv: HashMap<String, String>) -> Option<BinaryInform> {
-        let size: u64 = kv.get("BINARY_BYTE_SIZE")?.parse().ok()?;
-        let fw_ver = kv.remove("LATEST_FW_VERSION")?;
-        let logic_val = kv.remove("LOGIC_VALUE_FACTORY")?;
-        let key = xml::getlogiccheck(&fw_ver, &logic_val);
-
-        Some(Self {
-            version: fw_ver,
-            filename: kv.remove("BINARY_NAME")?,
-            path: kv.remove("MODEL_PATH")?,
-            size,
-            key: Md5::digest(key.as_bytes()).to_vec(),
-        })
-    }
 }
 
 impl FusClient {
@@ -90,8 +63,7 @@ impl FusClient {
             .and_then(Response::text)
             .expect("Info request failed");
 
-        let kv = xml::parse_xml_data(&xml).expect("Info request invalid");
-        self.info = BinaryInform::new(kv).expect("Info request invalid");
+        self.info = BinaryInform::parse(&xml).expect("Info request invalid");
     }
 
     fn make_headers(&self) -> HeaderMap {
