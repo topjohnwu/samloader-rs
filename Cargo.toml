@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "libpit",
+    "heimdall",
+]
+resolver = "2"

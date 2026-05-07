@@ -1,0 +1,15 @@
+[package]
+name = "heimdall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libpit = { path = "../libpit" }
+
+[build-dependencies]
+cc = "1.0"
+pkg-config = "0.3"
+
+[[bin]]
+name = "heimdall"
+path = "src/main.rs"
