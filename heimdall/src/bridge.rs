@@ -12,7 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![no_main]
-
-// Force linking of libpit even if we don't call any of its Rust functions yet.
-extern crate libpit;
+#[cxx::bridge]
+mod ffi {}

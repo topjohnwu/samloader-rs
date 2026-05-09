@@ -1,15 +1,15 @@
 /* Copyright (c) 2010-2017 Benjamin Dobell, Glass Echidna
- 
+
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights
  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  copies of the Software, and to permit persons to whom the Software is
  furnished to do so, subject to the following conditions:
- 
+
  The above copyright notice and this permission notice shall be included in
  all copies or substantial portions of the Software.
- 
+
  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -85,7 +85,7 @@ void Interface::Print(const char *format, ...)
 	fflush(stdout);
 
 	va_end(args);
-	
+
 }
 
 void Interface::PrintWarning(const char *format, ...)
@@ -203,28 +203,28 @@ void Interface::PrintDeviceDetectionFailed(void)
 	Interface::PrintError("Failed to detect compatible download-mode device.\n");
 }
 
-void Interface::PrintPit(const PitData *pitData)
+void Interface::PrintPit(const PitData& pitData)
 {
 	Interface::Print("--- PIT Header ---\n");
-	Interface::Print("Entry Count: %d\n", pitData->GetEntryCount());
-	Interface::Print("Unknown string: %s\n", pitData->GetComTar2());
-	Interface::Print("CPU/bootloader tag: %s\n", pitData->GetCpuBlId());
-	Interface::Print("Logic unit count: %d\n", pitData->GetLUCount());
+	Interface::Print("Entry Count: %d\n", pitData.GetEntryCount());
+	Interface::Print("Unknown string: %s\n", pitData.GetComTar2().c_str());
+	Interface::Print("CPU/bootloader tag: %s\n", pitData.GetCpuBlId().c_str());
+	Interface::Print("Logic unit count: %d\n", pitData.GetLUCount());
 
-	for (unsigned int i = 0; i < pitData->GetEntryCount(); i++)
+	for (unsigned int i = 0; i < pitData.GetEntryCount(); i++)
 	{
-		const PitEntry *entry = pitData->GetEntry(i);
+		const PitEntry *entry = pitData.GetEntry(i);
 
 		Interface::Print("\n\n--- Entry #%d ---\n", i);
 		Interface::Print("Binary Type: %d (", entry->GetBinaryType());
 
 		switch (entry->GetBinaryType())
 		{
-			case PitEntry::kBinaryTypeApplicationProcessor:
+			case PitConst::kBinaryTypeApplicationProcessor:
 				Interface::Print("AP");
 				break;
 
-			case PitEntry::kBinaryTypeCommunicationProcessor:
+			case PitConst::kBinaryTypeCommunicationProcessor:
 				Interface::Print("CP");
 				break;
 
@@ -239,23 +239,23 @@ void Interface::PrintPit(const PitData *pitData)
 
 		switch (entry->GetDeviceType())
 		{
-			case PitEntry::kDeviceTypeOneNand:
+			case PitConst::kDeviceTypeOneNand:
 				Interface::Print("OneNAND");
 				break;
 
-			case PitEntry::kDeviceTypeFile:
+			case PitConst::kDeviceTypeFile:
 				Interface::Print("File/FAT");
 				break;
 
-			case PitEntry::kDeviceTypeMMC:
+			case PitConst::kDeviceTypeMMC:
 				Interface::Print("MMC");
 				break;
 
-			case PitEntry::kDeviceTypeAll:
+			case PitConst::kDeviceTypeAll:
 				Interface::Print("All (?)");
 				break;
 
-			case PitEntry::kDeviceTypeUFS:
+			case PitConst::kDeviceTypeUFS:
 				Interface::Print("UFS");
 				break;
 
@@ -270,13 +270,13 @@ void Interface::PrintPit(const PitData *pitData)
 
 		Interface::Print("Attributes: %d (", entry->GetAttributes());
 
-		if (entry->GetAttributes() & PitEntry::kAttributeSTL)
+		if (entry->GetAttributes() & PitConst::kAttributeSTL)
 			Interface::Print("STL ");
 
-		/*if (entry->GetAttributes() & PitEntry::kAttributeBML)
+		/*if (entry->GetAttributes() & PitConst::kAttributeBML)
 			Interface::Print("BML ");*/
 
-		if (entry->GetAttributes() & PitEntry::kAttributeWrite)
+		if (entry->GetAttributes() & PitConst::kAttributeWrite)
 			Interface::Print("Read/Write");
 		else
 			Interface::Print("Read-Only");
@@ -289,16 +289,16 @@ void Interface::PrintPit(const PitData *pitData)
 		{
 			Interface::Print(" (");
 
-			if (entry->GetUpdateAttributes() & PitEntry::kUpdateAttributeFota)
+			if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeFota)
 			{
-				if (entry->GetUpdateAttributes() & PitEntry::kUpdateAttributeSecure)
+				if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeSecure)
 					Interface::Print("FOTA, Secure");
 				else
 					Interface::Print("FOTA");
 			}
 			else
 			{
-				if (entry->GetUpdateAttributes() & PitEntry::kUpdateAttributeSecure)
+				if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeSecure)
 					Interface::Print("Secure");
 			}
 
@@ -315,9 +315,9 @@ void Interface::PrintPit(const PitData *pitData)
 		Interface::Print("File Offset (Obsolete): %d\n", entry->GetFileOffset());
 		Interface::Print("File Size (Obsolete): %d\n", entry->GetFileSize());
 
-		Interface::Print("Partition Name: %s\n", entry->GetPartitionName());
-		Interface::Print("Flash Filename: %s\n", entry->GetFlashFilename());
-		Interface::Print("FOTA Filename: %s\n", entry->GetFotaFilename());
+		Interface::Print("Partition Name: %s\n", entry->GetPartitionName().c_str());
+		Interface::Print("Flash Filename: %s\n", entry->GetFlashFilename().c_str());
+		Interface::Print("FOTA Filename: %s\n", entry->GetFotaFilename().c_str());
 	}
 
 	Interface::Print("\n");

@@ -2,9 +2,15 @@
 name = "libpit"
 version = "0.1.0"
 edition = "2021"
+links = "pit"
 
 [build-dependencies]
 cc = "1.0"
+cxx-build = "1.0"
+
+[dependencies]
+cxx = "1.0"
+binrw = "0.14"
 
 [lib]
 path = "src/lib.rs"

@@ -841,7 +841,7 @@ bool BridgeManager::SendPitData(const PitData *pitData) const
 	unsigned char *pitBuffer = new unsigned char[pitBufferSize];
 	memset(pitBuffer, 0, pitBufferSize);
 
-	pitData->Pack(pitBuffer);
+	pitData->Pack({pitBuffer, (size_t)pitBufferSize});
 
 	// Flash pit file
 	SendFilePartPacket *sendFilePartPacket = new SendFilePartPacket(pitBuffer, pitBufferSize);

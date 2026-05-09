@@ -15,14 +15,13 @@
 // limitations under the License.
 
 fn main() {
-    cc::Build::new()
-        .cpp(true)
-        .file("source/libpit.cpp")
-        .include("source")
+    cxx_build::bridge("src/lib.rs")
+        .include("src")
         .std("c++11")
         .compile("pit");
 
     println!("cargo:rustc-link-lib=static=pit");
-    println!("cargo:rerun-if-changed=source/libpit.cpp");
-    println!("cargo:rerun-if-changed=source/libpit.h");
+    println!("cargo:include={}", std::env::var("OUT_DIR").unwrap());
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src/libpit.h");
 }

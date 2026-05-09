@@ -1,15 +1,15 @@
 /* Copyright (c) 2010-2017 Benjamin Dobell, Glass Echidna
- 
+
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights
  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  copies of the Software, and to permit persons to whom the Software is
  furnished to do so, subject to the following conditions:
- 
+
  The above copyright notice and this permission notice shall be included in
  all copies or substantial portions of the Software.
- 
+
  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -145,13 +145,12 @@ int PrintPitAction::Execute(int argc, char **argv)
 	        fread(pitFileBuffer, 1, localPitFileSize, localPitFile);
 		FileClose(localPitFile);
 
-		PitData *pitData = new PitData();
-		pitData->Unpack(pitFileBuffer);
+		auto pitData = new_pit_data();
+		pitData->Unpack({pitFileBuffer, (size_t)localPitFileSize});
 
 		delete [] pitFileBuffer;
 
-		Interface::PrintPit(pitData);
-		delete pitData;
+		Interface::PrintPit(*pitData);
 
 		return (0);
 	}
@@ -167,27 +166,26 @@ int PrintPitAction::Execute(int argc, char **argv)
 			delete bridgeManager;
 			return (1);
 		}
-		
+
 		unsigned char *devicePit;
-		bool success = bridgeManager->DownloadPitFile(&devicePit) != 0;
+		int devicePitSize = bridgeManager->DownloadPitFile(&devicePit);
+		bool success = devicePitSize != 0;
 
 		if (success)
 		{
-			PitData *pitData = new PitData();
+			auto pitData = new_pit_data();
 
-			if (pitData->Unpack(devicePit))
+			if (pitData->Unpack({devicePit, (size_t)devicePitSize}))
 			{
-				Interface::PrintPit(pitData);
+				Interface::PrintPit(*pitData);
 			}
 			else
 			{
 				Interface::PrintError("Failed to unpack device's PIT file!\n");
 				success = false;
 			}
-
-			delete pitData;
 		}
-			
+
 		delete [] devicePit;
 
 		if (!bridgeManager->EndSession(reboot))

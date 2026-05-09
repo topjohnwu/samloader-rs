@@ -5,10 +5,12 @@ edition = "2021"
 
 [dependencies]
 libpit = { path = "../libpit" }
+cxx = "1.0"
 
 [build-dependencies]
 cc = "1.0"
 pkg-config = "0.3"
+cxx-build = "1.0"
 
 [[bin]]
 name = "heimdall"

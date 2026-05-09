@@ -1,15 +1,15 @@
 /* Copyright (c) 2010-2017 Benjamin Dobell, Glass Echidna
- 
+
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights
  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  copies of the Software, and to permit persons to whom the Software is
  furnished to do so, subject to the following conditions:
- 
+
  The above copyright notice and this permission notice shall be included in
  all copies or substantial portions of the Software.
- 
+
  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -255,35 +255,35 @@ static bool flashPitData(BridgeManager *bridgeManager, const PitData *pitData)
 
 static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& partitionFlashInfo)
 {
-	if (partitionFlashInfo.pitEntry->GetBinaryType() == PitEntry::kBinaryTypeCommunicationProcessor) // Modem
+	if (partitionFlashInfo.pitEntry->GetBinaryType() == PitConst::kBinaryTypeCommunicationProcessor) // Modem
 	{
-		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName());
+		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
 		if (bridgeManager->SendFile(partitionFlashInfo.file, EndModemFileTransferPacket::kDestinationModem,
 			partitionFlashInfo.pitEntry->GetDeviceType()))
 		{
-			Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName());
+			Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 			return (true);
 		}
 		else
 		{
-			Interface::PrintError("%s upload failed!\n\n", partitionFlashInfo.pitEntry->GetPartitionName());
+			Interface::PrintError("%s upload failed!\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 			return (false);
 		}
 	}
-	else // partitionFlashInfo.pitEntry->GetBinaryType() == PitEntry::kBinaryTypeApplicationProcessor
+	else // partitionFlashInfo.pitEntry->GetBinaryType() == PitConst::kBinaryTypeApplicationProcessor
 	{
-		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName());
+		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
 		if (bridgeManager->SendFile(partitionFlashInfo.file, EndPhoneFileTransferPacket::kDestinationPhone,
 			partitionFlashInfo.pitEntry->GetDeviceType(), partitionFlashInfo.pitEntry->GetIdentifier()))
 		{
-			Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName());
+			Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 			return (true);
 		}
 		else
 		{
-			Interface::PrintError("%s upload failed!\n\n", partitionFlashInfo.pitEntry->GetPartitionName());
+			Interface::PrintError("%s upload failed!\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 			return (false);
 		}
 	}
@@ -325,12 +325,12 @@ static bool flashPartitions(BridgeManager *bridgeManager, const vector<Partition
 				}
 			}
 
-			if (part->GetDeviceType() != PitEntry::kDeviceTypeMMC &&
-			    part->GetDeviceType() != PitEntry::kDeviceTypeUFS)
+			if (part->GetDeviceType() != PitConst::kDeviceTypeMMC &&
+			    part->GetDeviceType() != PitConst::kDeviceTypeUFS)
 				continue;
 			unsigned long partitionSize = part->GetBlockCount();
 			unsigned int blockSize = 512;
-			if (part->GetDeviceType() == PitEntry::kDeviceTypeUFS)
+			if (part->GetDeviceType() == PitConst::kDeviceTypeUFS)
 				blockSize = 4096;
 			if (partitionSize > 0 && it->fileSize > partitionSize*blockSize)
 			{
@@ -381,8 +381,8 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
 		{
 			FileRewind(pitFile);
 
-			localPitData = new PitData();
-			localPitData->Unpack(pitFileBuffer);
+			localPitData = new_pit_data().into_raw();
+			localPitData->Unpack({pitFileBuffer, (size_t)localPitFileSize});
 
 			delete [] pitFileBuffer;
 		}
@@ -404,20 +404,20 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
 	{
 		// If we're not repartitioning then we need to retrieve the device's PIT file and unpack it.
 		unsigned char *pitFileBuffer;
-
-		if (bridgeManager->DownloadPitFile(&pitFileBuffer) == 0)
+		int devicePitFileSize = bridgeManager->DownloadPitFile(&pitFileBuffer);
+		if (devicePitFileSize == 0)
 			return (nullptr);
 
-		pitData = new PitData();
-		pitData->Unpack(pitFileBuffer);
+		pitData = new_pit_data().into_raw();
+		pitData->Unpack({pitFileBuffer, (size_t)devicePitFileSize});
 
 		delete [] pitFileBuffer;
 
 		if (localPitData != nullptr)
 		{
 			// The user has specified a PIT without repartitioning, we should verify the local and device PIT data match!
-			bool pitsMatch = pitData->Matches(localPitData);
-			delete localPitData;
+			bool pitsMatch = pitData->Matches(*localPitData);
+			rust::Box<PitData>::from_raw(const_cast<PitData *>(localPitData));
 
 			if (!pitsMatch)
 			{
@@ -620,7 +620,7 @@ int FlashAction::Execute(int argc, char **argv)
 		else
 			success = false;
 
-		delete pitData;
+		rust::Box<PitData>::from_raw(const_cast<PitData *>(pitData));
 	}
 
 	if (!bridgeManager->EndSession(reboot))

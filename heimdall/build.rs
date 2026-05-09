@@ -15,8 +15,8 @@
 // limitations under the License.
 
 use std::env;
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn try_compile(build: &cc::Build, code: &str, extra_flags: &[&str]) -> bool {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -24,11 +24,14 @@ fn try_compile(build: &cc::Build, code: &str, extra_flags: &[&str]) -> bool {
     std::fs::write(&test_file, code).unwrap();
 
     let mut cmd = build.get_compiler().to_command();
-    
+
     // The compiler command from cc might already have some flags.
     // We want to add -c and -o.
-    cmd.arg("-c").arg(&test_file).arg("-o").arg(out_dir.join("test.o"));
-    
+    cmd.arg("-c")
+        .arg(&test_file)
+        .arg("-o")
+        .arg(out_dir.join("test.o"));
+
     for flag in extra_flags {
         cmd.arg(flag);
     }
@@ -58,12 +61,18 @@ fn check_lfs(build: &mut cc::Build) {
         extra_flags.extend(flags_raw.split_whitespace().map(|s| s.to_string()));
     }
 
-    if !extra_flags.is_empty() && try_compile(build, test_code, &extra_flags.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
+    if !extra_flags.is_empty()
+        && try_compile(
+            build,
+            test_code,
+            &extra_flags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )
+    {
         for flag in extra_flags {
             if flag.starts_with("-D") {
                 let part = &flag[2..];
                 if let Some(pos) = part.find('=') {
-                    build.define(&part[..pos], Some(&part[pos+1..]));
+                    build.define(&part[..pos], Some(&part[pos + 1..]));
                 } else {
                     build.define(part, None);
                 }
@@ -120,7 +129,7 @@ fn check_fseeko(build: &mut cc::Build) {
 }
 
 fn main() {
-    let mut build = cc::Build::new();
+    let mut build = cxx_build::bridge("src/bridge.rs");
     build.cpp(true);
     build.std("c++11");
 
@@ -146,7 +155,12 @@ fn main() {
     }
 
     build.include("source");
-    build.include("../libpit/source");
+    build.include("../libpit/src");
+
+    // libpit exported includes (cxx bridge headers)
+    if let Ok(pit_include) = env::var("DEP_PIT_INCLUDE") {
+        build.include(pit_include);
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
@@ -161,15 +175,16 @@ fn main() {
     }
 
     // libusb
-    match pkg_config::Config::new().atleast_version("1.0").probe("libusb-1.0") {
+    match pkg_config::Config::new()
+        .atleast_version("1.0")
+        .probe("libusb-1.0")
+    {
         Ok(lib) => {
             for path in lib.include_paths {
                 build.include(path);
             }
         }
         Err(e) => {
-            // On some systems libusb-1.0 might not be in pkg-config but available.
-            // Or we might want to fail. The original CMake required it.
             panic!("Could not find libusb-1.0: {}", e);
         }
     }
@@ -186,5 +201,5 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source);
     }
     println!("cargo:rerun-if-changed=source/Heimdall.h");
-    println!("cargo:rerun-if-changed=../libpit/source/libpit.h");
+    println!("cargo:rerun-if-changed=../libpit/src/libpit.h");
 }
