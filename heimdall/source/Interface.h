@@ -47,8 +47,6 @@ namespace Heimdall
 
                 void PrintDeviceDetectionFailed(void);
 
-                void PrintPit(const libpit::PitData& pitData);
-
                 void SetStdoutErrors(bool enabled);
         }
 }

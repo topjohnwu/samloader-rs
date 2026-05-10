@@ -192,6 +192,10 @@ impl PitEntry {
 }
 
 impl PitData {
+    fn new_box() -> Box<Self> {
+        Box::new(Self::default())
+    }
+
     pub fn new(data: &[u8]) -> Result<Self, binrw::Error> {
         if data.len() < 8 {
             return Err(binrw::Error::Io(std::io::Error::new(
@@ -287,10 +291,73 @@ impl PitData {
     fn matches(&self, other: &PitData) -> bool {
         self == other
     }
-}
 
-pub fn new_pit_data() -> Box<PitData> {
-    Box::new(PitData::default())
+    pub fn print(&self) {
+        println!("--- PIT Header ---");
+        println!("Entry Count: {}", self.entries.len());
+        println!("Unknown string: {}", self.com_tar2);
+        println!("CPU/bootloader tag: {}", self.cpu_bl_id);
+        println!("Logic unit count: {}", self.lu_count);
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            println!("\n\n--- Entry #{} ---", i);
+
+            let binary_type_str = match entry.binary_type {
+                0 => "AP",
+                1 => "CP",
+                _ => "Unknown",
+            };
+            println!("Binary Type: {} ({})", entry.binary_type, binary_type_str);
+
+            let device_type_str = match entry.device_type {
+                0 => "OneNAND",
+                1 => "File/FAT",
+                2 => "MMC",
+                3 => "All (?)",
+                8 => "UFS",
+                _ => "Unknown",
+            };
+            println!("Device Type: {} ({})", entry.device_type, device_type_str);
+
+            println!("Identifier: {}", entry.identifier);
+
+            let mut attr_str = String::new();
+            if entry.attributes & 2 != 0 { // Attribute::STL
+                attr_str.push_str("STL ");
+            }
+            if entry.attributes & 1 != 0 { // Attribute::Write
+                attr_str.push_str("Read/Write");
+            } else {
+                attr_str.push_str("Read-Only");
+            }
+            println!("Attributes: {} ({})", entry.attributes, attr_str);
+
+            let mut update_attr_str = String::new();
+            if entry.update_attributes != 0 {
+                if entry.update_attributes & 1 != 0 { // UpdateAttribute::Fota
+                    if entry.update_attributes & 2 != 0 { // UpdateAttribute::Secure
+                        update_attr_str.push_str(" (FOTA, Secure)");
+                    } else {
+                        update_attr_str.push_str(" (FOTA)");
+                    }
+                } else {
+                    if entry.update_attributes & 2 != 0 {
+                        update_attr_str.push_str(" (Secure)");
+                    }
+                }
+            }
+            println!("Update Attributes: {}{}", entry.update_attributes, update_attr_str);
+
+            println!("Partition Block Size/Offset: {}", entry.block_size_or_offset);
+            println!("Partition Block Count: {}", entry.block_count);
+            println!("File Offset (Obsolete): {}", entry.file_offset);
+            println!("File Size (Obsolete): {}", entry.file_size);
+            println!("Partition Name: {}", entry.partition_name);
+            println!("Flash Filename: {}", entry.flash_filename);
+            println!("FOTA Filename: {}", entry.fota_filename);
+        }
+        println!();
+    }
 }
 
 #[cxx::bridge(namespace = "libpit")]
@@ -390,8 +457,9 @@ pub mod ffi {
 
         type PitData;
 
-        #[cxx_name = "new_pit_data"]
-        fn new_pit_data() -> Box<PitData>;
+        #[Self = "PitData"]
+        #[cxx_name = "make"]
+        fn new_box() -> Box<PitData>;
 
         #[cxx_name = "GetEntryCount"]
         fn get_entry_count(self: &PitData) -> u32;
@@ -420,5 +488,8 @@ pub mod ffi {
 
         #[cxx_name = "Matches"]
         fn matches(self: &PitData, other: &PitData) -> bool;
+
+        #[cxx_name = "Print"]
+        fn print(self: &PitData);
     }
 }

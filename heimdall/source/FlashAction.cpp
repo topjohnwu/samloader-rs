@@ -357,7 +357,7 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
                 {
                         FileRewind(pitFile);
 
-                        localPitData = new_pit_data().into_raw();
+                        localPitData = PitData::make().into_raw();
                         localPitData->Unpack({pitFileBuffer, (size_t)localPitFileSize});
 
                         delete [] pitFileBuffer;
@@ -379,15 +379,12 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
         else
         {
                 // If we're not repartitioning then we need to retrieve the device's PIT file and unpack it.
-                unsigned char *pitFileBuffer = nullptr;
-                int devicePitFileSize = bridgeManager->DownloadPitFile(&pitFileBuffer);
-                if (devicePitFileSize == 0)
+                std::vector<unsigned char> pitFileBuffer = bridgeManager->DownloadPitFile();
+                if (pitFileBuffer.empty())
                         return (nullptr);
 
-                pitData = new_pit_data().into_raw();
-                pitData->Unpack({pitFileBuffer, (size_t)devicePitFileSize});
-
-                delete [] pitFileBuffer;
+                pitData = PitData::make().into_raw();
+                pitData->Unpack({pitFileBuffer.data(), pitFileBuffer.size()});
 
                 if (localPitData != nullptr)
                 {

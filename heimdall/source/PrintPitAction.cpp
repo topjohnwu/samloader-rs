@@ -79,12 +79,12 @@ int Heimdall::action_print_pit(rust::Str file, bool no_reboot, bool resume, bool
                 fread(pitFileBuffer, 1, localPitFileSize, localPitFile);
                 FileClose(localPitFile);
 
-                auto pitData = new_pit_data();
+                auto pitData = PitData::make();
                 pitData->Unpack({pitFileBuffer, (size_t)localPitFileSize});
 
                 delete [] pitFileBuffer;
 
-                Interface::PrintPit(*pitData);
+                pitData->Print();
 
                 return (0);
         }
@@ -107,11 +107,11 @@ int Heimdall::action_print_pit(rust::Str file, bool no_reboot, bool resume, bool
 
                 if (success)
                 {
-                        auto pitData = new_pit_data();
+                        auto pitData = PitData::make();
 
                         if (pitData->Unpack({devicePit, (size_t)devicePitSize}))
                         {
-                                Interface::PrintPit(*pitData);
+                                pitData->Print();
                         }
                         else
                         {
