@@ -129,7 +129,7 @@ fn check_fseeko(build: &mut cc::Build) {
 }
 
 fn main() {
-    let mut build = cxx_build::bridge("src/bridge.rs");
+    let mut build = cxx_build::bridges(["src/bridge.rs", "../libpit/src/lib.rs"]);
     build.cpp(true);
     build.std("c++11");
 
@@ -156,11 +156,6 @@ fn main() {
 
     build.include("source");
     build.include("../libpit/src");
-
-    // libpit exported includes (cxx bridge headers)
-    if let Ok(pit_include) = env::var("DEP_PIT_INCLUDE") {
-        build.include(pit_include);
-    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
@@ -201,5 +196,4 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source);
     }
     println!("cargo:rerun-if-changed=source/Heimdall.h");
-    println!("cargo:rerun-if-changed=../libpit/src/libpit.h");
 }

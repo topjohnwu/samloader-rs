@@ -218,13 +218,13 @@ void Interface::PrintPit(const PitData& pitData)
 		Interface::Print("\n\n--- Entry #%d ---\n", i);
 		Interface::Print("Binary Type: %d (", entry->GetBinaryType());
 
-		switch (entry->GetBinaryType())
+		switch (static_cast<BinaryType>(entry->GetBinaryType()))
 		{
-			case PitConst::kBinaryTypeApplicationProcessor:
+			case BinaryType::ApplicationProcessor:
 				Interface::Print("AP");
 				break;
 
-			case PitConst::kBinaryTypeCommunicationProcessor:
+			case BinaryType::CommunicationProcessor:
 				Interface::Print("CP");
 				break;
 
@@ -237,25 +237,25 @@ void Interface::PrintPit(const PitData& pitData)
 
 		Interface::Print("Device Type: %d (", entry->GetDeviceType());
 
-		switch (entry->GetDeviceType())
+		switch (static_cast<DeviceType>(entry->GetDeviceType()))
 		{
-			case PitConst::kDeviceTypeOneNand:
+			case DeviceType::OneNand:
 				Interface::Print("OneNAND");
 				break;
 
-			case PitConst::kDeviceTypeFile:
+			case DeviceType::File:
 				Interface::Print("File/FAT");
 				break;
 
-			case PitConst::kDeviceTypeMMC:
+			case DeviceType::MMC:
 				Interface::Print("MMC");
 				break;
 
-			case PitConst::kDeviceTypeAll:
+			case DeviceType::All:
 				Interface::Print("All (?)");
 				break;
 
-			case PitConst::kDeviceTypeUFS:
+			case DeviceType::UFS:
 				Interface::Print("UFS");
 				break;
 
@@ -270,13 +270,13 @@ void Interface::PrintPit(const PitData& pitData)
 
 		Interface::Print("Attributes: %d (", entry->GetAttributes());
 
-		if (entry->GetAttributes() & PitConst::kAttributeSTL)
+		if (entry->GetAttributes() & static_cast<uint32_t>(Attribute::STL))
 			Interface::Print("STL ");
 
-		/*if (entry->GetAttributes() & PitConst::kAttributeBML)
+		/*if (entry->GetAttributes() & static_cast<uint32_t>(Attribute::BML))
 			Interface::Print("BML ");*/
 
-		if (entry->GetAttributes() & PitConst::kAttributeWrite)
+		if (entry->GetAttributes() & static_cast<uint32_t>(Attribute::Write))
 			Interface::Print("Read/Write");
 		else
 			Interface::Print("Read-Only");
@@ -289,16 +289,16 @@ void Interface::PrintPit(const PitData& pitData)
 		{
 			Interface::Print(" (");
 
-			if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeFota)
+			if (entry->GetUpdateAttributes() & static_cast<uint32_t>(UpdateAttribute::Fota))
 			{
-				if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeSecure)
+				if (entry->GetUpdateAttributes() & static_cast<uint32_t>(UpdateAttribute::Secure))
 					Interface::Print("FOTA, Secure");
 				else
 					Interface::Print("FOTA");
 			}
 			else
 			{
-				if (entry->GetUpdateAttributes() & PitConst::kUpdateAttributeSecure)
+				if (entry->GetUpdateAttributes() & static_cast<uint32_t>(UpdateAttribute::Secure))
 					Interface::Print("Secure");
 			}
 

@@ -26,7 +26,7 @@
 #include <string>
 
 // libpit
-#include "libpit.h"
+#include "heimdall/libpit/src/lib.rs.h"
 
 // Heimdall
 #include "Heimdall.h"

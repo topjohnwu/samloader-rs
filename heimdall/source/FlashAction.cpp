@@ -255,7 +255,7 @@ static bool flashPitData(BridgeManager *bridgeManager, const PitData *pitData)
 
 static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& partitionFlashInfo)
 {
-	if (partitionFlashInfo.pitEntry->GetBinaryType() == PitConst::kBinaryTypeCommunicationProcessor) // Modem
+	if (static_cast<BinaryType>(partitionFlashInfo.pitEntry->GetBinaryType()) == BinaryType::CommunicationProcessor) // Modem
 	{
 		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
@@ -271,7 +271,7 @@ static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& pa
 			return (false);
 		}
 	}
-	else // partitionFlashInfo.pitEntry->GetBinaryType() == PitConst::kBinaryTypeApplicationProcessor
+	else // static_cast<BinaryType>(partitionFlashInfo.pitEntry->GetBinaryType()) == BinaryType::ApplicationProcessor
 	{
 		Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
@@ -325,12 +325,14 @@ static bool flashPartitions(BridgeManager *bridgeManager, const vector<Partition
 				}
 			}
 
-			if (part->GetDeviceType() != PitConst::kDeviceTypeMMC &&
-			    part->GetDeviceType() != PitConst::kDeviceTypeUFS)
+			DeviceType deviceType = static_cast<DeviceType>(part->GetDeviceType());
+
+			if (deviceType != DeviceType::MMC &&
+			    deviceType != DeviceType::UFS)
 				continue;
 			unsigned long partitionSize = part->GetBlockCount();
 			unsigned int blockSize = 512;
-			if (part->GetDeviceType() == PitConst::kDeviceTypeUFS)
+			if (deviceType == DeviceType::UFS)
 				blockSize = 4096;
 			if (partitionSize > 0 && it->fileSize > partitionSize*blockSize)
 			{

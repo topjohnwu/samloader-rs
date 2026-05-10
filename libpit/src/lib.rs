@@ -20,6 +20,11 @@ pub const FILE_IDENTIFIER: u32 = 0x12349876;
 pub const HEADER_DATA_SIZE: u32 = 28;
 pub const PADDED_SIZE_MULTIPLICAND: u32 = 4096;
 
+pub const DATA_SIZE: usize = 132;
+pub const PARTITION_NAME_MAX_LENGTH: usize = 32;
+pub const FLASH_FILENAME_MAX_LENGTH: usize = 32;
+pub const FOTA_FILENAME_MAX_LENGTH: usize = 32;
+
 #[binrw]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[brw(little)]
@@ -33,29 +38,29 @@ pub struct PitEntry {
     pub block_count: u32,
     pub file_offset: u32,
     pub file_size: u32,
-    #[br(map = |x: [u8; 32]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
+    #[br(map = |x: [u8; PARTITION_NAME_MAX_LENGTH]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
     #[bw(map = |x: &String| {
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; PARTITION_NAME_MAX_LENGTH];
         let bytes = x.as_bytes();
-        let len = std::cmp::min(bytes.len(), 32);
+        let len = std::cmp::min(bytes.len(), PARTITION_NAME_MAX_LENGTH);
         buf[..len].copy_from_slice(&bytes[..len]);
         buf
     })]
     pub partition_name: String,
-    #[br(map = |x: [u8; 32]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
+    #[br(map = |x: [u8; FLASH_FILENAME_MAX_LENGTH]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
     #[bw(map = |x: &String| {
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; FLASH_FILENAME_MAX_LENGTH];
         let bytes = x.as_bytes();
-        let len = std::cmp::min(bytes.len(), 32);
+        let len = std::cmp::min(bytes.len(), FLASH_FILENAME_MAX_LENGTH);
         buf[..len].copy_from_slice(&bytes[..len]);
         buf
     })]
     pub flash_filename: String,
-    #[br(map = |x: [u8; 32]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
+    #[br(map = |x: [u8; FOTA_FILENAME_MAX_LENGTH]| String::from_utf8_lossy(&x).trim_matches('\0').to_string())]
     #[bw(map = |x: &String| {
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; FOTA_FILENAME_MAX_LENGTH];
         let bytes = x.as_bytes();
-        let len = std::cmp::min(bytes.len(), 32);
+        let len = std::cmp::min(bytes.len(), FOTA_FILENAME_MAX_LENGTH);
         buf[..len].copy_from_slice(&bytes[..len]);
         buf
     })]
@@ -196,7 +201,7 @@ impl PitData {
         }
 
         let entry_count = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        let expected_size = HEADER_DATA_SIZE as usize + (entry_count as usize * 132);
+        let expected_size = HEADER_DATA_SIZE as usize + (entry_count as usize * DATA_SIZE);
 
         if data.len() < expected_size {
             return Err(binrw::Error::Io(std::io::Error::new(
@@ -214,7 +219,7 @@ impl PitData {
     }
 
     fn get_data_size(&self) -> u32 {
-        HEADER_DATA_SIZE + (self.entries.len() * 132) as u32
+        HEADER_DATA_SIZE + (self.entries.len() * DATA_SIZE) as u32
     }
 
     fn get_padded_size(&self) -> u32 {
@@ -290,6 +295,33 @@ pub fn new_pit_data() -> Box<PitData> {
 
 #[cxx::bridge(namespace = "libpit")]
 pub mod ffi {
+    #[repr(u32)]
+    enum BinaryType {
+        ApplicationProcessor = 0,
+        CommunicationProcessor = 1,
+    }
+
+    #[repr(u32)]
+    enum DeviceType {
+        OneNand = 0,
+        File = 1,
+        MMC = 2,
+        All = 3,
+        UFS = 8,
+    }
+
+    #[repr(u32)]
+    enum Attribute {
+        Write = 1,
+        STL = 2,
+    }
+
+    #[repr(u32)]
+    enum UpdateAttribute {
+        Fota = 1,
+        Secure = 2,
+    }
+
     extern "Rust" {
         type PitEntry;
 

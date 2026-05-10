@@ -209,9 +209,7 @@ name = "libpit"
 version = "0.1.0"
 dependencies = [
  "binrw",
- "cc",
  "cxx",
- "cxx-build",
 ]
 
 [[package]]
