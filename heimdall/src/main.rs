@@ -28,11 +28,11 @@ pub mod ffi {
     unsafe extern "C++" {
         include!("heimdall/source/ActionInterfaces.h");
 
-        fn action_close_pc_screen(no_reboot: bool, resume: bool, verbose: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
+        fn action_close_pc_screen(verbose: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
         fn action_detect(verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
-        fn action_download_pit(output: &str, no_reboot: bool, resume: bool, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
-        fn action_print_pit(file: &str, no_reboot: bool, resume: bool, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
-        fn action_flash(repartition: bool, no_reboot: bool, resume: bool, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str, skip_size_check: bool, pit: &str, partitions: &Vec<PartitionArg>) -> i32;
+        fn action_download_pit(output: &str, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
+        fn action_print_pit(file: &str, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
+        fn action_flash(repartition: bool, verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str, skip_size_check: bool, pit: &str, partitions: &Vec<PartitionArg>) -> i32;
         
         fn action_info() -> i32;
         fn action_version() -> i32;
@@ -77,9 +77,7 @@ fn main() {
         .arg_required_else_help(true)
         .subcommand(add_common_args(Command::new("close-pc-screen"))
             .about("Attempts to get rid off the \"connect phone to PC\" screen.")
-            .long_about(CLOSE_PC_SCREEN_HELP)
-            .arg(Arg::new("no-reboot").long("no-reboot").action(ArgAction::SetTrue).help("Causes the device to remain in download mode after the action is completed."))
-            .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue).help("Resume a previous action whilst remaining in download mode.")))
+            .long_about(CLOSE_PC_SCREEN_HELP))
         .subcommand(add_common_args(Command::new("detect"))
             .about("Indicates whether or not a download mode device can be detected.")
             .long_about(DETECT_HELP)
@@ -88,15 +86,11 @@ fn main() {
             .about("Downloads the connected device's PIT file to the specified output file.")
             .long_about(DOWNLOAD_PIT_HELP)
             .arg(Arg::new("output").long("output").required(true).num_args(1).help("Output file path for the downloaded PIT file."))
-            .arg(Arg::new("no-reboot").long("no-reboot").action(ArgAction::SetTrue).help("Causes the device to remain in download mode after the action is completed."))
-            .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue).help("Resume a previous action whilst remaining in download mode."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
         .subcommand(add_common_args(Command::new("print-pit"))
             .about("Prints the contents of a PIT file in a human readable format.")
             .long_about(PRINT_PIT_HELP)
             .arg(Arg::new("file").long("file").num_args(1).help("The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device."))
-            .arg(Arg::new("no-reboot").long("no-reboot").action(ArgAction::SetTrue).help("Causes the device to remain in download mode after the action is completed."))
-            .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue).help("Resume a previous action whilst remaining in download mode."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
         .subcommand(add_common_args(Command::new("flash"))
             .about("Flashes one or more firmware files to your phone.")
@@ -104,8 +98,6 @@ fn main() {
             .after_help(FLASH_AFTER_HELP)
             .ignore_errors(true)
             .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
-            .arg(Arg::new("no-reboot").long("no-reboot").action(ArgAction::SetTrue).help("Causes the device to remain in download mode after the action is completed."))
-            .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue).help("Resume a previous action whilst remaining in download mode."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
             .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
             .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing.")))
@@ -118,8 +110,6 @@ fn main() {
     let result = match matches.subcommand() {
         Some(("close-pc-screen", sub_matches)) => {
             ffi::action_close_pc_screen(
-                sub_matches.get_flag("no-reboot"),
-                sub_matches.get_flag("resume"),
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("stdout-errors"),
                 sub_matches.get_one::<String>("usb-log-level").map(|s| s.as_str()).unwrap_or(""),
@@ -136,8 +126,6 @@ fn main() {
         Some(("download-pit", sub_matches)) => {
             ffi::action_download_pit(
                 sub_matches.get_one::<String>("output").unwrap(),
-                sub_matches.get_flag("no-reboot"),
-                sub_matches.get_flag("resume"),
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("stdout-errors"),
@@ -147,8 +135,6 @@ fn main() {
         Some(("print-pit", sub_matches)) => {
             ffi::action_print_pit(
                 sub_matches.get_one::<String>("file").map(|s| s.as_str()).unwrap_or(""),
-                sub_matches.get_flag("no-reboot"),
-                sub_matches.get_flag("resume"),
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("stdout-errors"),
@@ -165,7 +151,7 @@ fn main() {
                     let name = arg.trim_start_matches("--");
                     // Skip known arguments
                     match name {
-                        "repartition" | "no-reboot" | "resume" | "verbose" | "stdout-errors" | "wait" | "skip-size-check" => continue,
+                        "repartition" | "verbose" | "stdout-errors" | "wait" | "skip-size-check" => continue,
                         "usb-log-level" | "pit" => {
                             raw_args.next(); // Skip value
                             continue;
@@ -184,8 +170,6 @@ fn main() {
             
             ffi::action_flash(
                 sub_matches.get_flag("repartition"),
-                sub_matches.get_flag("no-reboot"),
-                sub_matches.get_flag("resume"),
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("stdout-errors"),

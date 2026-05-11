@@ -32,11 +32,10 @@ using namespace libpit;
 using namespace Heimdall;
 
 
-int Heimdall::action_print_pit(rust::Str file, bool no_reboot, bool resume, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level)
+int Heimdall::action_print_pit(rust::Str file, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level)
 {
         string filename(file.data(), file.length());
 
-        bool reboot = !no_reboot;
         bool waitForDevice = wait;
 
         if (stdout_errors)
@@ -91,7 +90,7 @@ int Heimdall::action_print_pit(rust::Str file, bool no_reboot, bool resume, bool
                 BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
                 bridgeManager->SetUsbLogLevel(usb_log_level);
 
-                if (bridgeManager->Initialise(resume) != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+                if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
                 {
                         delete bridgeManager;
                         return (1);
@@ -118,7 +117,7 @@ int Heimdall::action_print_pit(rust::Str file, bool no_reboot, bool resume, bool
 
                 delete [] devicePit;
 
-                if (!bridgeManager->EndSession(reboot))
+                if (!bridgeManager->EndSession())
                         success = false;
 
                 delete bridgeManager;

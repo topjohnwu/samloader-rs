@@ -31,7 +31,7 @@ using namespace std;
 using namespace Heimdall;
 
 
-int Heimdall::action_download_pit(rust::Str output, bool no_reboot, bool resume, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level)
+int Heimdall::action_download_pit(rust::Str output, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level)
 {
         string outputFilename(output.data(), output.length());
 
@@ -42,7 +42,6 @@ int Heimdall::action_download_pit(rust::Str output, bool no_reboot, bool resume,
         }
 
         bool waitForDevice = wait;
-        bool reboot = !no_reboot;
 
         if (stdout_errors)
                 Interface::SetStdoutErrors(true);
@@ -64,7 +63,7 @@ int Heimdall::action_download_pit(rust::Str output, bool no_reboot, bool resume,
         BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise(resume) != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
         {
                 FileClose(outputPitFile);
                 delete bridgeManager;
@@ -90,7 +89,7 @@ int Heimdall::action_download_pit(rust::Str output, bool no_reboot, bool resume,
                 success = false;
         }
 
-        if (!bridgeManager->EndSession(reboot))
+        if (!bridgeManager->EndSession())
                 success = false;
 
         delete bridgeManager;

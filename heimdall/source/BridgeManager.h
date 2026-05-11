@@ -140,10 +140,10 @@ namespace Heimdall
 			~BridgeManager();
 
 			bool DetectDevice(void);
-			int Initialise(bool resume);
+			int Initialise(void);
 
 			bool BeginSession(void);
-			bool EndSession(bool reboot) const;
+			bool EndSession(void) const;
 
 			bool SendPacket(OutboundPacket *packet, int timeout = kDefaultTimeoutSend, int emptyTransferFlags = kEmptyTransferAfter) const;
 			bool ReceivePacket(InboundPacket *packet, int timeout = kDefaultTimeoutReceive, int emptyTransferFlags = kEmptyTransferNone) const;

@@ -461,7 +461,7 @@ bool BridgeManager::DetectDevice(void)
 	return (false);
 }
 
-int BridgeManager::Initialise(bool resume)
+int BridgeManager::Initialise(void)
 {
 	Interface::Print("Initialising connection...\n");
 
@@ -492,11 +492,8 @@ int BridgeManager::Initialise(bool resume)
 	if (!SetupDeviceInterface())
 		return (BridgeManager::kInitialiseFailed);
 
-	if (!resume)
-	{
-		if (!InitialiseProtocol())
-			return (BridgeManager::kInitialiseFailed);
-	}
+	if (!InitialiseProtocol())
+		return (BridgeManager::kInitialiseFailed);
 
 	return (BridgeManager::kInitialiseSucceeded);
 }
@@ -552,7 +549,7 @@ bool BridgeManager::BeginSession(void)
 	return (true);
 }
 
-bool BridgeManager::EndSession(bool reboot) const
+bool BridgeManager::EndSession(void) const
 {
 	Interface::Print("Ending session...\n");
 
@@ -578,31 +575,28 @@ bool BridgeManager::EndSession(bool reboot) const
 		return (false);
 	}
 
-	if (reboot)
+	Interface::Print("Rebooting device...\n");
+
+	EndSessionPacket *rebootDevicePacket = new EndSessionPacket(EndSessionPacket::kRequestRebootDevice);
+	success = SendPacket(rebootDevicePacket);
+	delete rebootDevicePacket;
+
+	if (!success)
 	{
-		Interface::Print("Rebooting device...\n");
+		Interface::PrintError("Failed to send reboot device packet!\n");
 
-		EndSessionPacket *rebootDevicePacket = new EndSessionPacket(EndSessionPacket::kRequestRebootDevice);
-		bool success = SendPacket(rebootDevicePacket);
-		delete rebootDevicePacket;
+		return (false);
+	}
 
-		if (!success)
-		{
-			Interface::PrintError("Failed to send reboot device packet!\n");
+	ResponsePacket *rebootDeviceResponse = new ResponsePacket(ResponsePacket::kResponseTypeEndSession);
+	success = ReceivePacket(rebootDeviceResponse);
+	delete rebootDeviceResponse;
 
-			return (false);
-		}
+	if (!success)
+	{
+		Interface::PrintError("Failed to receive reboot confirmation!\n");
 
-		ResponsePacket *rebootDeviceResponse = new ResponsePacket(ResponsePacket::kResponseTypeEndSession);
-		success = ReceivePacket(rebootDeviceResponse);
-		delete rebootDeviceResponse;
-
-		if (!success)
-		{
-			Interface::PrintError("Failed to receive reboot confirmation!\n");
-
-			return (false);
-		}
+		return (false);
 	}
 
 	return (true);

@@ -404,9 +404,8 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
         return (pitData);
 }
 
-int Heimdall::action_flash(bool repartition, bool no_reboot, bool resume, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level, bool skip_size_check, rust::Str pit, const rust::Vec<PartitionArg>& partitions)
+int Heimdall::action_flash(bool repartition, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level, bool skip_size_check, rust::Str pit, const rust::Vec<PartitionArg>& partitions)
 {
-        bool reboot = !no_reboot;
         bool waitForDevice = wait;
         bool skipSizeCheck = skip_size_check;
 
@@ -448,7 +447,7 @@ int Heimdall::action_flash(bool repartition, bool no_reboot, bool resume, bool v
         BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise(resume) != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
         {
                 closeFiles(partitionFiles, pitFile);
                 delete bridgeManager;
@@ -472,7 +471,7 @@ int Heimdall::action_flash(bool repartition, bool no_reboot, bool resume, bool v
                 rust::Box<PitData>::from_raw(const_cast<PitData *>(pitData));
         }
 
-        if (!bridgeManager->EndSession(reboot))
+        if (!bridgeManager->EndSession())
                 success = false;
 
         delete bridgeManager;

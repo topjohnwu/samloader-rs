@@ -28,10 +28,8 @@ using namespace std;
 using namespace Heimdall;
 
 
-int Heimdall::action_close_pc_screen(bool no_reboot, bool resume, bool verbose, bool stdout_errors, rust::Str usb_log_level)
+int Heimdall::action_close_pc_screen(bool verbose, bool stdout_errors, rust::Str usb_log_level)
 {
-        bool reboot = !no_reboot;
-
         if (stdout_errors)
                 Interface::SetStdoutErrors(true);
 
@@ -43,7 +41,7 @@ int Heimdall::action_close_pc_screen(bool no_reboot, bool resume, bool verbose, 
         BridgeManager *bridgeManager = new BridgeManager(verbose, false);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise(resume) != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
         {
                 delete bridgeManager;
                 return (1);
@@ -51,7 +49,7 @@ int Heimdall::action_close_pc_screen(bool no_reboot, bool resume, bool verbose, 
 
         Interface::Print("Attempting to close connect to pc screen...\n");
 
-        bool success = bridgeManager->EndSession(reboot);
+        bool success = bridgeManager->EndSession();
         delete bridgeManager;
 
         if (success)
