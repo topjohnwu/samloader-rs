@@ -90,21 +90,20 @@ int Heimdall::action_print_pit(rust::Str file, bool verbose, bool wait, bool std
                 BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
                 bridgeManager->SetUsbLogLevel(usb_log_level);
 
-                if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+                if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
                 {
                         delete bridgeManager;
                         return (1);
                 }
 
-                unsigned char *devicePit = nullptr;
-                int devicePitSize = bridgeManager->DownloadPitFile(&devicePit);
-                bool success = devicePitSize != 0;
+                std::vector<unsigned char> devicePit = bridgeManager->DownloadPitFile();
+                bool success = !devicePit.empty();
 
                 if (success)
                 {
                         auto pitData = PitData::make();
 
-                        if (pitData->Unpack({devicePit, (size_t)devicePitSize}))
+                        if (pitData->Unpack({devicePit.data(), devicePit.size()}))
                         {
                                 pitData->Print();
                         }
@@ -114,8 +113,6 @@ int Heimdall::action_print_pit(rust::Str file, bool verbose, bool wait, bool std
                                 success = false;
                         }
                 }
-
-                delete [] devicePit;
 
                 if (!bridgeManager->EndSession())
                         success = false;

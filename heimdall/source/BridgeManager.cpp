@@ -63,10 +63,39 @@
 using namespace libpit;
 using namespace Heimdall;
 
-const DeviceIdentifier BridgeManager::supportedDevices[BridgeManager::kSupportedDeviceCount] = {
-	DeviceIdentifier(BridgeManager::kVidSamsung, BridgeManager::kPidGalaxyS),
-	DeviceIdentifier(BridgeManager::kVidSamsung, BridgeManager::kPidGalaxyS2),
-	DeviceIdentifier(BridgeManager::kVidSamsung, BridgeManager::kPidDroidCharge)
+namespace
+{
+	class DeviceIdentifier
+	{
+		public:
+
+			const int vendorId;
+			const int productId;
+
+			DeviceIdentifier(int vid, int pid) :
+					vendorId(vid),
+					productId(pid)
+			{
+			}
+	};
+}
+
+enum
+{
+	kVidSamsung	= 0x04E8
+};
+
+enum
+{
+	kPidGalaxyS = 0x6601,
+	kPidGalaxyS2 = 0x685D,
+	kPidDroidCharge = 0x68C3
+};
+
+static const DeviceIdentifier supportedDevices[] = {
+	DeviceIdentifier(kVidSamsung, kPidGalaxyS),
+	DeviceIdentifier(kVidSamsung, kPidGalaxyS2),
+	DeviceIdentifier(kVidSamsung, kPidDroidCharge)
 };
 
 enum
@@ -76,7 +105,7 @@ enum
 	kFileTransferSequenceTimeoutDefault = 30000 // 30 seconds
 };
 
-int BridgeManager::FindDeviceInterface(void)
+InitialiseResult BridgeManager::FindDeviceInterface(void)
 {
 	if (waitForDevice)
 		Interface::Print("Waiting for device...\n");
@@ -84,7 +113,7 @@ int BridgeManager::FindDeviceInterface(void)
 		Interface::Print("Detecting device...\n");
 
 	struct libusb_device **devices;
-	unsigned int deviceCount, deviceIndex, i;
+	unsigned int deviceCount, deviceIndex;
 	libusb_device_descriptor descriptor;
 	while (true)
 	{
@@ -94,10 +123,10 @@ int BridgeManager::FindDeviceInterface(void)
 		{
 			libusb_get_device_descriptor(devices[deviceIndex], &descriptor);
 
-			for (i = 0; i < BridgeManager::kSupportedDeviceCount; i++)
+			for (const auto &supportedDevice : supportedDevices)
 			{
-				if (descriptor.idVendor == supportedDevices[i].vendorId &&
-				    descriptor.idProduct == supportedDevices[i].productId)
+				if (descriptor.idVendor == supportedDevice.vendorId &&
+				    descriptor.idProduct == supportedDevice.productId)
 				{
 					heimdallDevice = devices[deviceIndex];
 					libusb_ref_device(heimdallDevice);
@@ -118,14 +147,14 @@ int BridgeManager::FindDeviceInterface(void)
 	if (!heimdallDevice)
 	{
 		Interface::PrintDeviceDetectionFailed();
-		return (BridgeManager::kInitialiseDeviceNotDetected);
+		return (InitialiseResult::DeviceNotDetected);
 	}
 
 	int result = libusb_open(heimdallDevice, &deviceHandle);
 	if (result != LIBUSB_SUCCESS)
 	{
 		Interface::PrintError("Failed to access device. libusb error: %d\n", result);
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 	}
 
 	libusb_device_descriptor deviceDescriptor;
@@ -133,7 +162,7 @@ int BridgeManager::FindDeviceInterface(void)
 	if (result != LIBUSB_SUCCESS)
 	{
 		Interface::PrintError("Failed to retrieve device description\n");
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 	}
 
 	if (verbose)
@@ -174,7 +203,7 @@ int BridgeManager::FindDeviceInterface(void)
 	if (result != LIBUSB_SUCCESS || !configDescriptor)
 	{
 		Interface::PrintError("Failed to retrieve config descriptor\n");
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 	}
 
 	interfaceIndex = -1;
@@ -233,10 +262,10 @@ int BridgeManager::FindDeviceInterface(void)
 	if (interfaceIndex < 0)
 	{
 		Interface::PrintError("Failed to find correct interface configuration\n");
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 	}
 
-	return (BridgeManager::kInitialiseSucceeded);
+	return (InitialiseResult::Succeeded);
 }
 
 bool BridgeManager::ClaimDeviceInterface(void)
@@ -428,7 +457,7 @@ bool BridgeManager::DetectDevice(void)
 	libusb_set_option(libusbContext, LIBUSB_OPTION_LOG_LEVEL, usbLogLevel);
 
 	struct libusb_device **devices;
-	unsigned int deviceCount, deviceIndex, i;
+	unsigned int deviceCount, deviceIndex;
 	libusb_device_descriptor descriptor;
 	while (true)
 	{
@@ -438,10 +467,10 @@ bool BridgeManager::DetectDevice(void)
 		{
 			libusb_get_device_descriptor(devices[deviceIndex], &descriptor);
 
-			for (i = 0; i < BridgeManager::kSupportedDeviceCount; i++)
+			for (const auto &supportedDevice : supportedDevices)
 			{
-				if (descriptor.idVendor == supportedDevices[i].vendorId &&
-				    descriptor.idProduct == supportedDevices[i].productId)
+				if (descriptor.idVendor == supportedDevice.vendorId &&
+				    descriptor.idProduct == supportedDevice.productId)
 				{
 					libusb_free_device_list(devices, deviceCount);
 
@@ -461,7 +490,7 @@ bool BridgeManager::DetectDevice(void)
 	return (false);
 }
 
-int BridgeManager::Initialise(void)
+InitialiseResult BridgeManager::Initialise(void)
 {
 	Interface::Print("Initialising connection...\n");
 
@@ -472,7 +501,7 @@ int BridgeManager::Initialise(void)
 	{
 		Interface::PrintError("Failed to initialise libusb. libusb error: %d\n", result);
 		Interface::Print("Failed to connect to device!\n");
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 	}
 
 	// Fixes LIBUSB_ERROR_NOT_FOUND when using dg_ssudbus driver instead of WinUSB.
@@ -481,21 +510,21 @@ int BridgeManager::Initialise(void)
 	// Set libusb log level.
 	libusb_set_option(libusbContext, LIBUSB_OPTION_LOG_LEVEL, usbLogLevel);
 
-	result = FindDeviceInterface();
+	InitialiseResult initialiseResult = FindDeviceInterface();
 
-	if (result != BridgeManager::kInitialiseSucceeded)
-		return (result);
+	if (initialiseResult != InitialiseResult::Succeeded)
+		return (initialiseResult);
 
 	if (!ClaimDeviceInterface())
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 
 	if (!SetupDeviceInterface())
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 
 	if (!InitialiseProtocol())
-		return (BridgeManager::kInitialiseFailed);
+		return (InitialiseResult::Failed);
 
-	return (BridgeManager::kInitialiseSucceeded);
+	return (InitialiseResult::Succeeded);
 }
 
 bool BridgeManager::BeginSession(void)
@@ -687,13 +716,13 @@ int BridgeManager::ReceiveBulkTransfer(unsigned char *data, int length, int time
 	return (dataTransferred);
 }
 
-bool BridgeManager::SendPacket(OutboundPacket *packet, int timeout, int emptyTransferFlags) const
+bool BridgeManager::SendPacket(OutboundPacket *packet, int timeout, EmptyTransferMode emptyTransferMode) const
 {
 	packet->Pack();
 
-	if (emptyTransferFlags & kEmptyTransferBefore)
+	if (static_cast<int>(emptyTransferMode) & static_cast<int>(EmptyTransferMode::Before))
 	{
-		if (!SendBulkTransfer(nullptr, 0, kDefaultTimeoutEmptyTransfer, false) && verbose)
+		if (!SendBulkTransfer(nullptr, 0, DEFAULT_TIMEOUT_EMPTY_TRANSFER, false) && verbose)
 		{
 			Interface::PrintWarning("Empty bulk transfer before sending packet failed. Continuing anyway...\n");
 		}
@@ -702,9 +731,9 @@ bool BridgeManager::SendPacket(OutboundPacket *packet, int timeout, int emptyTra
 	if (!SendBulkTransfer(packet->GetData(), packet->GetSize(), timeout))
 		return (false);
 
-	if (emptyTransferFlags & kEmptyTransferAfter)
+	if (static_cast<int>(emptyTransferMode) & static_cast<int>(EmptyTransferMode::After))
 	{
-		if (!SendBulkTransfer(nullptr, 0, kDefaultTimeoutEmptyTransfer, false) && verbose)
+		if (!SendBulkTransfer(nullptr, 0, DEFAULT_TIMEOUT_EMPTY_TRANSFER, false) && verbose)
 		{
 			Interface::PrintWarning("Empty bulk transfer after sending packet failed. Continuing anyway...\n");
 		}
@@ -713,11 +742,11 @@ bool BridgeManager::SendPacket(OutboundPacket *packet, int timeout, int emptyTra
 	return (true);
 }
 
-bool BridgeManager::ReceivePacket(InboundPacket *packet, int timeout, int emptyTransferFlags) const
+bool BridgeManager::ReceivePacket(InboundPacket *packet, int timeout, EmptyTransferMode emptyTransferMode) const
 {
-	if (emptyTransferFlags & kEmptyTransferBefore)
+	if (static_cast<int>(emptyTransferMode) & static_cast<int>(EmptyTransferMode::Before))
 	{
-		if (ReceiveBulkTransfer(nullptr, 0, kDefaultTimeoutEmptyTransfer, false) < 0 && verbose)
+		if (ReceiveBulkTransfer(nullptr, 0, DEFAULT_TIMEOUT_EMPTY_TRANSFER, false) < 0 && verbose)
 		{
 			Interface::PrintWarning("Empty bulk transfer before receiving packet failed. Continuing anyway...\n");
 		}
@@ -743,9 +772,9 @@ bool BridgeManager::ReceivePacket(InboundPacket *packet, int timeout, int emptyT
 	if (!unpacked && verbose)
 		Interface::PrintError("Failed to unpack received packet.\n");
 
-	if (emptyTransferFlags & kEmptyTransferAfter)
+	if (static_cast<int>(emptyTransferMode) & static_cast<int>(EmptyTransferMode::After))
 	{
-		if (ReceiveBulkTransfer(nullptr, 0, kDefaultTimeoutEmptyTransfer, false) < 0 && verbose)
+		if (ReceiveBulkTransfer(nullptr, 0, DEFAULT_TIMEOUT_EMPTY_TRANSFER, false) < 0 && verbose)
 		{
 			Interface::PrintWarning("Empty bulk transfer after receiving packet failed. Continuing anyway...\n");
 		}
@@ -779,9 +808,9 @@ bool BridgeManager::RequestDeviceType(unsigned int request, int *result) const
 	return (true);
 }
 
-bool BridgeManager::SendPitData(const PitData *pitData) const
+bool BridgeManager::SendPitData(const PitData& pitData) const
 {
-	unsigned int pitBufferSize = pitData->GetPaddedSize();
+	unsigned int pitBufferSize = pitData.GetPaddedSize();
 
 	// Start file transfer
 	PitFilePacket *pitFilePacket = new PitFilePacket(PitFilePacket::kRequestFlash);
@@ -830,7 +859,7 @@ bool BridgeManager::SendPitData(const PitData *pitData) const
 	unsigned char *pitBuffer = new unsigned char[pitBufferSize];
 	memset(pitBuffer, 0, pitBufferSize);
 
-	pitData->Pack({pitBuffer, (size_t)pitBufferSize});
+	pitData.Pack({pitBuffer, (size_t)pitBufferSize});
 
 	// Flash pit file
 	SendFilePartPacket *sendFilePartPacket = new SendFilePartPacket(pitBuffer, pitBufferSize);
@@ -879,10 +908,8 @@ bool BridgeManager::SendPitData(const PitData *pitData) const
 	return (true);
 }
 
-int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
+std::vector<unsigned char> BridgeManager::ReceivePitFile(void) const
 {
-	*pitBuffer = nullptr;
-
 	bool success;
 
 	// Start file transfer
@@ -893,7 +920,7 @@ int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
 	if (!success)
 	{
 		Interface::PrintError("Failed to request receival of PIT file!\n");
-		return (0);
+		return {};
 	}
 
 	PitFileResponse *pitFileResponse = new PitFileResponse();
@@ -904,14 +931,14 @@ int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
 	if (!success)
 	{
 		Interface::PrintError("Failed to receive PIT file size!\n");
-		return (0);
+		return {};
 	}
 
 	unsigned int transferCount = fileSize / ReceiveFilePartPacket::kDataSize;
 	if (fileSize % ReceiveFilePartPacket::kDataSize != 0)
 		transferCount++;
 
-	unsigned char *buffer = new unsigned char[fileSize];
+	std::vector<unsigned char> buffer(fileSize);
 	int offset = 0;
 
 	for (unsigned int i = 0; i < transferCount; i++)
@@ -923,25 +950,23 @@ int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
 		if (!success)
 		{
 			Interface::PrintError("Failed to request PIT file part #%d!\n", i);
-			delete [] buffer;
-			return (0);
+			return {};
 		}
 
-		int receiveEmptyTransferFlags = (i == transferCount - 1) ? kEmptyTransferAfter : kEmptyTransferNone;
+		EmptyTransferMode receiveEmptyTransferMode = (i == transferCount - 1) ? EmptyTransferMode::After : EmptyTransferMode::None;
 
 		ReceiveFilePartPacket *receiveFilePartPacket = new ReceiveFilePartPacket();
-		success = ReceivePacket(receiveFilePartPacket, kDefaultTimeoutReceive, receiveEmptyTransferFlags);
+		success = ReceivePacket(receiveFilePartPacket, DEFAULT_TIMEOUT_RECEIVE, receiveEmptyTransferMode);
 
 		if (!success)
 		{
 			Interface::PrintError("Failed to receive PIT file part #%d!\n", i);
 			delete receiveFilePartPacket;
-			delete [] buffer;
-			return (0);
+			return {};
 		}
 
 		// Copy the whole packet data into the buffer.
-		memcpy(buffer + offset, receiveFilePartPacket->GetData(), receiveFilePartPacket->GetReceivedSize());
+		memcpy(buffer.data() + offset, receiveFilePartPacket->GetData(), receiveFilePartPacket->GetReceivedSize());
 		offset += receiveFilePartPacket->GetReceivedSize();
 
 		delete receiveFilePartPacket;
@@ -955,8 +980,7 @@ int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
 	if (!success)
 	{
 		Interface::PrintError("Failed to send request to end PIT file transfer!\n");
-		delete [] buffer;
-		return (0);
+		return {};
 	}
 
 	pitFileResponse = new PitFileResponse();
@@ -966,28 +990,27 @@ int BridgeManager::ReceivePitFile(unsigned char **pitBuffer) const
 	if (!success)
 	{
 		Interface::PrintError("Failed to receive end PIT file transfer verification!\n");
-		delete [] buffer;
-		return (0);
+		return {};
 	}
 
-	*pitBuffer = buffer;
-	return (fileSize);
+	return (buffer);
 }
 
-int BridgeManager::DownloadPitFile(unsigned char **pitBuffer) const
+std::vector<unsigned char> BridgeManager::DownloadPitFile(void) const
 {
 	Interface::Print("Downloading device's PIT file...\n");
 
-	int devicePitFileSize = ReceivePitFile(pitBuffer);
+	std::vector<unsigned char> pitBuffer = ReceivePitFile();
 
-	if (!*pitBuffer)
+	if (pitBuffer.empty())
 	{
 		Interface::PrintError("Failed to download PIT file!\n");
-		return (0);
+		return (pitBuffer);
 	}
 
 	Interface::Print("PIT file download successful.\n\n");
-	return (devicePitFileSize);
+
+	return (pitBuffer);
 }
 
 bool BridgeManager::SendFile(FILE *file, unsigned int destination, unsigned int deviceType, unsigned int fileIdentifier) const
@@ -1079,11 +1102,11 @@ bool BridgeManager::SendFile(FILE *file, unsigned int destination, unsigned int 
 		for (unsigned int filePartIndex = 0; filePartIndex < sequenceSize; filePartIndex++)
 		{
 			// NOTE: This empty transfer thing is entirely ridiculous, but sadly it seems to be required.
-			int sendEmptyTransferFlags = (filePartIndex == 0) ? kEmptyTransferNone : kEmptyTransferBefore;
+			EmptyTransferMode sendEmptyTransferMode = (filePartIndex == 0) ? EmptyTransferMode::None : EmptyTransferMode::Before;
 
 			// Send
 			SendFilePartPacket *sendFilePartPacket = new SendFilePartPacket(file, fileTransferPacketSize);
-			success = SendPacket(sendFilePartPacket, kDefaultTimeoutSend, sendEmptyTransferFlags);
+			success = SendPacket(sendFilePartPacket, DEFAULT_TIMEOUT_SEND, sendEmptyTransferMode);
 			delete sendFilePartPacket;
 
 			if (!success)
@@ -1112,7 +1135,7 @@ bool BridgeManager::SendFile(FILE *file, unsigned int destination, unsigned int 
 
 					// Send
 					sendFilePartPacket = new SendFilePartPacket(file, fileTransferPacketSize);
-					success = SendPacket(sendFilePartPacket, kDefaultTimeoutSend, sendEmptyTransferFlags);
+					success = SendPacket(sendFilePartPacket, DEFAULT_TIMEOUT_SEND, sendEmptyTransferMode);
 					delete sendFilePartPacket;
 
 					if (!success)
@@ -1183,7 +1206,7 @@ bool BridgeManager::SendFile(FILE *file, unsigned int destination, unsigned int 
 		{
 			EndPhoneFileTransferPacket *endPhoneFileTransferPacket = new EndPhoneFileTransferPacket(sequenceEffectiveByteCount, 0, deviceType, fileIdentifier, isLastSequence);
 
-			success = SendPacket(endPhoneFileTransferPacket, kDefaultTimeoutSend, kEmptyTransferBeforeAndAfter);
+			success = SendPacket(endPhoneFileTransferPacket, DEFAULT_TIMEOUT_SEND, EmptyTransferMode::BeforeAndAfter);
 			delete endPhoneFileTransferPacket;
 
 			if (!success)
@@ -1197,7 +1220,7 @@ bool BridgeManager::SendFile(FILE *file, unsigned int destination, unsigned int 
 		{
 			EndModemFileTransferPacket *endModemFileTransferPacket = new EndModemFileTransferPacket(sequenceEffectiveByteCount, 0, deviceType, isLastSequence);
 
-			success = SendPacket(endModemFileTransferPacket, kDefaultTimeoutSend, kEmptyTransferBeforeAndAfter);
+			success = SendPacket(endModemFileTransferPacket, DEFAULT_TIMEOUT_SEND, EmptyTransferMode::BeforeAndAfter);
 			delete endModemFileTransferPacket;
 
 			if (!success)

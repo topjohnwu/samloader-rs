@@ -41,7 +41,7 @@ int Heimdall::action_close_pc_screen(bool verbose, bool stdout_errors, rust::Str
         BridgeManager *bridgeManager = new BridgeManager(verbose, false);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
         {
                 delete bridgeManager;
                 return (1);

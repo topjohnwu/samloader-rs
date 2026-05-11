@@ -63,7 +63,7 @@ int Heimdall::action_download_pit(rust::Str output, bool verbose, bool wait, boo
         BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
         {
                 FileClose(outputPitFile);
                 delete bridgeManager;
@@ -71,14 +71,13 @@ int Heimdall::action_download_pit(rust::Str output, bool verbose, bool wait, boo
                 return (1);
         }
 
-        unsigned char *pitBuffer = nullptr;
-        int fileSize = bridgeManager->DownloadPitFile(&pitBuffer);
+        std::vector<unsigned char> pitBuffer = bridgeManager->DownloadPitFile();
 
         bool success = true;
 
-        if (fileSize > 0)
+        if (!pitBuffer.empty())
         {
-                if (fwrite(pitBuffer, 1, fileSize, outputPitFile) != static_cast<size_t>(fileSize))
+                if (fwrite(pitBuffer.data(), 1, pitBuffer.size(), outputPitFile) != pitBuffer.size())
                 {
                         Interface::PrintError("Failed to write PIT data to output file.\n");
                         success = false;
@@ -95,7 +94,6 @@ int Heimdall::action_download_pit(rust::Str output, bool verbose, bool wait, boo
         delete bridgeManager;
 
         FileClose(outputPitFile);
-        delete [] pitBuffer;
 
         return (success ? 0 : 1);
 }

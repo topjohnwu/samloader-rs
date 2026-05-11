@@ -166,7 +166,7 @@ static bool sendTotalTransferSize(BridgeManager *bridgeManager, const vector<Par
         return (true);
 }
 
-static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles, const PitData *pitData, vector<PartitionFlashInfo>& partitionFlashInfos)
+static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles, const PitData& pitData, vector<PartitionFlashInfo>& partitionFlashInfos)
 {
         for (vector<PartitionFile>::const_iterator it = partitionFiles.begin(); it != partitionFiles.end(); it++)
         {
@@ -177,7 +177,7 @@ static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles,
 
                 if (Utility::ParseUnsignedInt(partitionIdentifier, it->argumentName.c_str()) == kNumberParsingStatusSuccess)
                 {
-                        pitEntry = pitData->FindEntry(partitionIdentifier);
+                        pitEntry = pitData.FindEntry(partitionIdentifier);
 
                         if (!pitEntry)
                         {
@@ -192,7 +192,7 @@ static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles,
                         if (pitName == "PIT") {
                                 pitName = "pit";
                         }
-                        pitEntry = pitData->FindEntry(pitName.c_str());
+                        pitEntry = pitData.FindEntry(pitName.c_str());
 
                         if (!pitEntry)
                         {
@@ -207,7 +207,7 @@ static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles,
         return (true);
 }
 
-static bool flashPitData(BridgeManager *bridgeManager, const PitData *pitData)
+static bool flashPitData(BridgeManager *bridgeManager, const PitData& pitData)
 {
         Interface::Print("Uploading PIT\n");
 
@@ -259,7 +259,7 @@ static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& pa
         }
 }
 
-static bool flashPartitions(BridgeManager *bridgeManager, const vector<PartitionFile>& partitionFiles, const PitData *pitData, bool repartition, bool skipSizeCheck)
+static bool flashPartitions(BridgeManager *bridgeManager, const vector<PartitionFile>& partitionFiles, const PitData& pitData, bool repartition, bool skipSizeCheck)
 {
         vector<PartitionFlashInfo> partitionFlashInfos;
 
@@ -276,7 +276,7 @@ static bool flashPartitions(BridgeManager *bridgeManager, const vector<Partition
                         const PitEntry *part;
                         if (Utility::ParseUnsignedInt(partitionIdentifier, it->argumentName.c_str()) == kNumberParsingStatusSuccess)
                         {
-                                part = pitData->FindEntry(partitionIdentifier);
+                                part = pitData.FindEntry(partitionIdentifier);
 
                                 if (!part)
                                 {
@@ -289,7 +289,7 @@ static bool flashPartitions(BridgeManager *bridgeManager, const vector<Partition
                                 if (pitName == "PIT") {
                                         pitName = "pit";
                                 }
-                                part = pitData->FindEntry(pitName.c_str());
+                                part = pitData.FindEntry(pitName.c_str());
 
                                 if (!part)
                                 {
@@ -447,7 +447,7 @@ int Heimdall::action_flash(bool repartition, bool verbose, bool wait, bool stdou
         BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
-        if (bridgeManager->Initialise() != BridgeManager::kInitialiseSucceeded || !bridgeManager->BeginSession())
+        if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
         {
                 closeFiles(partitionFiles, pitFile);
                 delete bridgeManager;
@@ -463,7 +463,7 @@ int Heimdall::action_flash(bool repartition, bool verbose, bool wait, bool stdou
 
                 if (pitData)
                         success = flashPartitions(bridgeManager, partitionFiles,
-                                                  pitData, repartition,
+                                                  *pitData, repartition,
                                                   skipSizeCheck);
                 else
                         success = false;

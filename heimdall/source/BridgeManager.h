@@ -21,6 +21,10 @@
 #ifndef BRIDGEMANAGER_H
 #define BRIDGEMANAGER_H
 
+// C Standard Library
+#include <cstdio>
+#include <vector>
+
 // libpit
 #include "heimdall/libpit/src/lib.rs.h"
 
@@ -36,67 +40,24 @@ namespace Heimdall
 	class InboundPacket;
 	class OutboundPacket;
 
-	class DeviceIdentifier
+	enum class InitialiseResult
 	{
-		public:
+		Succeeded = 0,
+		Failed,
+		DeviceNotDetected
+	};
 
-			const int vendorId;
-			const int productId;
-
-			DeviceIdentifier(int vid, int pid) :
-					vendorId(vid),
-					productId(pid)
-			{
-			}
+	enum class EmptyTransferMode
+	{
+		None = 0,
+		Before = 1,
+		After = 1 << 1,
+		BeforeAndAfter = Before | After
 	};
 
 	class BridgeManager
 	{
-		public:
-
-			enum
-			{
-				kSupportedDeviceCount = 3
-			};
-
-			enum
-			{
-				kInitialiseSucceeded = 0,
-				kInitialiseFailed,
-				kInitialiseDeviceNotDetected
-			};
-
-			enum
-			{
-				kVidSamsung	= 0x04E8
-			};
-
-			enum
-			{
-				kPidGalaxyS = 0x6601,
-				kPidGalaxyS2 = 0x685D,
-				kPidDroidCharge = 0x68C3
-			};
-
-			enum
-			{
-				kDefaultTimeoutSend = 3000,
-				kDefaultTimeoutReceive = 3000,
-				kDefaultTimeoutEmptyTransfer = 100
-			};
-
-
-			enum
-			{
-				kEmptyTransferNone = 0,
-				kEmptyTransferBefore = 1,
-				kEmptyTransferAfter = 1 << 1,
-				kEmptyTransferBeforeAndAfter = kEmptyTransferBefore | kEmptyTransferAfter
-			};
-
 		private:
-
-			static const DeviceIdentifier supportedDevices[kSupportedDeviceCount];
 
 			bool verbose;
 			bool waitForDevice;
@@ -124,7 +85,7 @@ namespace Heimdall
 
 			int usbLogLevel;
 
-			int FindDeviceInterface(void);
+			InitialiseResult FindDeviceInterface(void);
 			bool ClaimDeviceInterface(void);
 			bool SetupDeviceInterface(void);
 			void ReleaseDeviceInterface(void);
@@ -140,19 +101,19 @@ namespace Heimdall
 			~BridgeManager();
 
 			bool DetectDevice(void);
-			int Initialise(void);
+			InitialiseResult Initialise(void);
 
 			bool BeginSession(void);
 			bool EndSession(void) const;
 
-			bool SendPacket(OutboundPacket *packet, int timeout = kDefaultTimeoutSend, int emptyTransferFlags = kEmptyTransferAfter) const;
-			bool ReceivePacket(InboundPacket *packet, int timeout = kDefaultTimeoutReceive, int emptyTransferFlags = kEmptyTransferNone) const;
+			bool SendPacket(OutboundPacket *packet, int timeout = DEFAULT_TIMEOUT_SEND, EmptyTransferMode emptyTransferMode = EmptyTransferMode::After) const;
+			bool ReceivePacket(InboundPacket *packet, int timeout = DEFAULT_TIMEOUT_RECEIVE, EmptyTransferMode emptyTransferMode = EmptyTransferMode::None) const;
 
 			bool RequestDeviceType(unsigned int request, int *result) const;
 
-			bool SendPitData(const libpit::PitData *pitData) const;
-			int ReceivePitFile(unsigned char **pitBuffer) const;
-			int DownloadPitFile(unsigned char **pitBuffer) const; // Thin wrapper around ReceivePitFile() with additional logging.
+			bool SendPitData(const libpit::PitData& pitData) const;
+			std::vector<unsigned char> ReceivePitFile(void) const;
+			std::vector<unsigned char> DownloadPitFile(void) const; // Thin wrapper around ReceivePitFile() with additional logging.
 
 			bool SendFile(FILE *file, unsigned int destination, unsigned int deviceType, unsigned int fileIdentifier = 0xFFFFFFFF) const;
 
