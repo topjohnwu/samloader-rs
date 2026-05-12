@@ -158,7 +158,7 @@ impl PitData {
         HEADER_DATA_SIZE + (self.entries.len() * DATA_SIZE) as u32
     }
 
-    fn get_padded_size(&self) -> u32 {
+    pub fn get_padded_size(&self) -> u32 {
         let data_size = self.get_data_size();
         let mut padded_size = (data_size / PADDED_SIZE_MULTIPLICAND) * PADDED_SIZE_MULTIPLICAND;
         if data_size % PADDED_SIZE_MULTIPLICAND != 0 {
@@ -193,7 +193,7 @@ impl PitData {
         }
     }
 
-    fn pack(&self, data: &mut [u8]) {
+    pub fn pack(&self, data: &mut [u8]) {
         let mut cursor = Cursor::new(data);
         if let Err(e) = self.write(&mut cursor) {
             eprintln!("Failed to pack PIT: {}", e);

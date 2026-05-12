@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 libpit = { path = "../libpit" }
 cxx = "1.0"
+rusb = "0.9"
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 
 [build-dependencies]

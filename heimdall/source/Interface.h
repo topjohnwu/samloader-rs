@@ -36,9 +36,12 @@ namespace Heimdall
         namespace Interface
         {
                 void Print(const char *format, ...);
+                void Print(rust::Str message);
                 void PrintWarning(const char *format, ...);
+                void PrintWarning(rust::Str message);
                 void PrintWarningSameLine(const char *format, ...);
                 void PrintError(const char *format, ...);
+                void PrintError(rust::Str message);
                 void PrintErrorSameLine(const char *format, ...);
 
                 void PrintVersion(void);

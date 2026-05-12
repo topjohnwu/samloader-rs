@@ -23,9 +23,9 @@
 
 // Heimdall
 #include "ActionInterfaces.h"
-#include "BridgeManager.h"
 #include "Heimdall.h"
 #include "Interface.h"
+#include "heimdall/src/main.rs.h"
 
 using namespace std;
 using namespace libpit;
@@ -87,16 +87,15 @@ int Heimdall::action_print_pit(rust::Str file, bool verbose, bool wait, bool std
         {
                 // Print PIT from a device.
 
-                BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
+                rust::Box<BridgeManager> bridgeManager = BridgeManager::create(verbose, waitForDevice);
                 bridgeManager->SetUsbLogLevel(usb_log_level);
 
                 if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
                 {
-                        delete bridgeManager;
                         return (1);
                 }
 
-                std::vector<unsigned char> devicePit = bridgeManager->DownloadPitFile();
+                rust::Vec<unsigned char> devicePit = bridgeManager->DownloadPitFile();
                 bool success = !devicePit.empty();
 
                 if (success)
@@ -116,8 +115,6 @@ int Heimdall::action_print_pit(rust::Str file, bool verbose, bool wait, bool std
 
                 if (!bridgeManager->EndSession())
                         success = false;
-
-                delete bridgeManager;
 
                 return (success ? 0 : 1);
         }

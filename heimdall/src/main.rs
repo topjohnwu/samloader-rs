@@ -16,17 +16,87 @@
 
 extern crate libpit;
 
+mod bridge_manager;
+mod packets;
+pub use crate::bridge_manager::BridgeManager;
+
 use clap::{Arg, Command, ArgAction};
 
 #[cxx::bridge(namespace = "Heimdall")]
 pub mod ffi {
+    enum InitialiseResult {
+        Succeeded = 0,
+        Failed,
+        DeviceNotDetected,
+    }
+
+    enum FileTransferDestination {
+        Phone = 0,
+        Modem = 1,
+    }
+
     struct PartitionArg {
         name: String,
         filename: String,
     }
 
+    extern "Rust" {
+        type BridgeManager;
+
+        #[Self = "BridgeManager"]
+        fn create(verbose: bool, wait_for_device: bool) -> Box<BridgeManager>;
+
+        #[cxx_name = "SetUsbLogLevel"]
+        fn set_usb_log_level(self: &mut BridgeManager, level: &str);
+        #[cxx_name = "DetectDevice"]
+        fn detect_device(self: &mut BridgeManager) -> bool;
+        #[cxx_name = "Initialise"]
+        fn initialise(self: &mut BridgeManager) -> InitialiseResult;
+
+        #[cxx_name = "BeginSession"]
+        fn begin_session(self: &mut BridgeManager) -> bool;
+        #[cxx_name = "EndSession"]
+        fn end_session(self: &BridgeManager) -> bool;
+
+        #[cxx_name = "SendTotalBytes"]
+        fn send_total_bytes(self: &BridgeManager, total_bytes: u64) -> bool;
+        #[cxx_name = "ReceiveSessionSetupResponse"]
+        fn receive_session_setup_response(self: &BridgeManager, result: &mut u32) -> bool;
+
+        #[cxx_name = "SendPitData"]
+        fn send_pit_data(self: &BridgeManager, pit_data: &PitData) -> bool;
+        #[cxx_name = "DownloadPitFile"]
+        fn download_pit_file(self: &BridgeManager) -> Vec<u8>;
+
+        #[cxx_name = "SendFile"]
+        unsafe fn send_file(
+            self: &BridgeManager,
+            file: *mut FILE,
+            destination: FileTransferDestination,
+            device_type: u32,
+            file_identifier: u32,
+        ) -> bool;
+    }
+
     unsafe extern "C++" {
+        #[namespace = ""]
+        type FILE;
+
         include!("heimdall/source/ActionInterfaces.h");
+        include!("heimdall/source/Interface.h");
+        include!("heimdall/libpit/src/lib.rs.h");
+
+        #[namespace = "Heimdall::Interface"]
+        fn Print(message: &str);
+        #[namespace = "Heimdall::Interface"]
+        fn PrintWarning(message: &str);
+        #[namespace = "Heimdall::Interface"]
+        fn PrintError(message: &str);
+        #[namespace = "Heimdall::Interface"]
+        fn PrintDeviceDetectionFailed();
+
+        #[namespace = "libpit"]
+        type PitData;
 
         fn action_close_pc_screen(verbose: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
         fn action_detect(verbose: bool, wait: bool, stdout_errors: bool, usb_log_level: &str) -> i32;
@@ -71,6 +141,31 @@ const FLASH_AFTER_HELP: &str = r#"Dynamic Options:
           Flashes the specified <filename> to the specified <partition identifier>."#;
 
 fn main() {
+    let mut args: Vec<String> = std::env::args().collect();
+    let mut partitions = Vec::new();
+    
+    // Filter out partition arguments for the flash command
+    if args.len() > 1 && args[1] == "flash" {
+        let mut i = 2;
+        while i < args.len() {
+            if args[i].starts_with("--") {
+                let key = args[i].trim_start_matches('-').to_string();
+                if !["repartition", "wait", "skip-size-check", "pit", "verbose", "stdout-errors", "usb-log-level"].contains(&key.to_lowercase().as_str()) {
+                    if i + 1 < args.len() && !args[i+1].starts_with("--") {
+                        partitions.push(ffi::PartitionArg {
+                            name: key.to_uppercase(),
+                            filename: args[i+1].clone(),
+                        });
+                        args.remove(i); // Remove value
+                        args.remove(i); // Remove key
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     let matches = Command::new("heimdall")
         .about("Heimdall - Glass Echidna")
         .subcommand_required(true)
@@ -96,7 +191,6 @@ fn main() {
             .about("Flashes one or more firmware files to your phone.")
             .long_about(FLASH_HELP)
             .after_help(FLASH_AFTER_HELP)
-            .ignore_errors(true)
             .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
             .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
@@ -105,7 +199,7 @@ fn main() {
             .about("Displays information about Heimdall."))
         .subcommand(Command::new("version")
             .about("Displays the version number of this binary."))
-        .get_matches();
+        .get_matches_from(args);
 
     let result = match matches.subcommand() {
         Some(("close-pc-screen", sub_matches)) => {
@@ -142,32 +236,6 @@ fn main() {
             )
         }
         Some(("flash", sub_matches)) => {
-            let mut partitions = vec![];
-            
-            // Collect unparsed arguments to form partition-filename pairs
-            let mut raw_args = std::env::args().skip(2).peekable();
-            while let Some(arg) = raw_args.next() {
-                if arg.starts_with("--") {
-                    let name = arg.trim_start_matches("--");
-                    // Skip known arguments
-                    match name {
-                        "repartition" | "verbose" | "stdout-errors" | "wait" | "skip-size-check" => continue,
-                        "usb-log-level" | "pit" => {
-                            raw_args.next(); // Skip value
-                            continue;
-                        }
-                        _ => {
-                            if let Some(filename) = raw_args.next() {
-                                partitions.push(ffi::PartitionArg {
-                                    name: name.to_string(),
-                                    filename,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            
             ffi::action_flash(
                 sub_matches.get_flag("repartition"),
                 sub_matches.get_flag("verbose"),

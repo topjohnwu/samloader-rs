@@ -25,11 +25,12 @@
 
 #include <string>
 #include <vector>
-#include "heimdall/src/main.rs.h"
-#include "BridgeManager.h"
+#include "rust/cxx.h"
 
 namespace Heimdall
 {
+	struct PartitionArg;
+
 	int action_close_pc_screen(bool verbose, bool stdout_errors, rust::Str usb_log_level);
 	int action_detect(bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level);
 	int action_download_pit(rust::Str output, bool verbose, bool wait, bool stdout_errors, rust::Str usb_log_level);

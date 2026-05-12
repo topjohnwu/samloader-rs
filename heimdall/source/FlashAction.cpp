@@ -23,14 +23,10 @@
 
 // Heimdall
 #include "ActionInterfaces.h"
-#include "BridgeManager.h"
-#include "EndModemFileTransferPacket.h"
-#include "EndPhoneFileTransferPacket.h"
 #include "Heimdall.h"
 #include "Interface.h"
-#include "SessionSetupResponse.h"
-#include "TotalBytesPacket.h"
 #include "Utility.h"
+#include "heimdall/src/main.rs.h"
 
 using namespace std;
 using namespace libpit;
@@ -136,9 +132,7 @@ static bool sendTotalTransferSize(BridgeManager *bridgeManager, const vector<Par
 
         bool success;
 
-        TotalBytesPacket *totalBytesPacket = new TotalBytesPacket(totalBytes);
-        success = bridgeManager->SendPacket(totalBytesPacket);
-        delete totalBytesPacket;
+        success = bridgeManager->SendTotalBytes(totalBytes);
 
         if (!success)
         {
@@ -146,10 +140,8 @@ static bool sendTotalTransferSize(BridgeManager *bridgeManager, const vector<Par
                 return (false);
         }
 
-        SessionSetupResponse *totalBytesResponse = new SessionSetupResponse();
-        success = bridgeManager->ReceivePacket(totalBytesResponse);
-        int totalBytesResult = totalBytesResponse->GetResult();
-        delete totalBytesResponse;
+        unsigned int totalBytesResult;
+        success = bridgeManager->ReceiveSessionSetupResponse(totalBytesResult);
 
         if (!success)
         {
@@ -229,8 +221,8 @@ static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& pa
         {
                 Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
-                if (bridgeManager->SendFile(partitionFlashInfo.file, EndModemFileTransferPacket::kDestinationModem,
-                        partitionFlashInfo.pitEntry->GetDeviceType()))
+                if (bridgeManager->SendFile(partitionFlashInfo.file, FileTransferDestination::Modem,
+                        partitionFlashInfo.pitEntry->GetDeviceType(), 0xFFFFFFFF))
                 {
                         Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
                         return (true);
@@ -245,7 +237,7 @@ static bool flashFile(BridgeManager *bridgeManager, const PartitionFlashInfo& pa
         {
                 Interface::Print("Uploading %s\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
 
-                if (bridgeManager->SendFile(partitionFlashInfo.file, EndPhoneFileTransferPacket::kDestinationPhone,
+                if (bridgeManager->SendFile(partitionFlashInfo.file, FileTransferDestination::Phone,
                         partitionFlashInfo.pitEntry->GetDeviceType(), partitionFlashInfo.pitEntry->GetIdentifier()))
                 {
                         Interface::Print("%s upload successful\n\n", partitionFlashInfo.pitEntry->GetPartitionName().c_str());
@@ -379,7 +371,7 @@ static PitData *getPitData(BridgeManager *bridgeManager, FILE *pitFile, bool rep
         else
         {
                 // If we're not repartitioning then we need to retrieve the device's PIT file and unpack it.
-                std::vector<unsigned char> pitFileBuffer = bridgeManager->DownloadPitFile();
+                rust::Vec<unsigned char> pitFileBuffer = bridgeManager->DownloadPitFile();
                 if (pitFileBuffer.empty())
                         return (nullptr);
 
@@ -444,25 +436,24 @@ int Heimdall::action_flash(bool repartition, bool verbose, bool wait, bool stdou
 
         // Perform flash
 
-        BridgeManager *bridgeManager = new BridgeManager(verbose, waitForDevice);
+        rust::Box<BridgeManager> bridgeManager = BridgeManager::create(verbose, waitForDevice);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
         if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
         {
                 closeFiles(partitionFiles, pitFile);
-                delete bridgeManager;
 
                 return (1);
         }
 
-        bool success = sendTotalTransferSize(bridgeManager, partitionFiles, pitFile, repartition);
+        bool success = sendTotalTransferSize(&*bridgeManager, partitionFiles, pitFile, repartition);
 
         if (success)
         {
-                PitData *pitData = getPitData(bridgeManager, pitFile, repartition);
+                PitData *pitData = getPitData(&*bridgeManager, pitFile, repartition);
 
                 if (pitData)
-                        success = flashPartitions(bridgeManager, partitionFiles,
+                        success = flashPartitions(&*bridgeManager, partitionFiles,
                                                   *pitData, repartition,
                                                   skipSizeCheck);
                 else
@@ -473,8 +464,6 @@ int Heimdall::action_flash(bool repartition, bool verbose, bool wait, bool stdou
 
         if (!bridgeManager->EndSession())
                 success = false;
-
-        delete bridgeManager;
 
         closeFiles(partitionFiles, pitFile);
 

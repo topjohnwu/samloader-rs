@@ -20,9 +20,9 @@
 
 // Heimdall
 #include "ActionInterfaces.h"
-#include "BridgeManager.h"
 #include "Heimdall.h"
 #include "Interface.h"
+#include "heimdall/src/main.rs.h"
 
 using namespace std;
 using namespace Heimdall;
@@ -38,19 +38,17 @@ int Heimdall::action_close_pc_screen(bool verbose, bool stdout_errors, rust::Str
         Sleep(1000);
 
         // Download PIT file from device.
-        BridgeManager *bridgeManager = new BridgeManager(verbose, false);
+        rust::Box<BridgeManager> bridgeManager = BridgeManager::create(verbose, false);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
         if (bridgeManager->Initialise() != InitialiseResult::Succeeded || !bridgeManager->BeginSession())
         {
-                delete bridgeManager;
                 return (1);
         }
 
         Interface::Print("Attempting to close connect to pc screen...\n");
 
         bool success = bridgeManager->EndSession();
-        delete bridgeManager;
 
         if (success)
         {

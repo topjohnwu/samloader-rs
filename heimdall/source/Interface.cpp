@@ -59,6 +59,12 @@ void Interface::Print(const char *format, ...)
 
 }
 
+void Interface::Print(rust::Str message)
+{
+        fprintf(stdout, "%.*s", (int)message.length(), message.data());
+        fflush(stdout);
+}
+
 void Interface::PrintWarning(const char *format, ...)
 {
         va_list stderrArgs;
@@ -79,6 +85,18 @@ void Interface::PrintWarning(const char *format, ...)
         fflush(stderr);
 
         va_end(stderrArgs);
+}
+
+void Interface::PrintWarning(rust::Str message)
+{
+        if (stdoutErrors)
+        {
+                fprintf(stdout, "WARNING: %.*s", (int)message.length(), message.data());
+                fflush(stdout);
+        }
+
+        fprintf(stderr, "WARNING: %.*s", (int)message.length(), message.data());
+        fflush(stderr);
 }
 
 void Interface::PrintWarningSameLine(const char *format, ...)
@@ -121,6 +139,18 @@ void Interface::PrintError(const char *format, ...)
         fflush(stderr);
 
         va_end(stderrArgs);
+}
+
+void Interface::PrintError(rust::Str message)
+{
+        if (stdoutErrors)
+        {
+                fprintf(stdout, "ERROR: %.*s", (int)message.length(), message.data());
+                fflush(stdout);
+        }
+
+        fprintf(stderr, "ERROR: %.*s", (int)message.length(), message.data());
+        fflush(stderr);
 }
 
 void Interface::PrintErrorSameLine(const char *format, ...)

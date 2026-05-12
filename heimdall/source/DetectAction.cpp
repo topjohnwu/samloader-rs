@@ -20,9 +20,9 @@
 
 // Heimdall
 #include "ActionInterfaces.h"
-#include "BridgeManager.h"
 #include "Heimdall.h"
 #include "Interface.h"
+#include "heimdall/src/main.rs.h"
 
 using namespace std;
 using namespace Heimdall;
@@ -33,12 +33,10 @@ int Heimdall::action_detect(bool verbose, bool wait, bool stdout_errors, rust::S
         if (stdout_errors)
                 Interface::SetStdoutErrors(true);
 
-        BridgeManager *bridgeManager = new BridgeManager(verbose, wait);
+        rust::Box<BridgeManager> bridgeManager = BridgeManager::create(verbose, wait);
         bridgeManager->SetUsbLogLevel(usb_log_level);
 
         bool detected = bridgeManager->DetectDevice();
-
-        delete bridgeManager;
 
         return ((detected) ? 0 : 1);
 }
