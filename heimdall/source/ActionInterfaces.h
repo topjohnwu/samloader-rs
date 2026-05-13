@@ -31,7 +31,6 @@ namespace Heimdall
 {
 	struct PartitionArg;
 
-	int action_close_pc_screen(bool verbose, rust::Str usb_log_level);
 	int action_detect(bool verbose, bool wait, rust::Str usb_log_level);
 	int action_download_pit(rust::Str output, bool verbose, bool wait, rust::Str usb_log_level);
 	int action_print_pit(rust::Str file, bool verbose, bool wait, rust::Str usb_log_level);

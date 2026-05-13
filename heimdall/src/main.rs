@@ -89,7 +89,6 @@ pub mod ffi {
         #[namespace = "libpit"]
         type PitData;
 
-        fn action_close_pc_screen(verbose: bool, usb_log_level: &str) -> i32;
         fn action_detect(verbose: bool, wait: bool, usb_log_level: &str) -> i32;
         fn action_download_pit(output: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32;
         fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32;
@@ -120,8 +119,6 @@ fn add_common_args(cmd: Command) -> Command {
     cmd.arg(Arg::new("verbose").long("verbose").action(ArgAction::SetTrue).help("Enable verbose output"))
        .arg(Arg::new("usb-log-level").long("usb-log-level").num_args(1).help("Set libusb log level (none, error, warning, info, debug)"))
 }
-
-const CLOSE_PC_SCREEN_HELP: &str = r#"Attempts to get rid off the "connect phone to PC" screen."#;
 
 const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can be detected.
 
@@ -176,9 +173,6 @@ fn main() {
         .about("Heimdall - Glass Echidna")
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .subcommand(add_common_args(Command::new("close-pc-screen"))
-            .about("Attempts to get rid off the \"connect phone to PC\" screen.")
-            .long_about(CLOSE_PC_SCREEN_HELP))
         .subcommand(add_common_args(Command::new("detect"))
             .about("Indicates whether or not a download mode device can be detected.")
             .long_about(DETECT_HELP)
@@ -208,12 +202,6 @@ fn main() {
         .get_matches_from(args);
 
     let result = match matches.subcommand() {
-        Some(("close-pc-screen", sub_matches)) => {
-            ffi::action_close_pc_screen(
-                sub_matches.get_flag("verbose"),
-                sub_matches.get_one::<String>("usb-log-level").map(|s| s.as_str()).unwrap_or(""),
-            )
-        }
         Some(("detect", sub_matches)) => {
             ffi::action_detect(
                 sub_matches.get_flag("verbose"),
