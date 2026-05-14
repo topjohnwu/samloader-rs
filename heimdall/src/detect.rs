@@ -15,7 +15,7 @@
 
 use crate::BridgeManager;
 
-pub fn action_detect(verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
+pub(crate) fn action_detect(verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
     let mut bridge_manager = BridgeManager::new(verbose, wait);
     bridge_manager.set_usb_log_level(usb_log_level);
 

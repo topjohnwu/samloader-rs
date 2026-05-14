@@ -23,7 +23,7 @@ use std::io::Read;
 use std::thread::sleep;
 use std::time::Duration;
 
-pub fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
+pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
     version::print_release_info();
     sleep(Duration::from_millis(1000));
 

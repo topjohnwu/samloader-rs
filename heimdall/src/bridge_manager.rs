@@ -20,15 +20,15 @@ use libpit::PitData;
 use rusb::{Context, DeviceHandle, LogLevel, UsbContext};
 use std::time::Duration;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EmptyTransferMode {
-    None = 0,
-    Before = 1,
-    After = 2,
-    BeforeAndAfter = 3,
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum EmptyTransferMode {
+    None = 0x0,
+    Before = 0x1,
+    After = 0x2,
+    BeforeAndAfter = 0x3,
 }
 
-pub struct BridgeManager {
+pub(crate) struct BridgeManager {
     verbose: bool,
     wait_for_device: bool,
     context: Context,
@@ -65,7 +65,7 @@ const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
 const USB_CLASS_CDC_DATA: u8 = 0x0A;
 
 impl BridgeManager {
-    pub fn new(verbose: bool, wait_for_device: bool) -> Self {
+    pub(crate) fn new(verbose: bool, wait_for_device: bool) -> Self {
         let context = Context::new().expect("Failed to create libusb context");
         Self {
             verbose,
@@ -87,7 +87,7 @@ impl BridgeManager {
         }
     }
 
-    pub fn set_usb_log_level(&mut self, level: &str) {
+    pub(crate) fn set_usb_log_level(&mut self, level: &str) {
         self.usb_log_level = match level.to_lowercase().as_str() {
             "debug" => LogLevel::Debug,
             "info" => LogLevel::Info,
@@ -99,7 +99,7 @@ impl BridgeManager {
         self.context.set_log_level(self.usb_log_level);
     }
 
-    pub fn detect_device(&mut self) -> bool {
+    pub(crate) fn detect_device(&mut self) -> bool {
         if self.wait_for_device {
             println!("Waiting for device...");
         }
@@ -408,7 +408,7 @@ impl BridgeManager {
         false
     }
 
-    pub fn initialise(&mut self) -> InitialiseResult {
+    pub(crate) fn initialise(&mut self) -> InitialiseResult {
         println!("Initialising connection...");
 
         let res = self.find_device_interface();
@@ -431,7 +431,7 @@ impl BridgeManager {
         InitialiseResult::Succeeded
     }
 
-    pub fn begin_session(&mut self) -> bool {
+    pub(crate) fn begin_session(&mut self) -> bool {
         println!("Beginning session...");
 
         let packet = packets::BeginSessionPacket::create();
@@ -493,7 +493,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn end_session(&self) -> bool {
+    pub(crate) fn end_session(&self) -> bool {
         println!("Ending session...");
 
         let packet = packets::SessionSetupPacket::create_end_session(0); // kRequestEndSession
@@ -537,7 +537,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn send_bulk_transfer(
+    fn send_bulk_transfer(
         &self,
         data: *const u8,
         length: i32,
@@ -600,7 +600,7 @@ impl BridgeManager {
         }
     }
 
-    pub fn receive_bulk_transfer(
+    fn receive_bulk_transfer(
         &self,
         data: *mut u8,
         length: i32,
@@ -666,7 +666,7 @@ impl BridgeManager {
         }
     }
 
-    pub fn send_packet(
+    fn send_packet(
         &self,
         packet: &[u8],
         timeout: i32,
@@ -695,7 +695,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn receive_packet(
+    fn receive_packet(
         &self,
         packet: &mut [u8],
         timeout: i32,
@@ -740,7 +740,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn send_pit_data(&self, pit_data: &PitData) -> bool {
+    pub(crate) fn send_pit_data(&self, pit_data: &PitData) -> bool {
         let pit_buffer_size = pit_data.get_padded_size();
 
         // Start file transfer
@@ -823,7 +823,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn receive_pit_file(&self) -> Vec<u8> {
+    fn receive_pit_file(&self) -> Vec<u8> {
         let packet = packets::PitFilePacket::create(packets::REQUEST_PIT_FILE_DUMP);
         let mut success = self.send_packet(&packet, 3000, EmptyTransferMode::After);
 
@@ -908,7 +908,7 @@ impl BridgeManager {
         buffer
     }
 
-    pub fn download_pit_file(&self) -> Vec<u8> {
+    pub(crate) fn download_pit_file(&self) -> Vec<u8> {
         println!("Downloading device's PIT file...");
 
         let pit_file = self.receive_pit_file();
@@ -922,7 +922,7 @@ impl BridgeManager {
         pit_file
     }
 
-    pub fn send_file_from_reader<R: std::io::Read + std::io::Seek>(
+    pub(crate) fn send_file_from_reader<R: std::io::Read + std::io::Seek>(
         &self,
         reader: &mut R,
         file_size: u32,
@@ -1189,12 +1189,12 @@ impl BridgeManager {
         true
     }
 
-    pub fn send_total_bytes(&self, total_bytes: u64) -> bool {
+    pub(crate) fn send_total_bytes(&self, total_bytes: u64) -> bool {
         let packet = packets::TotalBytesPacket::create(total_bytes);
         self.send_packet(&packet, 3000, EmptyTransferMode::After)
     }
 
-    pub fn receive_session_setup_response(&self, result: &mut u32) -> bool {
+    pub(crate) fn receive_session_setup_response(&self, result: &mut u32) -> bool {
         let mut response = [0u8; 8];
         if !self.receive_packet(&mut response, 3000, EmptyTransferMode::None) {
             return false;

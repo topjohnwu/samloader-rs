@@ -13,24 +13,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const VERSION: &str = "v2.2.2";
+const VERSION: &str = "v2.2.2";
 
-pub const RELEASE_INFO: &str = "Heimdall v2.2.2\n\n\
+const RELEASE_INFO: &str = "Heimdall v2.2.2\n\n\
 Copyright (c) 2010-2017 Benjamin Dobell, Glass Echidna https://glassechidna.com.au\n\
 Copyright (c) 2021-2024 Henrik Grimler\n\
 This software is provided free of charge. Copying and redistribution is encouraged.\n\n";
 
 const EXTRA_INFO: &str = "Heimdall utilises libusb for all USB communication:\n    https://www.libusb.info/\n\nlibusb is licensed under the LGPL-2.1:\n    https://www.gnu.org/licenses/licenses.html#LGPL\n\n";
 
-pub fn print_version() {
+pub(crate) fn print_version() {
     println!("{}", VERSION);
 }
 
-pub fn print_release_info() {
+pub(crate) fn print_release_info() {
     print!("{}", RELEASE_INFO);
 }
 
-pub fn print_full_info() {
+pub(crate) fn print_full_info() {
     print!("{}", RELEASE_INFO);
     print!("{}", EXTRA_INFO);
 }

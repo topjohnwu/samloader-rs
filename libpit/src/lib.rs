@@ -19,16 +19,16 @@ use modular_bitfield::prelude::*;
 use std::borrow::Cow;
 use std::ffi::CStr;
 
-pub const FILE_IDENTIFIER: u32 = 0x12349876;
-pub const HEADER_DATA_SIZE: u32 = 28;
-pub const PADDED_SIZE_MULTIPLICAND: u32 = 4096;
+const FILE_IDENTIFIER: u32 = 0x12349876;
+const HEADER_DATA_SIZE: u32 = 28;
+const PADDED_SIZE_MULTIPLICAND: u32 = 4096;
 
-pub const DATA_SIZE: usize = 132;
-pub const PARTITION_NAM_LENGTH: usize = 32;
-pub const FLASH_FILENAME_LENGTH: usize = 32;
-pub const FOTA_FILENAME_LENGTH: usize = 32;
+const DATA_SIZE: usize = 132;
+const PARTITION_NAM_LENGTH: usize = 32;
+const FLASH_FILENAME_LENGTH: usize = 32;
+const FOTA_FILENAME_LENGTH: usize = 32;
 
-#[derive(BinRead, BinWrite, Debug, Clone, PartialEq, Eq)]
+#[derive(BinRead, BinWrite, PartialEq, Eq)]
 pub struct FixedString<const LEN: usize> {
     pub data: [u8; LEN],
 }
@@ -61,7 +61,7 @@ impl<const LEN: usize> PartialEq<&str> for FixedString<LEN> {
 }
 
 #[bitfield(bits = 32)]
-#[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(BinRead, BinWrite, Copy, Clone, Default, PartialEq, Eq)]
 #[br(map = |x: u32| Self::from_bytes(x.to_le_bytes()))]
 #[bw(map = |x: &Self| u32::from_le_bytes(x.into_bytes()))]
 pub struct Attribute {
@@ -72,7 +72,7 @@ pub struct Attribute {
 }
 
 #[bitfield(bits = 32)]
-#[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(BinRead, BinWrite, Copy, Clone, Default, PartialEq, Eq)]
 #[br(map = |x: u32| Self::from_bytes(x.to_le_bytes()))]
 #[bw(map = |x: &Self| u32::from_le_bytes(x.into_bytes()))]
 pub struct UpdateAttribute {
@@ -83,7 +83,7 @@ pub struct UpdateAttribute {
 }
 
 #[binrw]
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 #[brw(little)]
 pub struct PitEntry {
     pub binary_type: u32,
@@ -101,7 +101,7 @@ pub struct PitEntry {
 }
 
 #[binrw]
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 #[brw(little)]
 pub struct PitData {
     #[br(temp, assert(magic == FILE_IDENTIFIER))]

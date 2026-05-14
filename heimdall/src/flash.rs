@@ -37,7 +37,7 @@ struct PartitionFlashInfo<'a> {
     file_size: u32,
 }
 
-pub fn action_flash(
+pub(crate) fn action_flash(
     repartition: bool,
     verbose: bool,
     wait: bool,

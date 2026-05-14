@@ -27,21 +27,20 @@ mod version;
 use bridge_manager::BridgeManager;
 use clap::{Arg, ArgAction, Command};
 
-#[derive(Clone)]
-pub struct PartitionArg {
-    pub name: String,
-    pub filename: String,
+pub(crate) struct PartitionArg {
+    pub(crate) name: String,
+    pub(crate) filename: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum InitialiseResult {
+pub(crate) enum InitialiseResult {
     Succeeded = 0,
     Failed,
     DeviceNotDetected,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FileTransferDestination {
+pub(crate) enum FileTransferDestination {
     Phone = 0,
     Modem = 1,
 }
