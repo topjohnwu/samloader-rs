@@ -21,7 +21,6 @@ pub const CONTROL_TYPE_FILE_TRANSFER: u32 = 0x66;
 pub const CONTROL_TYPE_END_SESSION: u32 = 0x67;
 
 pub const REQUEST_BEGIN_SESSION: u32 = 0;
-pub const REQUEST_DEVICE_TYPE: u32 = 1;
 pub const REQUEST_TOTAL_BYTES: u32 = 2;
 pub const REQUEST_FILE_PART_SIZE: u32 = 5;
 
@@ -75,24 +74,12 @@ pub struct SessionSetupPacket {
 }
 
 impl SessionSetupPacket {
-    pub fn create(request: u32) -> Vec<u8> {
-        to_vec(SessionSetupPacket {
-            control_type: CONTROL_TYPE_SESSION,
-            request,
-            _padding: (),
-        })
-    }
-
     pub fn create_end_session(request: u32) -> Vec<u8> {
         to_vec(SessionSetupPacket {
             control_type: CONTROL_TYPE_END_SESSION,
             request,
             _padding: (),
         })
-    }
-
-    pub fn create_device_type() -> Vec<u8> {
-        Self::create(REQUEST_DEVICE_TYPE)
     }
 }
 

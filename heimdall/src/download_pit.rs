@@ -19,7 +19,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use crate::version;
 use crate::BridgeManager;
-use crate::ffi::InitialiseResult;
+use crate::InitialiseResult;
 use crate::print_error;
 
 pub fn action_download_pit(output: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {

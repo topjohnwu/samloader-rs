@@ -119,32 +119,28 @@ pub struct PitData {
 }
 
 impl PitEntry {
-    fn get_binary_type(&self) -> u32 {
+    pub fn get_binary_type(&self) -> u32 {
         self.binary_type
     }
 
-    fn get_device_type(&self) -> u32 {
+    pub fn get_device_type(&self) -> u32 {
         self.device_type
     }
 
-    fn get_identifier(&self) -> u32 {
+    pub fn get_identifier(&self) -> u32 {
         self.identifier
     }
 
-    fn get_block_count(&self) -> u32 {
+    pub fn get_block_count(&self) -> u32 {
         self.block_count
     }
 
-    fn get_partition_name(&self) -> String {
+    pub fn get_partition_name(&self) -> String {
         self.partition_name.to_string()
     }
 }
 
 impl PitData {
-    fn new_box() -> Box<Self> {
-        Box::new(Self::default())
-    }
-
     pub fn new(data: &[u8]) -> Result<Self, binrw::Error> {
         if data.len() < 8 {
             return Err(binrw::Error::Io(std::io::Error::new(
@@ -184,30 +180,16 @@ impl PitData {
         padded_size
     }
 
-    fn find_entry_by_name(&self, name: &str) -> *const PitEntry {
+    pub fn find_entry_by_name(&self, name: &str) -> Option<&PitEntry> {
         self.entries
             .iter()
             .find(|e| e.partition_name == name)
-            .map(|e| e as *const _)
-            .unwrap_or(std::ptr::null())
     }
 
-    fn find_entry_by_id(&self, id: u32) -> *const PitEntry {
+    pub fn find_entry_by_id(&self, id: u32) -> Option<&PitEntry> {
         self.entries
             .iter()
             .find(|e| e.identifier == id)
-            .map(|e| e as *const _)
-            .unwrap_or(std::ptr::null())
-    }
-
-    fn unpack(&mut self, data: &[u8]) -> bool {
-        match Self::new(data) {
-            Ok(unpacked) => {
-                *self = unpacked;
-                true
-            }
-            Err(_) => false,
-        }
     }
 
     pub fn pack(&self, data: &mut [u8]) {
@@ -215,10 +197,6 @@ impl PitData {
         if let Err(e) = self.write(&mut cursor) {
             eprintln!("Failed to pack PIT: {}", e);
         }
-    }
-
-    fn matches(&self, other: &PitData) -> bool {
-        self == other
     }
 
     pub fn print(&self) {
@@ -295,64 +273,4 @@ impl PitData {
     }
 }
 
-#[cxx::bridge(namespace = "libpit")]
-pub mod ffi {
-    #[repr(u32)]
-    enum BinaryType {
-        ApplicationProcessor = 0,
-        CommunicationProcessor = 1,
-    }
 
-    #[repr(u32)]
-    enum DeviceType {
-        OneNand = 0,
-        File = 1,
-        MMC = 2,
-        All = 3,
-        UFS = 8,
-    }
-
-    extern "Rust" {
-        type PitEntry;
-
-        #[cxx_name = "GetBinaryType"]
-        fn get_binary_type(self: &PitEntry) -> u32;
-
-        #[cxx_name = "GetDeviceType"]
-        fn get_device_type(self: &PitEntry) -> u32;
-
-        #[cxx_name = "GetIdentifier"]
-        fn get_identifier(self: &PitEntry) -> u32;
-
-        #[cxx_name = "GetBlockCount"]
-        fn get_block_count(self: &PitEntry) -> u32;
-
-        #[cxx_name = "GetPartitionName"]
-        fn get_partition_name(self: &PitEntry) -> String;
-
-        type PitData;
-
-        #[Self = "PitData"]
-        #[cxx_name = "make"]
-        fn new_box() -> Box<PitData>;
-
-        #[cxx_name = "GetPaddedSize"]
-        fn get_padded_size(self: &PitData) -> u32;
-
-        #[cxx_name = "FindEntry"]
-        fn find_entry_by_name(self: &PitData, name: &str) -> *const PitEntry;
-        #[cxx_name = "FindEntry"]
-        fn find_entry_by_id(self: &PitData, id: u32) -> *const PitEntry;
-
-        #[cxx_name = "Unpack"]
-        fn unpack(self: &mut PitData, data: &[u8]) -> bool;
-        #[cxx_name = "Pack"]
-        fn pack(self: &PitData, data: &mut [u8]);
-
-        #[cxx_name = "Matches"]
-        fn matches(self: &PitData, other: &PitData) -> bool;
-
-        #[cxx_name = "Print"]
-        fn print(self: &PitData);
-    }
-}

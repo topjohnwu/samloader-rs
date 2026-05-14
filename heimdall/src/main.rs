@@ -22,84 +22,28 @@ mod version;
 mod print_pit;
 mod download_pit;
 mod detect;
+mod flash;
 
 use bridge_manager::BridgeManager;
 use clap::{Arg, Command, ArgAction};
-use version::print_release_info;
 
-#[cxx::bridge(namespace = "Heimdall")]
-pub mod ffi {
-    enum InitialiseResult {
-        Succeeded = 0,
-        Failed,
-        DeviceNotDetected,
-    }
+#[derive(Clone)]
+pub struct PartitionArg {
+    pub name: String,
+    pub filename: String,
+}
 
-    enum FileTransferDestination {
-        Phone = 0,
-        Modem = 1,
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InitialiseResult {
+    Succeeded = 0,
+    Failed,
+    DeviceNotDetected,
+}
 
-    struct PartitionArg {
-        name: String,
-        filename: String,
-    }
-
-    extern "Rust" {
-        type BridgeManager;
-
-        #[Self = "BridgeManager"]
-        fn create(verbose: bool, wait_for_device: bool) -> Box<BridgeManager>;
-
-        #[cxx_name = "SetUsbLogLevel"]
-        fn set_usb_log_level(self: &mut BridgeManager, level: &str);
-        #[cxx_name = "DetectDevice"]
-        fn detect_device(self: &mut BridgeManager) -> bool;
-        #[cxx_name = "Initialise"]
-        fn initialise(self: &mut BridgeManager) -> InitialiseResult;
-
-        #[cxx_name = "BeginSession"]
-        fn begin_session(self: &mut BridgeManager) -> bool;
-        #[cxx_name = "EndSession"]
-        fn end_session(self: &BridgeManager) -> bool;
-
-        #[cxx_name = "SendTotalBytes"]
-        fn send_total_bytes(self: &BridgeManager, total_bytes: u64) -> bool;
-        #[cxx_name = "ReceiveSessionSetupResponse"]
-        fn receive_session_setup_response(self: &BridgeManager, result: &mut u32) -> bool;
-
-        #[cxx_name = "SendPitData"]
-        fn send_pit_data(self: &BridgeManager, pit_data: &PitData) -> bool;
-        #[cxx_name = "DownloadPitFile"]
-        fn download_pit_file(self: &BridgeManager) -> Vec<u8>;
-
-        #[cxx_name = "SendFile"]
-        unsafe fn send_file(
-            self: &BridgeManager,
-            file: *mut FILE,
-            destination: FileTransferDestination,
-            device_type: u32,
-            file_identifier: u32,
-        ) -> bool;
-
-        #[namespace = "Heimdall::Interface"]
-        #[cxx_name = "PrintReleaseInfo"]
-        fn print_release_info();
-    }
-
-    unsafe extern "C++" {
-        #[namespace = ""]
-        type FILE;
-
-        include!("heimdall/source/ActionInterfaces.h");
-        include!("heimdall/source/Interface.h");
-        include!("heimdall/libpit/src/lib.rs.h");
-
-        #[namespace = "libpit"]
-        type PitData;
-
-        fn action_flash(repartition: bool, verbose: bool, wait: bool, usb_log_level: &str, skip_size_check: bool, pit: &str, partitions: &Vec<PartitionArg>) -> i32;
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileTransferDestination {
+    Phone = 0,
+    Modem = 1,
 }
 
 #[macro_export]
@@ -158,7 +102,7 @@ fn main() {
                 let key = args[i].trim_start_matches('-').to_string();
                 if !["repartition", "wait", "skip-size-check", "pit", "verbose", "usb-log-level"].contains(&key.to_lowercase().as_str()) {
                     if i + 1 < args.len() && !args[i+1].starts_with("--") {
-                        partitions.push(ffi::PartitionArg {
+                        partitions.push(PartitionArg {
                             name: key.to_uppercase(),
                             filename: args[i+1].clone(),
                         });
@@ -229,7 +173,7 @@ fn main() {
             )
         }
         Some(("flash", sub_matches)) => {
-            ffi::action_flash(
+            flash::action_flash(
                 sub_matches.get_flag("repartition"),
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("wait"),

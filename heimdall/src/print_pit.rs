@@ -19,7 +19,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use crate::version;
 use crate::BridgeManager;
-use crate::ffi::InitialiseResult;
+use crate::InitialiseResult;
 use crate::print_error;
 use libpit::PitData;
 

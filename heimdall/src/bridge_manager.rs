@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::ffi::{InitialiseResult, PitData as FfiPitData, FileTransferDestination};
+use crate::{InitialiseResult, FileTransferDestination};
 use crate::{print_warning, print_error};
 use crate::packets;
 use libpit::PitData;
@@ -85,10 +85,6 @@ impl BridgeManager {
             file_transfer_packet_size: FILE_TRANSFER_PACKET_SIZE_DEFAULT,
             file_transfer_sequence_timeout: FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT,
         }
-    }
-
-    pub fn create(verbose: bool, wait_for_device: bool) -> Box<Self> {
-        Box::new(Self::new(verbose, wait_for_device))
     }
 
     pub fn set_usb_log_level(&mut self, level: &str) {
@@ -656,32 +652,7 @@ impl BridgeManager {
         true
     }
 
-    pub fn request_device_type(&self, _request: u32, result: &mut i32) -> bool {
-        let packet = packets::SessionSetupPacket::create_device_type();
-        let success = self.send_packet(&packet, 3000, EmptyTransferMode::After);
-
-        if !success {
-            print_error!("Failed to request device info packet!");
-            return false;
-        }
-
-        let mut response = [0u8; 8];
-        let success = self.receive_packet(&mut response, 3000, EmptyTransferMode::None);
-        if !success {
-            return false;
-        }
-
-        match packets::Response::unpack(&response, packets::RESPONSE_TYPE_SESSION_SETUP) {
-            Ok(res) => {
-                *result = res as i32;
-                true
-            },
-            Err(_) => false,
-        }
-    }
-
-    pub fn send_pit_data(&self, pit_data: &FfiPitData) -> bool {
-        let pit_data: &PitData = unsafe { std::mem::transmute(pit_data) };
+    pub fn send_pit_data(&self, pit_data: &PitData) -> bool {
         let pit_buffer_size = pit_data.get_padded_size();
 
         // Start file transfer
@@ -851,23 +822,14 @@ impl BridgeManager {
         pit_file
     }
 
-    pub unsafe fn send_file(
+    pub fn send_file_from_reader<R: std::io::Read + std::io::Seek>(
         &self,
-        file: *mut crate::ffi::FILE,
+        reader: &mut R,
+        file_size: u32,
         destination: FileTransferDestination,
         device_type: u32,
         file_identifier: u32,
     ) -> bool {
-        if file.is_null() {
-            return false;
-        }
-
-        let file = file as *mut libc::FILE;
-
-        libc::fseek(file, 0, libc::SEEK_END);
-        let file_size = libc::ftell(file) as u32;
-        libc::rewind(file);
-
         // Start file transfer
         let packet = packets::FileTransferPacket::create(packets::REQUEST_FILE_TRANSFER_FLASH);
         let mut success = self.send_packet(&packet, 3000, EmptyTransferMode::After);
@@ -937,10 +899,11 @@ impl BridgeManager {
                     self.file_transfer_packet_size
                 };
 
-                // Read data from file
+                // Read data from reader
                 file_buffer.fill(0);
-                let bytes_read = libc::fread(file_buffer.as_mut_ptr() as *mut libc::c_void, 1, packet_byte_count as usize, file);
-                if bytes_read != packet_byte_count as usize {
+                if let Err(e) = reader.read_exact(&mut file_buffer[..packet_byte_count as usize]) {
+                     print_error!("Failed to read from file: {}", e);
+                     return false;
                 }
 
                 let packet = packets::create_send_file_part_packet(&file_buffer, self.file_transfer_packet_size);
@@ -976,9 +939,15 @@ impl BridgeManager {
                         println!();
                         println!("Retrying...");
 
-                        // Rewind file pointer
-                        libc::fseek(file, (bytes_transferred) as i64, libc::SEEK_SET);
-                        libc::fread(file_buffer.as_mut_ptr() as *mut libc::c_void, 1, packet_byte_count as usize, file);
+                        // Rewind reader pointer
+                        if let Err(e) = reader.seek(std::io::SeekFrom::Start(bytes_transferred as u64)) {
+                            print_error!("Failed to seek in file: {}", e);
+                            return false;
+                        }
+                        if let Err(e) = reader.read_exact(&mut file_buffer[..packet_byte_count as usize]) {
+                            print_error!("Failed to read from file: {}", e);
+                            return false;
+                        }
 
                         let packet = packets::create_send_file_part_packet(&file_buffer, self.file_transfer_packet_size);
                         success = self.send_packet(&packet, 3000, send_empty_transfer_mode);
@@ -1033,7 +1002,6 @@ impl BridgeManager {
                 FileTransferDestination::Phone => {
                     packets::EndPhoneFileTransferPacket::create(sequence_effective_byte_count, 0, device_type, file_identifier, is_last_sequence)
                 },
-                _ => unreachable!(),
             };
 
             success = self.send_packet(&packet, 3000, EmptyTransferMode::BeforeAndAfter);
