@@ -21,6 +21,7 @@ mod packets;
 mod version;
 mod print_pit;
 mod download_pit;
+mod detect;
 
 use bridge_manager::BridgeManager;
 use clap::{Arg, Command, ArgAction};
@@ -97,7 +98,6 @@ pub mod ffi {
         #[namespace = "libpit"]
         type PitData;
 
-        fn action_detect(verbose: bool, wait: bool, usb_log_level: &str) -> i32;
         fn action_flash(repartition: bool, verbose: bool, wait: bool, usb_log_level: &str, skip_size_check: bool, pit: &str, partitions: &Vec<PartitionArg>) -> i32;
     }
 }
@@ -206,7 +206,7 @@ fn main() {
 
     let result = match matches.subcommand() {
         Some(("detect", sub_matches)) => {
-            ffi::action_detect(
+            detect::action_detect(
                 sub_matches.get_flag("verbose"),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_one::<String>("usb-log-level").map(|s| s.as_str()).unwrap_or(""),

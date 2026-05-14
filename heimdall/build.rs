@@ -135,7 +135,6 @@ fn main() {
 
     // Source files
     let sources = [
-        "source/DetectAction.cpp",
         "source/FlashAction.cpp",
         "source/Interface.cpp",
         "source/Utility.cpp",

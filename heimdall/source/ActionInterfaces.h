@@ -31,7 +31,6 @@ namespace Heimdall
 {
 	struct PartitionArg;
 
-	int action_detect(bool verbose, bool wait, rust::Str usb_log_level);
 	int action_flash(bool repartition, bool verbose, bool wait, rust::Str usb_log_level, bool skip_size_check, rust::Str pit, const rust::Vec<PartitionArg>& partitions);
 }
 
