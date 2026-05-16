@@ -393,7 +393,7 @@ impl BridgeManager {
     pub(crate) fn begin_session(&mut self) -> Result<(), String> {
         println!("Beginning session...");
 
-        let packet = packets::OutboundPacket::begin_session();
+        let packet = packets::RequestPacket::begin_session();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to begin session!".to_string())?;
         self.send_empty_transfer();
@@ -413,7 +413,7 @@ impl BridgeManager {
             self.file_transfer_packet_size = 1048576;
             self.file_transfer_sequence_max_length = 30;
 
-            let packet = packets::OutboundPacket::file_part_size(self.file_transfer_packet_size);
+            let packet = packets::RequestPacket::file_part_size(self.file_transfer_packet_size);
             self.send_packet(&packet, 3000)
                 .map_err(|_| "Failed to send file part size packet!".to_string())?;
             self.send_empty_transfer();
@@ -438,7 +438,7 @@ impl BridgeManager {
     pub(crate) fn end_session(&self) -> Result<(), String> {
         println!("Ending session...");
 
-        let packet = packets::OutboundPacket::end_session();
+        let packet = packets::RequestPacket::end_session();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send end session packet!".to_string())?;
 
@@ -452,7 +452,7 @@ impl BridgeManager {
 
         println!("Rebooting device...");
 
-        let packet = packets::OutboundPacket::reboot_device();
+        let packet = packets::RequestPacket::reboot_device();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send reboot device packet!".to_string())?;
 
@@ -488,7 +488,9 @@ impl BridgeManager {
                 Duration::from_millis(timeout as u64),
             );
 
-            if let Ok(transferred) = result { return transferred == data.len() };
+            if let Ok(transferred) = result {
+                return transferred == data.len();
+            };
 
             if self.verbose && retry {
                 print_warning!(
@@ -523,7 +525,9 @@ impl BridgeManager {
                 Duration::from_millis(timeout as u64),
             );
 
-            if let Ok(transferred) = result { return transferred as i32 };
+            if let Ok(transferred) = result {
+                return transferred as i32;
+            };
 
             if self.verbose && retry {
                 print_warning!(
@@ -547,7 +551,14 @@ impl BridgeManager {
         }
     }
 
-    fn send_packet(&self, packet: &impl packets::Packet, timeout: i32) -> Result<(), ()> {
+    fn send_packet(
+        &self,
+        packet: &(impl packets::OutboundPacket + std::fmt::Debug),
+        timeout: i32,
+    ) -> Result<(), ()> {
+        if self.verbose {
+            println!("Sending packet: {:#04X?}", packet);
+        }
         let packet_bytes = packet.pack();
         if !self.send_bulk_transfer(&packet_bytes, timeout, true) {
             return Err(());
@@ -555,7 +566,10 @@ impl BridgeManager {
         Ok(())
     }
 
-    fn receive_packet<T: packets::InboundPacket>(&self, timeout: i32) -> Result<T, String> {
+    fn receive_packet<T: packets::InboundPacket + std::fmt::Debug>(
+        &self,
+        timeout: i32,
+    ) -> Result<T, String> {
         let mut buffer = vec![0u8; T::SIZE];
         let received_size = self.receive_bulk_transfer(&mut buffer, timeout, true);
 
@@ -564,14 +578,18 @@ impl BridgeManager {
         }
 
         buffer.truncate(received_size as usize);
-        T::unpack(&buffer)
+        let parsed = T::unpack(&buffer)?;
+        if self.verbose {
+            println!("Received packet: {:#04X?}", parsed);
+        }
+        Ok(parsed)
     }
 
     pub(crate) fn send_pit_data(&self, pit_data: &PitData) -> Result<(), String> {
         let pit_buffer_size = pit_data.get_padded_size();
 
         // Start file transfer
-        let packet = packets::OutboundPacket::pit_file_flash();
+        let packet = packets::RequestPacket::pit_file_flash();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to initialise PIT file transfer!".to_string())?;
         self.send_empty_transfer();
@@ -585,7 +603,7 @@ impl BridgeManager {
         }
 
         // Transfer file size
-        let packet = packets::OutboundPacket::flash_part_pit_file(pit_buffer_size);
+        let packet = packets::RequestPacket::flash_part_pit_file(pit_buffer_size);
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send PIT file part information!".to_string())?;
         self.send_empty_transfer();
@@ -617,7 +635,7 @@ impl BridgeManager {
         }
 
         // End pit file transfer
-        let packet = packets::OutboundPacket::end_pit_file_transfer(pit_buffer_size);
+        let packet = packets::RequestPacket::end_pit_file_transfer(pit_buffer_size);
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send end PIT file transfer packet!".to_string())?;
         self.send_empty_transfer();
@@ -634,7 +652,7 @@ impl BridgeManager {
     }
 
     fn receive_pit_file(&self) -> Result<Vec<u8>, String> {
-        let packet = packets::OutboundPacket::pit_file_dump();
+        let packet = packets::RequestPacket::pit_file_dump();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to request receival of PIT file!".to_string())?;
         self.send_empty_transfer();
@@ -656,7 +674,7 @@ impl BridgeManager {
         let mut buffer = Vec::with_capacity(file_size as usize);
 
         for i in 0..transfer_count {
-            let packet = packets::OutboundPacket::dump_part_pit_file(i);
+            let packet = packets::RequestPacket::dump_part_pit_file(i);
             self.send_packet(&packet, 3000)
                 .map_err(|_| format!("Failed to request PIT file part #{}!", i))?;
             self.send_empty_transfer();
@@ -669,7 +687,7 @@ impl BridgeManager {
         self.receive_empty_transfer();
 
         // End file transfer
-        let packet = packets::OutboundPacket::pit_file_end();
+        let packet = packets::RequestPacket::pit_file_end();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send request to end PIT file transfer!".to_string())?;
         self.send_empty_transfer();
@@ -703,7 +721,7 @@ impl BridgeManager {
         let mut reader = &info.file;
 
         // Start file transfer
-        let packet = packets::OutboundPacket::file_transfer_flash();
+        let packet = packets::RequestPacket::file_transfer_flash();
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to initialise file transfer!".to_string())?;
         self.send_empty_transfer();
@@ -751,7 +769,7 @@ impl BridgeManager {
             let sequence_total_byte_count = sequence_size * self.file_transfer_packet_size;
 
             let packet =
-                packets::OutboundPacket::flash_part_file_transfer(sequence_total_byte_count);
+                packets::RequestPacket::flash_part_file_transfer(sequence_total_byte_count);
             self.send_packet(&packet, 3000)
                 .map_err(|_| "Failed to begin file transfer sequence!".to_string())?;
             self.send_empty_transfer();
@@ -848,7 +866,7 @@ impl BridgeManager {
 
             let packet = match pit_entry.binary_type {
                 BinaryType::CommunicationProcessor => {
-                    packets::OutboundPacket::end_modem_file_transfer(
+                    packets::RequestPacket::end_modem_file_transfer(
                         sequence_effective_byte_count,
                         pit_entry.binary_type as u32,
                         pit_entry.device_type as u32,
@@ -856,7 +874,7 @@ impl BridgeManager {
                     )
                 }
                 BinaryType::ApplicationProcessor => {
-                    packets::OutboundPacket::end_phone_file_transfer(
+                    packets::RequestPacket::end_phone_file_transfer(
                         sequence_effective_byte_count,
                         pit_entry.binary_type as u32,
                         pit_entry.device_type as u32,
@@ -884,7 +902,7 @@ impl BridgeManager {
     }
 
     pub(crate) fn set_total_bytes(&self, total_bytes: u64) -> Result<(), String> {
-        let packet = packets::OutboundPacket::total_bytes(total_bytes);
+        let packet = packets::RequestPacket::total_bytes(total_bytes);
         self.send_packet(&packet, 3000)
             .map_err(|_| "Failed to send total bytes packet!".to_string())?;
         self.send_empty_transfer();
