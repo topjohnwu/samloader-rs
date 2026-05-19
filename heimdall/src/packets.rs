@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use binrw::{io::Cursor, BinRead, BinWrite};
+use libpit::{BinaryType, DeviceType, PitEntry};
 use std::fmt::Debug;
 
 pub const RESPONSE_TYPE_SEND_FILE_PART: u32 = 0x00;
@@ -101,16 +102,16 @@ pub(crate) enum FileTransferEnd {
     #[brw(magic = 0u32)]
     Phone {
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
+        binary_type: BinaryType,
+        device_type: DeviceType,
         partition_identifier: u32,
         is_last_sequence: u32,
     },
     #[brw(magic = 1u32)]
     Modem {
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
+        binary_type: BinaryType,
+        device_type: DeviceType,
         is_last_sequence: u32,
     },
 }
@@ -183,30 +184,27 @@ impl RequestPacket {
 
     pub(crate) fn end_modem_file_transfer(
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
+        pit_entry: &PitEntry,
         is_last_sequence: bool,
     ) -> RequestPacket {
         RequestPacket::FileTransfer(FileTransferRequest::End(FileTransferEnd::Modem {
             sequence_byte_count,
-            binary_type,
-            device_type,
+            binary_type: pit_entry.binary_type,
+            device_type: pit_entry.device_type,
             is_last_sequence: if is_last_sequence { 1 } else { 0 },
         }))
     }
 
     pub(crate) fn end_phone_file_transfer(
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
-        partition_identifier: u32,
+        pit_entry: &PitEntry,
         is_last_sequence: bool,
     ) -> RequestPacket {
         RequestPacket::FileTransfer(FileTransferRequest::End(FileTransferEnd::Phone {
             sequence_byte_count,
-            binary_type,
-            device_type,
-            partition_identifier,
+            binary_type: pit_entry.binary_type,
+            device_type: pit_entry.device_type,
+            partition_identifier: pit_entry.identifier,
             is_last_sequence: if is_last_sequence { 1 } else { 0 },
         }))
     }
@@ -223,30 +221,27 @@ impl RequestPacket {
 
     pub(crate) fn end_lz4_modem_file_transfer(
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
+        pit_entry: &PitEntry,
         is_last_sequence: bool,
     ) -> RequestPacket {
         RequestPacket::FileTransfer(FileTransferRequest::Lz4End(FileTransferEnd::Modem {
             sequence_byte_count,
-            binary_type,
-            device_type,
+            binary_type: pit_entry.binary_type,
+            device_type: pit_entry.device_type,
             is_last_sequence: if is_last_sequence { 1 } else { 0 },
         }))
     }
 
     pub(crate) fn end_lz4_phone_file_transfer(
         sequence_byte_count: u32,
-        binary_type: u32,
-        device_type: u32,
-        partition_identifier: u32,
+        pit_entry: &PitEntry,
         is_last_sequence: bool,
     ) -> RequestPacket {
         RequestPacket::FileTransfer(FileTransferRequest::Lz4End(FileTransferEnd::Phone {
             sequence_byte_count,
-            binary_type,
-            device_type,
-            partition_identifier,
+            binary_type: pit_entry.binary_type,
+            device_type: pit_entry.device_type,
+            partition_identifier: pit_entry.identifier,
             is_last_sequence: if is_last_sequence { 1 } else { 0 },
         }))
     }

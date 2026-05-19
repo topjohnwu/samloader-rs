@@ -60,14 +60,14 @@ impl<const LEN: usize> PartialEq<&str> for FixedString<LEN> {
     }
 }
 
-#[derive(BinRead, BinWrite, PartialEq, Eq, Copy, Clone)]
+#[derive(BinRead, BinWrite, PartialEq, Eq, Copy, Clone, Debug)]
 #[brw(repr = u32)]
 pub enum BinaryType {
     ApplicationProcessor = 0,
     CommunicationProcessor = 1,
 }
 
-#[derive(BinRead, BinWrite, PartialEq, Eq, Copy, Clone)]
+#[derive(BinRead, BinWrite, PartialEq, Eq, Copy, Clone, Debug)]
 #[brw(repr = u32)]
 pub enum DeviceType {
     OneNand = 0,

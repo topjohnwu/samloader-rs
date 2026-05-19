@@ -747,15 +747,12 @@ impl BridgeManager {
             let end_packet = match info.pit_entry.binary_type {
                 BinaryType::ApplicationProcessor => RequestPacket::end_phone_file_transfer(
                     sequence_data.len() as u32,
-                    info.pit_entry.binary_type as u32,
-                    info.pit_entry.device_type as u32,
-                    info.pit_entry.identifier,
+                    info.pit_entry,
                     is_last_sequence,
                 ),
                 BinaryType::CommunicationProcessor => RequestPacket::end_modem_file_transfer(
                     sequence_data.len() as u32,
-                    info.pit_entry.binary_type as u32,
-                    info.pit_entry.device_type as u32,
+                    info.pit_entry,
                     is_last_sequence,
                 ),
             };
@@ -795,15 +792,12 @@ impl BridgeManager {
             let end_packet = match info.pit_entry.binary_type {
                 BinaryType::ApplicationProcessor => RequestPacket::end_lz4_phone_file_transfer(
                     decompressed_size as u32,
-                    info.pit_entry.binary_type as u32,
-                    info.pit_entry.device_type as u32,
-                    info.pit_entry.identifier,
+                    info.pit_entry,
                     is_last_sequence,
                 ),
                 BinaryType::CommunicationProcessor => RequestPacket::end_lz4_modem_file_transfer(
                     decompressed_size as u32,
-                    info.pit_entry.binary_type as u32,
-                    info.pit_entry.device_type as u32,
+                    info.pit_entry,
                     is_last_sequence,
                 ),
             };
