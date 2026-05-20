@@ -48,21 +48,6 @@ macro_rules! print_error {
     };
 }
 
-fn add_common_args(cmd: Command) -> Command {
-    cmd.arg(
-        Arg::new("verbose")
-            .long("verbose")
-            .action(ArgAction::SetTrue)
-            .help("Enable verbose output"),
-    )
-    .arg(
-        Arg::new("usb-log-level")
-            .long("usb-log-level")
-            .num_args(1)
-            .help("Set libusb log level (none, error, warning, info, debug)"),
-    )
-}
-
 const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can be detected.
 
 Returns instantly per default, or waits until device is found
@@ -91,12 +76,10 @@ fn main() {
     let mut partitions = Vec::new();
 
     // Filter out partition arguments for the flash command
-    if args.len() > 1 && args[1] == "flash" {
-        let mut filtered_args = Vec::with_capacity(args.len());
-        filtered_args.push(args[0].clone());
-        filtered_args.push(args[1].clone());
+    if let Some(flash_idx) = args.iter().position(|arg| arg == "flash") {
+        let mut filtered_args = args[0..=flash_idx].to_vec();
 
-        let mut i = 2;
+        let mut i = flash_idx + 1;
         while i < args.len() {
             if args[i].starts_with("--") {
                 let key = args[i].trim_start_matches('-').to_string();
@@ -130,21 +113,35 @@ fn main() {
         .about("Heimdall - Glass Echidna")
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .subcommand(add_common_args(Command::new("detect"))
+        .arg(
+            Arg::new("verbose")
+                .long("verbose")
+                .action(ArgAction::SetTrue)
+                .global(true)
+                .help("Enable verbose output"),
+        )
+        .arg(
+            Arg::new("usb-log-level")
+                .long("usb-log-level")
+                .num_args(1)
+                .global(true)
+                .help("Set libusb log level (none, error, warning, info, debug)"),
+        )
+        .subcommand(Command::new("detect")
             .about("Indicates whether or not a download mode device can be detected.")
             .long_about(DETECT_HELP)
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(add_common_args(Command::new("download-pit"))
+        .subcommand(Command::new("download-pit")
             .about("Downloads the connected device's PIT file to the specified output file.")
             .long_about(DOWNLOAD_PIT_HELP)
             .arg(Arg::new("output").long("output").required(true).num_args(1).help("Output file path for the downloaded PIT file."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(add_common_args(Command::new("print-pit"))
+        .subcommand(Command::new("print-pit")
             .about("Prints the contents of a PIT file in a human readable format.")
             .long_about(PRINT_PIT_HELP)
             .arg(Arg::new("file").long("file").num_args(1).help("The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(add_common_args(Command::new("flash"))
+        .subcommand(Command::new("flash")
             .about("Flashes one or more firmware files to your phone.")
             .long_about(FLASH_HELP)
             .after_help(FLASH_AFTER_HELP)
@@ -158,44 +155,36 @@ fn main() {
             .about("Displays the version number of this binary."))
         .get_matches_from(args);
 
+    let verbose = matches.get_flag("verbose");
+    let usb_log_level = matches
+        .get_one::<String>("usb-log-level")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
     let result = match matches.subcommand() {
-        Some(("detect", sub_matches)) => detect::action_detect(
-            sub_matches.get_flag("verbose"),
-            sub_matches.get_flag("wait"),
-            sub_matches
-                .get_one::<String>("usb-log-level")
-                .map(|s| s.as_str())
-                .unwrap_or(""),
-        ),
+        Some(("detect", sub_matches)) => {
+            detect::action_detect(verbose, sub_matches.get_flag("wait"), usb_log_level)
+        }
         Some(("download-pit", sub_matches)) => download_pit::action_download_pit(
             sub_matches.get_one::<String>("output").unwrap(),
-            sub_matches.get_flag("verbose"),
+            verbose,
             sub_matches.get_flag("wait"),
-            sub_matches
-                .get_one::<String>("usb-log-level")
-                .map(|s| s.as_str())
-                .unwrap_or(""),
+            usb_log_level,
         ),
         Some(("print-pit", sub_matches)) => print_pit::action_print_pit(
             sub_matches
                 .get_one::<String>("file")
                 .map(|s| s.as_str())
                 .unwrap_or(""),
-            sub_matches.get_flag("verbose"),
+            verbose,
             sub_matches.get_flag("wait"),
-            sub_matches
-                .get_one::<String>("usb-log-level")
-                .map(|s| s.as_str())
-                .unwrap_or(""),
+            usb_log_level,
         ),
         Some(("flash", sub_matches)) => flash::action_flash(
             sub_matches.get_flag("repartition"),
-            sub_matches.get_flag("verbose"),
+            verbose,
             sub_matches.get_flag("wait"),
-            sub_matches
-                .get_one::<String>("usb-log-level")
-                .map(|s| s.as_str())
-                .unwrap_or(""),
+            usb_log_level,
             sub_matches.get_flag("skip-size-check"),
             sub_matches
                 .get_one::<String>("pit")
