@@ -61,51 +61,13 @@ connected device."#;
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
 (or identifiers) can be obtained by executing the print-pit action."#;
 
-const FLASH_AFTER_HELP: &str = r#"Dynamic Options:
-      --<partition name> <filename>
-          Flashes the specified <filename> to the specified <partition name>.
-          Example: heimdall flash --RECOVERY recovery.img --BOOT boot.img
+const PARTITIONS_AND_FILES_HELP: &str = r#"Pairs of partition names (or identifiers) and filenames to flash.
 
-      --<partition identifier> <filename>
-          Flashes the specified <filename> to the specified <partition identifier>."#;
+Flashes the specified <FILE> to the specified <PARTITION>.
+Example: heimdall flash RECOVERY recovery.img BOOT boot.img"#;
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().collect();
-    let mut partitions = Vec::new();
-
-    // Filter out partition arguments for the flash command
-    if let Some(flash_idx) = args.iter().position(|arg| arg == "flash") {
-        let mut filtered_args = args[0..=flash_idx].to_vec();
-
-        let mut i = flash_idx + 1;
-        while i < args.len() {
-            if args[i].starts_with("--") {
-                let key = args[i].trim_start_matches('-').to_string();
-                if ![
-                    "repartition",
-                    "wait",
-                    "skip-size-check",
-                    "pit",
-                    "verbose",
-                    "usb-log-level",
-                ]
-                .contains(&key.to_lowercase().as_str())
-                    && i + 1 < args.len()
-                    && !args[i + 1].starts_with("--")
-                {
-                    partitions.push(PartitionArg {
-                        name: key.to_uppercase(),
-                        filename: args[i + 1].clone(),
-                    });
-                    i += 2;
-                    continue;
-                }
-            }
-            filtered_args.push(args[i].clone());
-            i += 1;
-        }
-        args = filtered_args;
-    }
+    let args: Vec<String> = std::env::args().collect();
 
     let matches = Command::new("heimdall")
         .about("Heimdall - Glass Echidna")
@@ -142,11 +104,16 @@ fn main() {
         .subcommand(Command::new("flash")
             .about("Flashes one or more firmware files to your phone.")
             .long_about(FLASH_HELP)
-            .after_help(FLASH_AFTER_HELP)
             .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
             .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
             .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
-            .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing.")))
+            .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing."))
+            .arg(Arg::new("partitions-and-files")
+                .action(ArgAction::Append)
+                .num_args(1..)
+                .value_names(["PARTITION", "FILE"])
+                .help("Pairs of partition names/identifiers and filenames to flash.")
+                .long_help(PARTITIONS_AND_FILES_HELP)))
         .subcommand(Command::new("info")
             .about("Displays information about Heimdall."))
         .subcommand(Command::new("version")
@@ -178,18 +145,37 @@ fn main() {
             sub_matches.get_flag("wait"),
             usb_log_level,
         ),
-        Some(("flash", sub_matches)) => flash::action_flash(
-            sub_matches.get_flag("repartition"),
-            verbose,
-            sub_matches.get_flag("wait"),
-            usb_log_level,
-            sub_matches.get_flag("skip-size-check"),
-            sub_matches
-                .get_one::<String>("pit")
-                .map(|s| s.as_str())
-                .unwrap_or(""),
-            &partitions,
-        ),
+        Some(("flash", sub_matches)) => {
+            let mut partitions = Vec::new();
+            if let Some(args) = sub_matches.get_many::<String>("partitions-and-files") {
+                let args_vec: Vec<&String> = args.collect();
+                let mut i = 0;
+                while i < args_vec.len() {
+                    if i + 1 < args_vec.len() {
+                        partitions.push(PartitionArg {
+                            name: args_vec[i].to_uppercase(),
+                            filename: args_vec[i + 1].clone(),
+                        });
+                        i += 2;
+                    } else {
+                        print_error!("Partition \"{}\" is not paired with a file.", args_vec[i]);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            flash::action_flash(
+                sub_matches.get_flag("repartition"),
+                verbose,
+                sub_matches.get_flag("wait"),
+                usb_log_level,
+                sub_matches.get_flag("skip-size-check"),
+                sub_matches
+                    .get_one::<String>("pit")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                &partitions,
+            )
+        }
         Some(("info", _)) => {
             version::print_full_info();
             0
