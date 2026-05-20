@@ -18,8 +18,8 @@ use base64::{Engine as _, engine::general_purpose};
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-const KEY_1: &str = "vicopx7dqu06emacgpnpy8j8zwhduwlh";
-const KEY_2: &str = "9u7qab84rpc16gvk";
+const KEY_1: &str = "jqw2zntssasudk3zuwwx4tnqz5h3b6i4";
+const KEY_2: &str = "ifzg4ovyl3cyl3a5";
 
 fn derive_key(nonce: &str) -> Vec<u8> {
     let mut key = String::new();
