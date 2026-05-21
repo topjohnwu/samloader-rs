@@ -59,12 +59,18 @@ a filename is not provided then Heimdall retrieves the PIT file from the
 connected device."#;
 
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
-(or identifiers) can be obtained by executing the print-pit action."#;
+(or identifiers) can be obtained by executing the print-pit action.
+Using "@" as a partition name automatically determines the destination
+partition based on the filename."#;
 
 const PARTITIONS_AND_FILES_HELP: &str = r#"Pairs of partition names (or identifiers) and filenames to flash.
 
 Flashes the specified <FILE> to the specified <PARTITION>.
-Example: heimdall flash RECOVERY recovery.img BOOT boot.img"#;
+If <PARTITION> is "@", the destination partition is automatically determined
+from the filename (ignoring casing and optional .lz4 suffix).
+
+Example: heimdall flash RECOVERY recovery.img BOOT boot.img
+Example with auto-matching: heimdall flash @ recovery.img @ boot.img"#;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -109,6 +115,7 @@ fn main() {
             .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
             .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing."))
             .arg(Arg::new("partitions-and-files")
+                .required(true)
                 .action(ArgAction::Append)
                 .num_args(1..)
                 .value_names(["PARTITION", "FILE"])

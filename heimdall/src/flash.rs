@@ -18,6 +18,7 @@ use crate::print_error;
 use crate::version;
 use crate::PartitionArg;
 use libpit::{PitData, PitEntry};
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::thread::sleep;
@@ -315,18 +316,40 @@ pub(crate) fn action_flash(
     let mut partition_infos = Vec::new();
 
     for part in partitions {
-        let entry = if let Ok(id) = part.name.parse::<u32>() {
-            pit_data.find_entry_by_id(id)
+        let entry = if part.name == "@" {
+            let mut filename = std::path::Path::new(&part.filename)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if filename.to_lowercase().ends_with(".lz4") {
+                filename.truncate(filename.len() - 4);
+            }
+            let Some(entry) = pit_data.entries.iter().find(|e| {
+                let flash_fn = e.flash_filename.to_string_lossy();
+                flash_fn.eq_ignore_ascii_case(&filename)
+            }) else {
+                print_error!(
+                    "File \"{}\" does not match any partition in the specified PIT.",
+                    part.filename
+                );
+                return 1;
+            };
+            entry
+        } else if let Ok(id) = part.name.parse::<u32>() {
+            let Some(entry) = pit_data.find_entry_by_id(id) else {
+                print_error!("Partition identifier {id} does not exist in the specified PIT.");
+                return 1;
+            };
+            entry
         } else {
-            pit_data.find_entry_by_name(&part.name)
-        };
-
-        let Some(entry) = entry else {
-            print_error!(
-                "Partition \"{}\" does not exist in the specified PIT.",
-                part.name
-            );
-            return 1;
+            let Some(entry) = pit_data.find_entry_by_name(&part.name) else {
+                print_error!(
+                    "Partition \"{}\" does not exist in the specified PIT.",
+                    part.name
+                );
+                return 1;
+            };
+            entry
         };
 
         let Ok((mut file, file_size)) = File::open(&part.filename).and_then(|f| {
@@ -359,9 +382,14 @@ pub(crate) fn action_flash(
             };
 
             if partition_size > 0 && check_size > partition_size {
+                let name = if part.name == "@" {
+                    entry.partition_name.to_string_lossy()
+                } else {
+                    Cow::Borrowed(part.name.as_str())
+                };
                 print_error!(
                     "{} partition is too small for given file. Use --skip-size-check to flash anyways.",
-                    part.name
+                    name
                 );
                 return 1;
             }
