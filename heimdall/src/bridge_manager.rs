@@ -717,7 +717,11 @@ impl BridgeManager {
         Ok(pit_file)
     }
 
-    pub(crate) fn send_file(&self, info: &crate::flash::FirmwareFile) -> Result<(), String> {
+    pub(crate) fn is_lz4_supported(&self) -> bool {
+        self.lz4_supported
+    }
+
+    pub(crate) fn send_file(&self, info: &mut crate::firmware::FirmwareFile) -> Result<(), String> {
         let packet = RequestPacket::file_transfer_flash();
 
         self.send_packet(&packet, 3000)
@@ -732,7 +736,9 @@ impl BridgeManager {
             return Err("Failed to confirm transfer initialisation!".to_string());
         }
 
-        let sequences = info.sequences(
+        let sequences = crate::firmware::SequenceIterator::new(
+            &mut info.file,
+            info.file_size,
             self.file_transfer_packet_size,
             self.file_transfer_sequence_max_length,
         );
@@ -761,7 +767,10 @@ impl BridgeManager {
         Ok(())
     }
 
-    pub(crate) fn send_lz4_file(&self, info: &crate::flash::FirmwareLz4File) -> Result<(), String> {
+    pub(crate) fn send_lz4_file(
+        &self,
+        info: &mut crate::firmware::FirmwareLz4File,
+    ) -> Result<(), String> {
         let packet = RequestPacket::lz4_file_transfer_flash();
 
         self.send_packet(&packet, 3000)
@@ -776,7 +785,9 @@ impl BridgeManager {
             return Err("Failed to confirm transfer initialisation!".to_string());
         }
 
-        let sequences = info.sequences(
+        let sequences = crate::firmware::Lz4SequenceIterator::new(
+            &mut info.file,
+            &info.header,
             self.file_transfer_packet_size,
             self.file_transfer_sequence_max_length,
         );

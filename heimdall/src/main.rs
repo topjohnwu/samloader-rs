@@ -17,9 +17,11 @@
 mod bridge_manager;
 mod detect;
 mod download_pit;
+mod firmware;
 mod flash;
 mod packets;
 mod print_pit;
+mod tar_flash;
 mod version;
 
 use bridge_manager::BridgeManager;
@@ -62,6 +64,10 @@ const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Pa
 (or identifiers) can be obtained by executing the print-pit action.
 Using "@" as a partition name automatically determines the destination
 partition based on the filename."#;
+
+const TAR_FLASH_HELP: &str = r#"Flashes one or more Samsung firmware TAR/MD5 packages to your phone.
+The files within the packages are indexed and flashed in-memory, without
+unpacking them to disk."#;
 
 const PARTITIONS_AND_FILES_HELP: &str = r#"Pairs of partition names (or identifiers) and filenames to flash.
 
@@ -121,6 +127,19 @@ fn main() {
                 .value_names(["PARTITION", "FILE"])
                 .help("Pairs of partition names/identifiers and filenames to flash.")
                 .long_help(PARTITIONS_AND_FILES_HELP)))
+        .subcommand(Command::new("tar-flash")
+            .about("Flashes Samsung firmware TAR/MD5 packages to your phone.")
+            .long_about(TAR_FLASH_HELP)
+            .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
+            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
+            .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
+            .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing."))
+            .arg(Arg::new("packages")
+                .required(true)
+                .action(ArgAction::Append)
+                .num_args(1..)
+                .value_name("PACKAGE")
+                .help("One or more .tar or .tar.md5 firmware package files.")))
         .subcommand(Command::new("info")
             .about("Displays information about Heimdall."))
         .subcommand(Command::new("version")
@@ -176,11 +195,24 @@ fn main() {
                 sub_matches.get_flag("wait"),
                 usb_log_level,
                 sub_matches.get_flag("skip-size-check"),
-                sub_matches
-                    .get_one::<String>("pit")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
+                sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
                 &partitions,
+            )
+        }
+        Some(("tar-flash", sub_matches)) => {
+            let packages: Vec<String> = sub_matches
+                .get_many::<String>("packages")
+                .unwrap()
+                .cloned()
+                .collect();
+            tar_flash::action_tar_flash(
+                sub_matches.get_flag("repartition"),
+                verbose,
+                sub_matches.get_flag("wait"),
+                usb_log_level,
+                sub_matches.get_flag("skip-size-check"),
+                sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
+                &packages,
             )
         }
         Some(("info", _)) => {

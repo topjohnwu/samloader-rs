@@ -7,7 +7,9 @@ edition = "2021"
 libpit = { path = "../libpit" }
 rusb = "0.9"
 clap = { version = "4", features = ["derive"] }
-binrw = "0.14"
+binrw = "0.15"
+tar = "0.4"
+md5 = "0.8"
 
 [[bin]]
 name = "heimdall"

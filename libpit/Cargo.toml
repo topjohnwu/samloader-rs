@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-binrw = "0.14"
+binrw = "0.15"
 modular-bitfield = "0.13.1"
 
 [lib]
