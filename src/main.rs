@@ -12,168 +12,103 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::{Parser, Subcommand};
+use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
-use memmap2::MmapMut;
-use samloader::FusClient;
-use samloader::aes::cipher::BlockDecryptMut;
-use samloader::aes::cipher::inout::InOutBuf;
-use std::fs::OpenOptions;
-use std::io::Read;
-use std::thread;
+use samloader::{DownloadArgs, FusClient, ProgressReporter, download_latest_firmware};
 use std::time::Duration;
 
 const PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
-#[derive(Parser)]
-#[command(name = "samloader")]
-#[command(about = "Download firmware for Samsung devices", long_about = None, version)]
-struct Cli {
-    /// The model name (e.g. SM-S931U1)
-    #[arg(short = 'm', long)]
-    model: String,
+struct ProgressWrapper<'a>(&'a ProgressBar);
 
-    /// Region CSC code (e.g. XAA)
-    #[arg(short = 'r', long)]
-    region: String,
+impl<'a> ProgressReporter for ProgressWrapper<'a> {
+    fn init_length(&self, len: u64) {
+        self.0.set_length(len);
+        self.0.enable_steady_tick(Duration::from_secs(1));
+    }
 
-    /// Number of parallel connections
-    #[arg(short = 'j', long, default_value_t = 8)]
-    threads: u64,
+    fn increment(&self, bytes: u64) {
+        self.0.inc(bytes)
+    }
 
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Download the latest firmware
-    Download {
-        #[arg(short = 'd', long)]
-        out_dir: Option<String>,
-        #[arg(short = 'o', long)]
-        out_file: Option<String>,
-    },
-    /// Check the latest version
-    Check,
+    fn finish(&self) {
+        self.0.finish()
+    }
 }
 
 fn main() {
-    let args = Cli::parse();
+    let matches = Command::new("samloader")
+        .about("Download firmware for Samsung devices")
+        .version(env!("CARGO_PKG_VERSION"))
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .arg(
+            Arg::new("model")
+                .short('m')
+                .long("model")
+                .required(true)
+                .help("The model name (e.g. SM-S931U1)"),
+        )
+        .arg(
+            Arg::new("region")
+                .short('r')
+                .long("region")
+                .required(true)
+                .help("Region CSC code (e.g. XAA)"),
+        )
+        .arg(
+            Arg::new("threads")
+                .short('j')
+                .long("threads")
+                .default_value("8")
+                .value_parser(clap::value_parser!(u64))
+                .help("Number of parallel connections"),
+        )
+        .subcommand(
+            Command::new("download")
+                .about("Download the latest firmware")
+                .arg(
+                    Arg::new("out_dir")
+                        .short('d')
+                        .long("out-dir")
+                        .help("Output directory"),
+                )
+                .arg(
+                    Arg::new("out_file")
+                        .short('o')
+                        .long("out-file")
+                        .help("Output file path"),
+                ),
+        )
+        .subcommand(Command::new("check").about("Check the latest version"))
+        .get_matches();
 
-    match args.command {
-        Commands::Check => {
+    let model = matches.get_one::<String>("model").cloned().unwrap();
+    let region = matches.get_one::<String>("region").cloned().unwrap();
+    let threads = *matches.get_one::<u64>("threads").unwrap();
+
+    match matches.subcommand() {
+        Some(("download", sub_m)) => {
+            let out_dir = sub_m.get_one::<String>("out_dir").cloned();
+            let out_file = sub_m.get_one::<String>("out_file").cloned();
+            let args = DownloadArgs {
+                model,
+                region,
+                threads,
+                out_dir,
+                out_file,
+            };
+            let pb = ProgressBar::no_length()
+                .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
+            let wrapper = ProgressWrapper(&pb);
+            download_latest_firmware(args, wrapper);
+        }
+        Some(("check", _)) => {
             let mut client = FusClient::new().expect("Unable to establish FusClient");
-            client.fetch_binary_info(&args.model, &args.region);
+            client.fetch_binary_info(&model, &region);
             println!("{}", client.info.version);
         }
-        Commands::Download { out_dir, out_file } => {
-            let mut client = FusClient::new().expect("Unable to establish FusClient");
-            client.fetch_binary_info(&args.model, &args.region);
-
-            println!("Firmware Version: {}", client.info.version);
-
-            let default_name = client
-                .info
-                .filename
-                .strip_suffix(".enc4")
-                .unwrap_or(client.info.filename.as_str());
-
-            let final_out = match (out_file, out_dir) {
-                (Some(name), _) => name,
-                (None, Some(dir)) => format!("{}/{}", dir, default_name),
-                _ => default_name.to_string(),
-            };
-
-            println!("Downloading {} to {}", client.info.filename, final_out);
-
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&final_out)
-                .unwrap();
-
-            // Pre-allocate file
-            file.set_len(client.info.size)
-                .expect("Cannot pre-allocate file");
-
-            let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
-
-            // Round up to the nearest 16 byte boundary
-            let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
-
-            let pb = ProgressBar::new(client.info.size)
-                .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
-            pb.enable_steady_tick(Duration::from_secs(1));
-
-            client.init_download();
-
-            thread::scope(|s| {
-                for (i, chunk) in map.chunks_mut(chunk_size as usize).enumerate() {
-                    let i = i as u64;
-                    let is_last_worker = i == args.threads - 1;
-
-                    let start = i * chunk_size;
-                    // Ensure the last thread covers the remainder of the file
-                    let end = if is_last_worker {
-                        None
-                    } else {
-                        Some(start + chunk_size - 1)
-                    };
-
-                    let mut resp = client
-                        .download_file(Some(start), end)
-                        .expect("Download request failed");
-
-                    let pb = &pb;
-                    let mut dec = client.get_decryptor();
-                    s.spawn(move || {
-                        let mut dl_pos = 0_usize;
-                        let mut dec_pos = 0_usize;
-
-                        loop {
-                            match resp.read(&mut chunk[dl_pos..]) {
-                                Ok(0) => break, // EOF
-                                Ok(n) => {
-                                    dl_pos += n;
-                                    pb.inc(n as u64);
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                                    continue;
-                                }
-                                Err(e) => panic!("Download failed: {e:?}"),
-                            }
-
-                            let encrypted = InOutBuf::from(&mut chunk[dec_pos..dl_pos]);
-                            let (blocks, tail) = encrypted.into_chunks();
-                            dec.decrypt_blocks_inout_mut(blocks);
-                            dec_pos = dl_pos - tail.len();
-                        }
-                    });
-                    // Wait 100ms between each request
-                    thread::sleep(Duration::from_millis(100));
-                }
-            });
-
-            let last_byte = *map.last().unwrap();
-            map.flush().ok();
-            drop(map);
-
-            // Handle padding removal if needed
-            if last_byte > 0 && last_byte <= 16 {
-                let file_len = file
-                    .metadata()
-                    .ok()
-                    .map(|m| m.len())
-                    .unwrap_or(client.info.size);
-                file.set_len(file_len - last_byte as u64)
-                    .expect("Failed to truncate file");
-            }
-
-            pb.finish();
-        }
-    }
+        _ => unreachable!(),
+    };
 }
