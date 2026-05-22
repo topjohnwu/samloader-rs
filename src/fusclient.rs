@@ -15,7 +15,7 @@
 use crate::{auth, xml};
 use aes::cipher::KeyInit;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, RANGE, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use xml::BinaryInform;
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
@@ -23,7 +23,6 @@ type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 pub struct FusClient {
     client: Client,
     auth: String,
-    sessid: String,
     nonce: String,
     encnonce: String,
     pub info: BinaryInform,
@@ -31,31 +30,25 @@ pub struct FusClient {
 
 impl FusClient {
     pub fn new() -> reqwest::Result<Self> {
-        let mut client = FusClient {
-            client: Default::default(),
+        let client = Client::builder().cookie_store(true).build()?;
+        let mut fus = FusClient {
+            client,
             auth: Default::default(),
-            sessid: Default::default(),
             nonce: Default::default(),
             encnonce: Default::default(),
             info: Default::default(),
         };
 
         // Initialize nonce
-        let resp = client.make_req("NF_DownloadGenerateNonce.do", "")?;
+        let resp = fus.make_req("NF_DownloadGenerateNonce.do", "")?;
 
         if let Some(nonce) = resp.headers().get("NONCE").and_then(|n| n.to_str().ok()) {
-            client.encnonce = nonce.to_string();
-            client.nonce = auth::decryptnonce(&client.encnonce);
-            client.auth = auth::getauth(&client.nonce);
+            fus.encnonce = nonce.to_string();
+            fus.nonce = auth::decryptnonce(&fus.encnonce);
+            fus.auth = auth::getauth(&fus.nonce);
         }
 
-        client.sessid = resp
-            .cookies()
-            .find(|c| c.name().starts_with("JSESSIONID"))
-            .map(|c| c.value().to_string())
-            .unwrap_or_default();
-
-        Ok(client)
+        Ok(fus)
     }
 
     pub fn fetch_binary_info(&mut self, model: &str, region: &str) {
@@ -78,12 +71,6 @@ impl FusClient {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
         headers.insert(USER_AGENT, HeaderValue::from_static("Kies2.0_FUS"));
-        if !self.sessid.is_empty() {
-            headers.insert(
-                COOKIE,
-                HeaderValue::from_str(&format!("JSESSIONID={}", self.sessid)).unwrap(),
-            );
-        }
         headers
     }
 
