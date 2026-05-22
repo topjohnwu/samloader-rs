@@ -16,7 +16,142 @@ mod auth;
 mod fusclient;
 mod xml;
 
-pub use aes;
-pub use ecb;
 pub use fusclient::FusClient;
 pub use xml::BinaryInform;
+
+use aes::cipher::BlockDecryptMut;
+use aes::cipher::inout::InOutBuf;
+use memmap2::MmapMut;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::thread;
+use std::time::Duration;
+
+pub struct DownloadArgs {
+    /// The model name (e.g. SM-S931U1)
+    pub model: String,
+
+    /// Region CSC code (e.g. XAA)
+    pub region: String,
+
+    /// Number of parallel connections
+    pub threads: u64,
+
+    /// Optional: the output directory
+    pub out_dir: Option<String>,
+
+    /// Optional: the output file name
+    pub out_file: Option<String>,
+}
+
+pub trait ProgressReporter {
+    fn init_length(&self, len: u64);
+    fn increment(&self, bytes: u64);
+    fn finish(&self);
+}
+
+pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + Sync) {
+    let mut client = FusClient::new().expect("Unable to establish FusClient");
+    client.fetch_binary_info(&args.model, &args.region);
+
+    println!("Firmware Version: {}", client.info.version);
+
+    let default_name = client
+        .info
+        .filename
+        .strip_suffix(".enc4")
+        .unwrap_or(client.info.filename.as_str());
+
+    let final_out = match (args.out_file, args.out_dir) {
+        (Some(name), _) => name,
+        (None, Some(dir)) => format!("{}/{}", dir, default_name),
+        _ => default_name.to_string(),
+    };
+
+    println!("Downloading {} to {}", client.info.filename, final_out);
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&final_out)
+        .unwrap();
+
+    // Pre-allocate file
+    file.set_len(client.info.size)
+        .expect("Cannot pre-allocate file");
+
+    let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
+
+    // Round up to the nearest 16 byte boundary
+    let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
+
+    pb.init_length(client.info.size);
+
+    client.init_download();
+
+    thread::scope(|s| {
+        for (i, chunk) in map.chunks_mut(chunk_size as usize).enumerate() {
+            let i = i as u64;
+            let is_last_worker = i == args.threads - 1;
+
+            let start = i * chunk_size;
+            // Ensure the last thread covers the remainder of the file
+            let end = if is_last_worker {
+                None
+            } else {
+                Some(start + chunk_size - 1)
+            };
+
+            let mut resp = client
+                .download_file(Some(start), end)
+                .expect("Download request failed");
+
+            let pb = &pb;
+            let mut dec = client.get_decryptor();
+            s.spawn(move || {
+                let mut dl_pos = 0_usize;
+                let mut dec_pos = 0_usize;
+
+                loop {
+                    match resp.read(&mut chunk[dl_pos..]) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            dl_pos += n;
+                            pb.increment(n as u64);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            continue;
+                        }
+                        Err(e) => panic!("Download failed: {e:?}"),
+                    }
+
+                    let encrypted = InOutBuf::from(&mut chunk[dec_pos..dl_pos]);
+                    let (blocks, tail) = encrypted.into_chunks();
+                    dec.decrypt_blocks_inout_mut(blocks);
+                    dec_pos = dl_pos - tail.len();
+                }
+            });
+            // Wait 100ms between each request
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    let last_byte = *map.last().unwrap();
+    map.flush().ok();
+    drop(map);
+
+    // Handle padding removal if needed
+    if last_byte > 0 && last_byte <= 16 {
+        let file_len = file
+            .metadata()
+            .ok()
+            .map(|m| m.len())
+            .unwrap_or(client.info.size);
+        file.set_len(file_len - last_byte as u64)
+            .expect("Failed to truncate file");
+    }
+
+    pb.finish();
+}
