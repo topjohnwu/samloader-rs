@@ -40,22 +40,33 @@ impl FusClient {
         };
 
         // Initialize nonce
-        let resp = fus.make_req("NF_DownloadGenerateNonce.do", "")?;
-
-        if let Some(nonce) = resp.headers().get("NONCE").and_then(|n| n.to_str().ok()) {
-            fus.encnonce = nonce.to_string();
-            fus.nonce = auth::decryptnonce(&fus.encnonce);
-            fus.auth = auth::getauth(&fus.nonce);
-        }
+        fus.make_req("NF_SmartDownloadGenerateNonce.do", "")?;
 
         Ok(fus)
     }
 
     pub fn fetch_binary_info(&mut self, model: &str, region: &str) {
-        let req_xml = xml::binary_inform_req_xml(model, region);
+        // 1. Fetch latest version from version.xml
+        let version_url = format!(
+            "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
+            region, model
+        );
+        let version_xml = self
+            .client
+            .get(&version_url)
+            .header(USER_AGENT, "Kies2.0_FUS")
+            .send()
+            .expect("Failed to fetch version.xml")
+            .text()
+            .expect("Failed to read version.xml text");
+
+        let latest_fw = xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml");
+
+        // 2. Compute Binary Inform req using actual latest_fw
+        let req_xml = xml::binary_inform_req_xml(model, region, &latest_fw, &self.nonce);
 
         let xml = self
-            .make_req("NF_DownloadBinaryInform.do", &req_xml)
+            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
             .and_then(Response::text)
             .expect("Info request failed");
 
@@ -70,23 +81,46 @@ impl FusClient {
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
-        headers.insert(USER_AGENT, HeaderValue::from_static("Kies2.0_FUS"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("SMART 2.0"));
         headers
     }
 
-    fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
+    fn make_req(&mut self, path: &str, data: &str) -> reqwest::Result<Response> {
         let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
-        self.client
+        let resp = self
+            .client
             .post(&url)
             .headers(self.make_headers())
             .body(data.to_string())
             .send()?
-            .error_for_status()
+            .error_for_status()?;
+
+        if let Some(nonce) = resp
+            .headers()
+            .get("NONCE")
+            .or_else(|| resp.headers().get("nonce"))
+            .and_then(|n| n.to_str().ok())
+        {
+            let nonce_str = nonce.to_string();
+            if !nonce_str.is_empty() && nonce_str != self.encnonce {
+                self.encnonce = nonce_str;
+                self.nonce = self.encnonce.clone();
+                self.auth = auth::decrypt_nonce(&self.encnonce);
+            }
+        }
+
+        Ok(resp)
     }
 
-    pub fn init_download(&self) {
-        let init_xml = xml::binary_init_req_xml(&self.info.filename, &self.nonce);
-        self.make_req("NF_DownloadBinaryInitForMass.do", &init_xml)
+    pub fn init_download(&mut self) {
+        let init_xml = xml::binary_init_req_xml(
+            &self.info.filename,
+            &self.nonce,
+            &self.info.version,
+            &self.info.model_type,
+            &self.info.region,
+        );
+        self.make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)
             .expect("Download init failed");
     }
 
@@ -109,7 +143,7 @@ impl FusClient {
         };
 
         let url = format!(
-            "http://cloud-neofussvr.samsungmobile.com/NF_DownloadBinaryForMass.do?file={}{}",
+            "http://cloud-neofussvr.samsungmobile.com/NF_SmartDownloadBinaryForMass.do?file={}{}",
             self.info.path, self.info.filename
         );
         self.client
