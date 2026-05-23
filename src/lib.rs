@@ -44,13 +44,23 @@ pub struct DownloadArgs {
     pub out_file: Option<String>,
 }
 
-pub trait ProgressReporter {
+pub trait ProgressReporter: Sync {
     fn init_length(&self, len: u64);
     fn increment(&self, bytes: u64);
     fn finish(&self);
 }
 
-pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + Sync) {
+struct StubProgressReporter;
+
+impl ProgressReporter for StubProgressReporter {
+    fn init_length(&self, _: u64) {}
+    fn increment(&self, _: u64) {}
+    fn finish(&self) {}
+}
+
+static STUB_PROGRESS_REPORTER: StubProgressReporter = StubProgressReporter {};
+
+pub fn download_latest_firmware(args: DownloadArgs, progress: Option<&dyn ProgressReporter>) {
     let mut client = FusClient::new().expect("Unable to establish FusClient");
     client.fetch_binary_info(&args.model, &args.region);
 
@@ -84,13 +94,13 @@ pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + 
 
     let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
 
+    client.init_download();
+
     // Round up to the nearest 16 byte boundary
     let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
 
-    pb.init_length(client.info.size);
-
-    client.init_download();
-
+    let progress = progress.unwrap_or(&STUB_PROGRESS_REPORTER);
+    progress.init_length(client.info.size);
     thread::scope(|s| {
         for (i, chunk) in map.chunks_mut(chunk_size as usize).enumerate() {
             let i = i as u64;
@@ -108,7 +118,6 @@ pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + 
                 .download_file(Some(start), end)
                 .expect("Download request failed");
 
-            let pb = &pb;
             let mut dec = client.get_decryptor();
             s.spawn(move || {
                 let mut dl_pos = 0_usize;
@@ -119,7 +128,7 @@ pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + 
                         Ok(0) => break, // EOF
                         Ok(n) => {
                             dl_pos += n;
-                            pb.increment(n as u64);
+                            progress.increment(n as u64);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                             continue;
@@ -153,5 +162,5 @@ pub fn download_latest_firmware(args: DownloadArgs, pb: impl ProgressReporter + 
             .expect("Failed to truncate file");
     }
 
-    pb.finish();
+    progress.finish();
 }

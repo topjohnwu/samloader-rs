@@ -102,7 +102,7 @@ fn main() {
             let pb = ProgressBar::no_length()
                 .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
             let wrapper = ProgressWrapper(&pb);
-            download_latest_firmware(args, wrapper);
+            download_latest_firmware(args, Some(&wrapper));
         }
         Some(("check", _)) => {
             let mut client = FusClient::new().expect("Unable to establish FusClient");
