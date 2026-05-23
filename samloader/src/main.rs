@@ -14,7 +14,7 @@
 
 use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
-use samloader::{DownloadArgs, FusClient, ProgressReporter, download_latest_firmware};
+use samloader_fus::{DownloadArgs, FusClient, ProgressReporter, download_latest_firmware};
 use std::time::Duration;
 
 const PROGRESS_TEMPLATE: &str =

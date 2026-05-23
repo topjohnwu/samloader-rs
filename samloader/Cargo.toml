@@ -1,0 +1,13 @@
+[package]
+name = "samloader"
+version = "1.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Download firmware for Samsung devices"
+repository = "https://github.com/topjohnwu/samloader-rs"
+keywords = ["samsung", "firmware"]
+
+[dependencies]
+samloader-fus = { path = "../samloader-fus" }
+clap = { version = "4.6", features = ["derive"] }
+indicatif = "0.18"

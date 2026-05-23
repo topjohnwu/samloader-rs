@@ -154,6 +154,6 @@ impl FusClient {
     }
 
     pub fn get_decryptor(&self) -> Aes128EcbDec {
-        Aes128EcbDec::new(self.info.key.as_slice().into())
+        Aes128EcbDec::new_from_slice(self.info.key.as_slice()).unwrap()
     }
 }

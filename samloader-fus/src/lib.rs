@@ -19,7 +19,7 @@ mod xml;
 pub use fusclient::FusClient;
 pub use xml::BinaryInform;
 
-use aes::cipher::BlockDecryptMut;
+use aes::cipher::BlockModeDecrypt;
 use aes::cipher::inout::InOutBuf;
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
@@ -138,7 +138,7 @@ pub fn download_latest_firmware(args: DownloadArgs, progress: Option<&dyn Progre
 
                     let encrypted = InOutBuf::from(&mut chunk[dec_pos..dl_pos]);
                     let (blocks, tail) = encrypted.into_chunks();
-                    dec.decrypt_blocks_inout_mut(blocks);
+                    dec.decrypt_blocks_inout(blocks);
                     dec_pos = dl_pos - tail.len();
                 }
             });
