@@ -9,5 +9,5 @@ keywords = ["samsung", "firmware"]
 
 [dependencies]
 samloader-fus = { path = "../samloader-fus" }
-clap = { version = "4.6", features = ["derive"] }
+clap = "4.6"
 indicatif = "0.18"
