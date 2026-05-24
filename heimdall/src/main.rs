@@ -47,23 +47,43 @@ macro_rules! print_error {
     };
 }
 
+const VERBOSE_HELP: &str = "Enable verbose output";
+const USB_LOG_LEVEL_HELP: &str = "Set libusb log level (none, error, warning, info, debug)";
+const WAIT_HELP: &str = "Waits until a compatible device is connected.";
+const REPARTITION_HELP: &str =
+    "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
+const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition.";
+const PIT_HELP: &str = "The PIT file to use for repartitioning or flashing.";
+const PARTITIONS_AND_FILES_HELP_BRIEF: &str =
+    "Pairs of partition names/identifiers and filenames to flash.";
+const PACKAGES_HELP: &str = "One or more .tar or .tar.md5 firmware package files.";
+
+const DETECT_ABOUT: &str = "Indicates whether or not a download mode device can be detected.";
 const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can be detected.
 
 Returns instantly per default, or waits until device is found
 when --wait argument is used."#;
 
+const DOWNLOAD_PIT_ABOUT: &str =
+    "Downloads the connected device's PIT file to the specified output file.";
 const DOWNLOAD_PIT_HELP: &str = r#"Downloads the connected device's PIT file to the specified
 output file."#;
+const DOWNLOAD_PIT_OUTPUT_HELP: &str = "Output file path for the downloaded PIT file.";
 
+const PRINT_PIT_ABOUT: &str = "Prints the contents of a PIT file in a human readable format.";
 const PRINT_PIT_HELP: &str = r#"Prints the contents of a PIT file in a human readable format. If
 a filename is not provided then Heimdall retrieves the PIT file from the
 connected device."#;
+const PRINT_PIT_FILE_HELP: &str =
+    "The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device.";
 
+const FLASH_ABOUT: &str = "Flashes one or more firmware files to your phone.";
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
 (or identifiers) can be obtained by executing the print-pit action.
 Using "@" as a partition name automatically determines the destination
 partition based on the filename."#;
 
+const TAR_FLASH_ABOUT: &str = "Flashes Samsung firmware TAR/MD5 packages to your phone.";
 const TAR_FLASH_HELP: &str = r#"Flashes one or more Samsung firmware TAR/MD5 packages to your phone.
 The files within the packages are indexed and flashed in-memory, without
 unpacking them to disk."#;
@@ -89,60 +109,128 @@ fn main() {
                 .long("verbose")
                 .action(ArgAction::SetTrue)
                 .global(true)
-                .help("Enable verbose output"),
+                .help(VERBOSE_HELP),
         )
         .arg(
             Arg::new("usb-log-level")
                 .long("usb-log-level")
                 .num_args(1)
                 .global(true)
-                .help("Set libusb log level (none, error, warning, info, debug)"),
+                .help(USB_LOG_LEVEL_HELP),
         )
-        .subcommand(Command::new("detect")
-            .about("Indicates whether or not a download mode device can be detected.")
-            .long_about(DETECT_HELP)
-            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(Command::new("download-pit")
-            .about("Downloads the connected device's PIT file to the specified output file.")
-            .long_about(DOWNLOAD_PIT_HELP)
-            .arg(Arg::new("output").long("output").required(true).num_args(1).help("Output file path for the downloaded PIT file."))
-            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(Command::new("print-pit")
-            .about("Prints the contents of a PIT file in a human readable format.")
-            .long_about(PRINT_PIT_HELP)
-            .arg(Arg::new("file").long("file").num_args(1).help("The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device."))
-            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected.")))
-        .subcommand(Command::new("flash")
-            .about("Flashes one or more firmware files to your phone.")
-            .long_about(FLASH_HELP)
-            .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
-            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
-            .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
-            .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing."))
-            .arg(Arg::new("partitions-and-files")
-                .required(true)
-                .action(ArgAction::Append)
-                .num_args(1..)
-                .value_names(["PARTITION", "FILE"])
-                .help("Pairs of partition names/identifiers and filenames to flash.")
-                .long_help(PARTITIONS_AND_FILES_HELP)))
-        .subcommand(Command::new("tar-flash")
-            .about("Flashes Samsung firmware TAR/MD5 packages to your phone.")
-            .long_about(TAR_FLASH_HELP)
-            .arg(Arg::new("repartition").long("repartition").action(ArgAction::SetTrue).help("Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal."))
-            .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Waits until a compatible device is connected."))
-            .arg(Arg::new("skip-size-check").long("skip-size-check").action(ArgAction::SetTrue).help("Do not verify that files fit in the specified partition."))
-            .arg(Arg::new("pit").long("pit").num_args(1).help("The PIT file to use for repartitioning or flashing."))
-            .arg(Arg::new("packages")
-                .required(true)
-                .action(ArgAction::Append)
-                .num_args(1..)
-                .value_name("PACKAGE")
-                .help("One or more .tar or .tar.md5 firmware package files.")))
-        .subcommand(Command::new("info")
-            .about("Displays information about Heimdall."))
-        .subcommand(Command::new("version")
-            .about("Displays the version number of this binary."))
+        .subcommand(
+            Command::new("detect")
+                .about(DETECT_ABOUT)
+                .long_about(DETECT_HELP)
+                .arg(
+                    Arg::new("wait")
+                        .long("wait")
+                        .action(ArgAction::SetTrue)
+                        .help(WAIT_HELP),
+                ),
+        )
+        .subcommand(
+            Command::new("download-pit")
+                .about(DOWNLOAD_PIT_ABOUT)
+                .long_about(DOWNLOAD_PIT_HELP)
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .required(true)
+                        .num_args(1)
+                        .help(DOWNLOAD_PIT_OUTPUT_HELP),
+                )
+                .arg(
+                    Arg::new("wait")
+                        .long("wait")
+                        .action(ArgAction::SetTrue)
+                        .help(WAIT_HELP),
+                ),
+        )
+        .subcommand(
+            Command::new("print-pit")
+                .about(PRINT_PIT_ABOUT)
+                .long_about(PRINT_PIT_HELP)
+                .arg(
+                    Arg::new("file")
+                        .long("file")
+                        .num_args(1)
+                        .help(PRINT_PIT_FILE_HELP),
+                )
+                .arg(
+                    Arg::new("wait")
+                        .long("wait")
+                        .action(ArgAction::SetTrue)
+                        .help(WAIT_HELP),
+                ),
+        )
+        .subcommand(
+            Command::new("flash")
+                .about(FLASH_ABOUT)
+                .long_about(FLASH_HELP)
+                .arg(
+                    Arg::new("repartition")
+                        .long("repartition")
+                        .action(ArgAction::SetTrue)
+                        .help(REPARTITION_HELP),
+                )
+                .arg(
+                    Arg::new("wait")
+                        .long("wait")
+                        .action(ArgAction::SetTrue)
+                        .help(WAIT_HELP),
+                )
+                .arg(
+                    Arg::new("skip-size-check")
+                        .long("skip-size-check")
+                        .action(ArgAction::SetTrue)
+                        .help(SKIP_SIZE_CHECK_HELP),
+                )
+                .arg(Arg::new("pit").long("pit").num_args(1).help(PIT_HELP))
+                .arg(
+                    Arg::new("partitions-and-files")
+                        .required(true)
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .value_names(["PARTITION", "FILE"])
+                        .help(PARTITIONS_AND_FILES_HELP_BRIEF)
+                        .long_help(PARTITIONS_AND_FILES_HELP),
+                ),
+        )
+        .subcommand(
+            Command::new("tar-flash")
+                .about(TAR_FLASH_ABOUT)
+                .long_about(TAR_FLASH_HELP)
+                .arg(
+                    Arg::new("repartition")
+                        .long("repartition")
+                        .action(ArgAction::SetTrue)
+                        .help(REPARTITION_HELP),
+                )
+                .arg(
+                    Arg::new("wait")
+                        .long("wait")
+                        .action(ArgAction::SetTrue)
+                        .help(WAIT_HELP),
+                )
+                .arg(
+                    Arg::new("skip-size-check")
+                        .long("skip-size-check")
+                        .action(ArgAction::SetTrue)
+                        .help(SKIP_SIZE_CHECK_HELP),
+                )
+                .arg(Arg::new("pit").long("pit").num_args(1).help(PIT_HELP))
+                .arg(
+                    Arg::new("packages")
+                        .required(true)
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .value_name("PACKAGE")
+                        .help(PACKAGES_HELP),
+                ),
+        )
+        .subcommand(Command::new("info").about("Displays information about Heimdall."))
+        .subcommand(Command::new("version").about("Displays the version number of this binary."))
         .get_matches_from(args);
 
     let verbose = matches.get_flag("verbose");
