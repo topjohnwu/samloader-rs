@@ -57,17 +57,17 @@ fn main() {
                 .required(true)
                 .help("Region CSC code (e.g. XAA)"),
         )
-        .arg(
-            Arg::new("threads")
-                .short('j')
-                .long("threads")
-                .default_value("8")
-                .value_parser(clap::value_parser!(u64))
-                .help("Number of parallel connections"),
-        )
         .subcommand(
             Command::new("download")
                 .about("Download the latest firmware")
+                .arg(
+                    Arg::new("threads")
+                        .short('j')
+                        .long("threads")
+                        .default_value("8")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Number of parallel connections"),
+                )
                 .arg(
                     Arg::new("out_dir")
                         .short('d')
@@ -86,10 +86,10 @@ fn main() {
 
     let model = matches.get_one::<String>("model").cloned().unwrap();
     let region = matches.get_one::<String>("region").cloned().unwrap();
-    let threads = *matches.get_one::<u64>("threads").unwrap();
 
     match matches.subcommand() {
         Some(("download", sub_m)) => {
+            let threads = *sub_m.get_one::<u64>("threads").unwrap();
             let out_dir = sub_m.get_one::<String>("out_dir").cloned();
             let out_file = sub_m.get_one::<String>("out_file").cloned();
             let args = DownloadArgs {
