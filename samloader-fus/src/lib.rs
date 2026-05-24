@@ -19,6 +19,11 @@ mod xml;
 pub use fusclient::{Aes128EcbDec, FusClient};
 pub use xml::BinaryInform;
 
+// Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
+pub use aes;
+pub use ecb;
+pub use reqwest;
+
 use aes::cipher::BlockModeDecrypt;
 use aes::cipher::inout::InOutBuf;
 use memmap2::MmapMut;
