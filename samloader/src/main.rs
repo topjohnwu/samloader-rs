@@ -24,23 +24,23 @@ fn main() {
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .arg(
-            Arg::new("model")
-                .short('m')
-                .long("model")
-                .required(true)
-                .help("The model name (e.g. SM-S931U1)"),
-        )
-        .arg(
-            Arg::new("region")
-                .short('r')
-                .long("region")
-                .required(true)
-                .help("Region CSC code (e.g. XAA)"),
-        )
         .subcommand(
             Command::new("download")
                 .about("Download the latest firmware")
+                .arg(
+                    Arg::new("model")
+                        .short('m')
+                        .long("model")
+                        .required(true)
+                        .help("The model name (e.g. SM-S931U1)"),
+                )
+                .arg(
+                    Arg::new("region")
+                        .short('r')
+                        .long("region")
+                        .required(true)
+                        .help("Region CSC code (e.g. XAA)"),
+                )
                 .arg(
                     Arg::new("threads")
                         .short('j')
@@ -62,14 +62,30 @@ fn main() {
                         .help("Output file path"),
                 ),
         )
-        .subcommand(Command::new("check").about("Check the latest version"))
+        .subcommand(
+            Command::new("check-update")
+                .about("Check the latest version")
+                .arg(
+                    Arg::new("model")
+                        .short('m')
+                        .long("model")
+                        .required(true)
+                        .help("The model name (e.g. SM-S931U1)"),
+                )
+                .arg(
+                    Arg::new("region")
+                        .short('r')
+                        .long("region")
+                        .required(true)
+                        .help("Region CSC code (e.g. XAA)"),
+                ),
+        )
         .get_matches();
-
-    let model = matches.get_one::<String>("model").cloned().unwrap();
-    let region = matches.get_one::<String>("region").cloned().unwrap();
 
     match matches.subcommand() {
         Some(("download", sub_m)) => {
+            let model = sub_m.get_one::<String>("model").cloned().unwrap();
+            let region = sub_m.get_one::<String>("region").cloned().unwrap();
             let threads = *sub_m.get_one::<u64>("threads").unwrap();
             let out_dir = sub_m.get_one::<String>("out_dir").cloned();
             let out_file = sub_m.get_one::<String>("out_file").cloned();
@@ -82,7 +98,9 @@ fn main() {
             };
             download_latest_firmware(args);
         }
-        Some(("check", _)) => {
+        Some(("check-update", sub_m)) => {
+            let model = sub_m.get_one::<String>("model").cloned().unwrap();
+            let region = sub_m.get_one::<String>("region").cloned().unwrap();
             let mut client = FusClient::new().expect("Unable to establish FusClient");
             client.fetch_binary_info(&model, &region);
             println!("{}", client.info.version);

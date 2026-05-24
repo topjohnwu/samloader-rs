@@ -3,19 +3,37 @@
 Download firmware for Samsung devices from official Samsung servers.
 
 ```
-Usage: samloader [OPTIONS] --model <MODEL> --region <REGION> <COMMAND>
+Usage: samloader <COMMAND>
 
 Commands:
-  download  Download the latest firmware
-  check     Check the latest version
-  help      Print this message or the help of the given subcommand(s)
+  download      Download the latest firmware
+  check-update  Check the latest version
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -m, --model <MODEL>      The model name (e.g. SM-S931U1)
-  -r, --region <REGION>    Region CSC code (e.g. XAA)
-  -j, --threads <THREADS>  Number of parallel connections [default: 8]
-  -h, --help               Print help
-  -V, --version            Print version
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+```
+Usage: samloader download [OPTIONS] --model <model> --region <region>
+
+Options:
+  -m, --model <model>        The model name (e.g. SM-S931U1)
+  -r, --region <region>      Region CSC code (e.g. XAA)
+  -j, --threads <threads>    Number of parallel connections [default: 8]
+  -d, --out-dir <out_dir>    Output directory
+  -o, --out-file <out_file>  Output file path
+  -h, --help                 Print help
+```
+
+```
+Usage: samloader check-update --model <model> --region <region>
+
+Options:
+  -m, --model <model>    The model name (e.g. SM-S931U1)
+  -r, --region <region>  Region CSC code (e.g. XAA)
+  -h, --help             Print help
 ```
 
 ## Features
@@ -35,8 +53,4 @@ You can also download the prebuilt executables for Linux, macOS, and Windows in 
 
 ## Notes
 
-This is not an officially supported Google product. This project is not
-eligible for the [Google Open Source Software Vulnerability Rewards
-Program](https://bughunters.google.com/open-source-security).
-
-This project is based on `ananjaser1211/samloader` with assistance from Google Gemini for the initial Python to Rust conversion. Further development after the initial conversion are done by @topjohnwu.
+This project was originally based on the work of [ananjaser1211/samloader](https://github.com/ananjaser1211/samloader).
