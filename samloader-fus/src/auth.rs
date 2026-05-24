@@ -132,7 +132,7 @@ fn authenticate_block(in_block: &[u8; 16]) -> [u8; 16] {
     out_block
 }
 
-pub fn decrypt_nonce(inp: &str) -> String {
+pub(crate) fn decrypt_nonce(inp: &str) -> String {
     let mut block = [b'0'; 16];
     let bytes = inp.as_bytes();
     let len = bytes.len().min(16);

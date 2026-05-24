@@ -18,7 +18,7 @@ use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use xml::BinaryInform;
 
-type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+pub type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 pub struct FusClient {
     client: Client,

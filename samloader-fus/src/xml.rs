@@ -29,7 +29,7 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
     out
 }
 
-pub fn parse_version_xml(xml: &str) -> Option<String> {
+pub(crate) fn parse_version_xml(xml: &str) -> Option<String> {
     let doc = Document::parse(xml).ok()?;
     let latest = doc
         .descendants()
@@ -45,7 +45,7 @@ pub fn parse_version_xml(xml: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-pub fn binary_inform_req_xml(model: &str, region: &str, fw: &str, nonce: &str) -> String {
+pub(crate) fn binary_inform_req_xml(model: &str, region: &str, fw: &str, nonce: &str) -> String {
     let logic_check = get_logic_check(fw, nonce);
 
     format!(
@@ -71,7 +71,7 @@ pub fn binary_inform_req_xml(model: &str, region: &str, fw: &str, nonce: &str) -
     )
 }
 
-pub fn binary_init_req_xml(
+pub(crate) fn binary_init_req_xml(
     filename: &str,
     nonce: &str,
     fw: &str,

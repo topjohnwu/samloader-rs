@@ -16,7 +16,7 @@ mod auth;
 mod fusclient;
 mod xml;
 
-pub use fusclient::FusClient;
+pub use fusclient::{Aes128EcbDec, FusClient};
 pub use xml::BinaryInform;
 
 use aes::cipher::BlockModeDecrypt;
