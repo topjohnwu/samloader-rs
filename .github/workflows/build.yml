@@ -71,11 +71,11 @@ jobs:
           rustup target add x86_64-apple-darwin
           cargo build -p samloader --target aarch64-apple-darwin --release
           cargo build -p samloader --target x86_64-apple-darwin --release
-          lipo -create -output samloader \
+          lipo -create -output target/samloader \
             target/aarch64-apple-darwin/release/samloader \
             target/x86_64-apple-darwin/release/samloader
-          codesign -s - samloader
-          tar c samloader | xz --x86 --lzma2 > samloader-macos-universal.tar.xz
+          codesign -s - target/samloader
+          tar c -C target samloader | xz --x86 --lzma2 > samloader-macos-universal.tar.xz
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
