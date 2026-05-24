@@ -13,4 +13,3 @@ aes = { workspace = true }
 ecb = { workspace = true }
 md-5 = { workspace = true }
 roxmltree = { workspace = true }
-memmap2 = { workspace = true }

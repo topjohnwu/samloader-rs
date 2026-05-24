@@ -12,30 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod download;
+
 use clap::{Arg, Command};
-use indicatif::{ProgressBar, ProgressStyle};
-use samloader_fus::{DownloadArgs, FusClient, ProgressReporter, download_latest_firmware};
-use std::time::Duration;
-
-const PROGRESS_TEMPLATE: &str =
-    "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
-
-struct ProgressWrapper<'a>(&'a ProgressBar);
-
-impl<'a> ProgressReporter for ProgressWrapper<'a> {
-    fn init_length(&self, len: u64) {
-        self.0.set_length(len);
-        self.0.enable_steady_tick(Duration::from_secs(1));
-    }
-
-    fn increment(&self, bytes: u64) {
-        self.0.inc(bytes)
-    }
-
-    fn finish(&self) {
-        self.0.finish()
-    }
-}
+use download::{DownloadArgs, download_latest_firmware};
+use samloader_fus::FusClient;
 
 fn main() {
     let matches = Command::new("samloader")
@@ -99,10 +80,7 @@ fn main() {
                 out_dir,
                 out_file,
             };
-            let pb = ProgressBar::no_length()
-                .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
-            let wrapper = ProgressWrapper(&pb);
-            download_latest_firmware(args, Some(&wrapper));
+            download_latest_firmware(args);
         }
         Some(("check", _)) => {
             let mut client = FusClient::new().expect("Unable to establish FusClient");

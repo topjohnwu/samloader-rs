@@ -1069,6 +1069,7 @@ version = "1.1.0"
 dependencies = [
  "clap",
  "indicatif",
+ "memmap2",
  "samloader-fus",
 ]
 
@@ -1079,7 +1080,6 @@ dependencies = [
  "aes",
  "ecb",
  "md-5",
- "memmap2",
  "reqwest",
  "roxmltree",
 ]

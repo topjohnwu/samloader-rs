@@ -11,3 +11,4 @@ keywords = ["samsung", "firmware"]
 samloader-fus = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
+memmap2 = { workspace = true }
