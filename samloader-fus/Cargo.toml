@@ -1,21 +1,16 @@
 [package]
 name = "samloader-fus"
-version = "1.1.0"
-edition = "2024"
-license = "Apache-2.0"
-description = "Core FUS download logic for Samsung devices"
-repository = "https://github.com/topjohnwu/samloader-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Samsung Firmware-Update-Server (FUS) client"
 keywords = ["samsung", "firmware"]
 
 [dependencies]
-reqwest = { version = "0.13", default-features = false, features = [
-    "blocking",
-    "cookies",
-    "native-tls-no-alpn",
-    "native-tls-vendored",
-] }
-aes = "0.9"
-ecb = "0.2"
-md-5 = "0.11"
-roxmltree = "0.21"
-memmap2 = "0.9"
+reqwest = { workspace = true }
+aes = { workspace = true }
+ecb = { workspace = true }
+md-5 = { workspace = true }
+roxmltree = { workspace = true }
+memmap2 = { workspace = true }

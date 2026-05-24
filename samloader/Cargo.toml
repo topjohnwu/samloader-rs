@@ -1,13 +1,13 @@
 [package]
 name = "samloader"
-version = "1.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Download firmware for Samsung devices"
-repository = "https://github.com/topjohnwu/samloader-rs"
 keywords = ["samsung", "firmware"]
 
 [dependencies]
-samloader-fus = { path = "../samloader-fus" }
-clap = "4.6"
-indicatif = "0.18"
+samloader-fus = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
