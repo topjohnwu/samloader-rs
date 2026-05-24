@@ -86,13 +86,13 @@ pub(crate) fn download_latest_firmware(args: DownloadArgs) {
     progress.enable_steady_tick(Duration::from_secs(1));
 
     thread::scope(|s| {
-        for (i, chunk) in map.chunks_mut(chunk_size as usize).enumerate() {
-            let i = i as u64;
-            let is_last_worker = i == args.threads - 1;
+        let mut chunks = map.chunks_mut(chunk_size as usize).enumerate().peekable();
+        while let Some((i, chunk)) = chunks.next() {
+            let is_last = chunks.peek().is_none();
 
-            let start = i * chunk_size;
+            let start = i as u64 * chunk_size;
             // Ensure the last thread covers the remainder of the file
-            let end = if is_last_worker {
+            let end = if is_last {
                 None
             } else {
                 Some(start + chunk_size - 1)
