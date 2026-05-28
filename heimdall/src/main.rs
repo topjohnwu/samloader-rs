@@ -17,6 +17,7 @@
 mod bridge_manager;
 mod detect;
 mod download_pit;
+mod error;
 mod firmware;
 mod flash;
 mod packets;

@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::BridgeError;
 use crate::packets;
 use crate::packets::RequestPacket;
 use crate::{print_error, print_warning};
@@ -93,7 +94,7 @@ impl BridgeManager {
         self.context.set_log_level(self.usb_log_level);
     }
 
-    pub(crate) fn detect_device(&mut self) -> Result<(), String> {
+    pub(crate) fn detect_device(&mut self) -> Result<(), BridgeError> {
         if self.wait_for_device {
             println!("Waiting for device...");
         }
@@ -119,10 +120,10 @@ impl BridgeManager {
             }
         }
 
-        Err("Failed to detect compatible download-mode device.".to_string())
+        Err(BridgeError::DeviceNotFound)
     }
 
-    fn find_device_interface(&mut self) -> Result<(), String> {
+    fn find_device_interface(&mut self) -> Result<(), BridgeError> {
         if self.wait_for_device {
             println!("Waiting for device...");
         } else {
@@ -161,12 +162,12 @@ impl BridgeManager {
 
         let device = match heimdall_device {
             Some(d) => d,
-            None => return Err("Failed to detect compatible download-mode device.".to_string()),
+            None => return Err(BridgeError::DeviceNotFound),
         };
 
         let handle = match device.open() {
             Ok(h) => h,
-            Err(e) => return Err(format!("Failed to access device. libusb error: {}", e)),
+            Err(e) => return Err(BridgeError::DeviceAccess(e)),
         };
 
         if let Ok(config) = handle.active_configuration() {
@@ -222,7 +223,7 @@ impl BridgeManager {
 
         let config_descriptor = device
             .config_descriptor(0)
-            .map_err(|_| "Failed to retrieve config descriptor".to_string())?;
+            .map_err(|_| BridgeError::ConfigDescriptorRetrieval)?;
 
         self.interface_index = -1;
         self.alt_setting_index = -1;
@@ -281,14 +282,14 @@ impl BridgeManager {
         }
 
         if self.interface_index < 0 {
-            return Err("Failed to find correct interface configuration".to_string());
+            return Err(BridgeError::InterfaceConfigurationNotFound);
         }
 
         self.handle = Some(handle);
         Ok(())
     }
 
-    fn claim_device_interface(&mut self) -> Result<(), String> {
+    fn claim_device_interface(&mut self) -> Result<(), BridgeError> {
         println!("Claiming interface...");
 
         let handle = self.handle.as_mut().unwrap();
@@ -299,12 +300,12 @@ impl BridgeManager {
                 let _ = handle.detach_kernel_driver(self.interface_index as u8);
                 println!("Claiming interface again...");
                 if handle.claim_interface(self.interface_index as u8).is_err() {
-                    return Err("Claiming interface failed!".to_string());
+                    return Err(BridgeError::InterfaceClaimFailed);
                 }
             }
             #[cfg(not(target_os = "linux"))]
             {
-                return Err("Claiming interface failed!".to_string());
+                return Err(BridgeError::InterfaceClaimFailed);
             }
         }
 
@@ -312,7 +313,7 @@ impl BridgeManager {
         Ok(())
     }
 
-    fn setup_device_interface(&mut self) -> Result<(), String> {
+    fn setup_device_interface(&mut self) -> Result<(), BridgeError> {
         if self.alt_setting_index == 0 {
             return Ok(());
         }
@@ -322,9 +323,8 @@ impl BridgeManager {
         let handle = self.handle.as_mut().unwrap();
         handle
             .set_alternate_setting(self.interface_index as u8, self.alt_setting_index as u8)
-            .map_err(|_| "Setting up interface failed!".to_string())?;
+            .map_err(|_| BridgeError::InterfaceSetupFailed)?;
 
-        println!();
         Ok(())
     }
 
@@ -341,10 +341,9 @@ impl BridgeManager {
         }
 
         self.interface_claimed = false;
-        println!();
     }
 
-    fn initialise_protocol(&mut self) -> Result<(), String> {
+    fn initialise_protocol(&mut self) -> Result<(), BridgeError> {
         println!("Initialising protocol...");
 
         {
@@ -356,13 +355,11 @@ impl BridgeManager {
         }
 
         self.send_packet(&packets::HandshakePacket::new(), 1000)
-            .map_err(|_| "Failed to send handshake!".to_string())?;
+            .map_err(|_| BridgeError::HandshakeSendFailed)?;
 
         let response = self
             .receive_packet::<packets::HandshakeResponse>(1000)
-            .map_err(|_| {
-                "Unexpected handshake response!\nFailed to receive handshake response.".to_string()
-            })?;
+            .map_err(|_| BridgeError::HandshakeReceiveFailed)?;
 
         match response {
             packets::HandshakeResponse::Loke => {
@@ -371,17 +368,17 @@ impl BridgeManager {
             }
             packets::HandshakeResponse::Unknown(raw_data) => {
                 if self.verbose {
-                    return Err(format!(
-                        "Unexpected handshake response!\nExpected: \"LOKE\"\nReceived: \"{}\"",
-                        String::from_utf8_lossy(&raw_data)
-                    ));
+                    return Err(BridgeError::HandshakeMismatch {
+                        expected: "LOKE".to_string(),
+                        received: String::from_utf8_lossy(&raw_data).into_owned(),
+                    });
                 }
-                Err("Unexpected handshake response!".to_string())
+                Err(BridgeError::UnexpectedHandshake)
             }
         }
     }
 
-    pub(crate) fn initialise(&mut self) -> Result<(), String> {
+    pub(crate) fn initialise(&mut self) -> Result<(), BridgeError> {
         println!("Initialising connection...");
 
         self.find_device_interface()?;
@@ -392,13 +389,13 @@ impl BridgeManager {
         Ok(())
     }
 
-    pub(crate) fn begin_session(&mut self) -> Result<(), String> {
+    pub(crate) fn begin_session(&mut self) -> Result<(), BridgeError> {
         println!("Beginning session...");
 
         let packet = RequestPacket::begin_session();
         let device_default_packet_size = self
             .request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to begin session!".to_string())?;
+            .map_err(|_| BridgeError::BeginSessionFailed)?;
 
         self.lz4_supported = (device_default_packet_size & 0x8000) != 0;
 
@@ -413,13 +410,10 @@ impl BridgeManager {
             let packet = RequestPacket::file_part_size(self.file_transfer_packet_size as u32);
             let value = self
                 .request_and_response(&packet, 3000)
-                .map_err(|_| "Failed to send file part size packet!".to_string())?;
+                .map_err(|_| BridgeError::FilePartSizeSendFailed)?;
 
             if value != 0 {
-                return Err(format!(
-                    "Unexpected file part size response!\nExpected: 0\nReceived: {}",
-                    value
-                ));
+                return Err(BridgeError::UnexpectedFilePartSizeResponse(value));
             }
         }
 
@@ -427,18 +421,18 @@ impl BridgeManager {
         Ok(())
     }
 
-    pub(crate) fn end_session(&self) -> Result<(), String> {
+    pub(crate) fn end_session(&self) -> Result<(), BridgeError> {
         println!("Ending session...");
 
         let packet = RequestPacket::end_session();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send end session packet!".to_string())?;
+            .map_err(|_| BridgeError::EndSessionSendFailed)?;
 
         println!("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send reboot device packet!".to_string())?;
+            .map_err(|_| BridgeError::RebootDeviceSendFailed)?;
 
         Ok(())
     }
@@ -533,51 +527,55 @@ impl BridgeManager {
     fn receive_packet<T: packets::InboundPacket + std::fmt::Debug>(
         &self,
         timeout: i32,
-    ) -> Result<T, String> {
+    ) -> Result<T, BridgeError> {
         let mut buffer = vec![0u8; T::SIZE];
         let received_size = self.receive_bulk_transfer(&mut buffer, timeout, true);
 
         if received_size < 0 {
-            return Err("Failed to receive packet!".to_string());
+            return Err(BridgeError::ReceivePacketFailed);
         }
 
         buffer.truncate(received_size as usize);
-        let parsed = T::unpack(&buffer)?;
+        let parsed = T::unpack(&buffer).map_err(BridgeError::from)?;
         if self.verbose {
             println!("Received packet: {:#04X?}", parsed);
         }
         Ok(parsed)
     }
 
-    fn request_and_response(&self, packet: &RequestPacket, timeout: i32) -> Result<u32, String> {
+    pub(crate) fn request_and_response(
+        &self,
+        packet: &RequestPacket,
+        timeout: i32,
+    ) -> Result<u32, BridgeError> {
         self.send_packet(packet, timeout)
-            .map_err(|_| "Failed to send packet!".to_string())?;
+            .map_err(|_| BridgeError::SendPacketFailed)?;
 
         let response = self.receive_packet::<packets::Response>(timeout)?;
         let expected_type = packet.expected_response_type();
 
         if response.response_type != expected_type {
-            return Err(format!(
-                "Response type mismatch! Expected: {}, Received: {}",
-                expected_type, response.response_type
-            ));
+            return Err(BridgeError::ResponseTypeMismatch {
+                expected: expected_type,
+                received: response.response_type,
+            });
         }
 
         Ok(response.value)
     }
 
-    pub(crate) fn send_pit_data(&self, pit_data: &PitData) -> Result<(), String> {
+    pub(crate) fn send_pit_data(&self, pit_data: &PitData) -> Result<(), BridgeError> {
         let pit_buffer_size = pit_data.get_padded_size();
 
         // Start file transfer
         let packet = RequestPacket::pit_file_flash();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to initialise PIT file transfer!".to_string())?;
+            .map_err(|_| BridgeError::PitFileTransferInitFailed)?;
 
         // Transfer file size
         let packet = RequestPacket::flash_part_pit_file(pit_buffer_size);
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send PIT file part information!".to_string())?;
+            .map_err(|_| BridgeError::PitFilePartInfoSendFailed)?;
 
         // Create packed in-memory PIT file
         let mut pit_buffer = vec![0u8; pit_buffer_size as usize];
@@ -586,29 +584,30 @@ impl BridgeManager {
         // Flash pit file
         let packet = packets::FilePartPacket::new(&pit_buffer, pit_buffer_size);
         self.send_packet(&packet, 3000)
-            .map_err(|_| "Failed to send file part packet!".to_string())?;
+            .map_err(|_| BridgeError::SendPacketFailed)?;
 
-        let response = self
-            .receive_packet::<packets::Response>(3000)
-            .map_err(|_| "Failed to receive PIT file part response!".to_string())?;
+        let response = self.receive_packet::<packets::Response>(3000)?;
 
         if response.response_type != packets::RESPONSE_TYPE_PIT_FILE {
-            return Err("Failed to receive PIT file part response!".to_string());
+            return Err(BridgeError::ResponseTypeMismatch {
+                expected: packets::RESPONSE_TYPE_PIT_FILE,
+                received: response.response_type,
+            });
         }
 
         // End pit file transfer
         let packet = RequestPacket::end_pit_file_transfer(pit_buffer_size);
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send end PIT file transfer packet!".to_string())?;
+            .map_err(|_| BridgeError::PitFileTransferEndSendFailed)?;
 
         Ok(())
     }
 
-    fn receive_pit_file(&self) -> Result<Vec<u8>, String> {
+    fn receive_pit_file(&self) -> Result<Vec<u8>, BridgeError> {
         let packet = RequestPacket::pit_file_dump();
         let file_size = self
             .request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to request receival of PIT file!".to_string())?;
+            .map_err(|_| BridgeError::PitFileSizeReceiveFailed)?;
 
         let mut transfer_count = file_size / 500; // ReceiveFilePartPacket::kDataSize
         if file_size % 500 != 0 {
@@ -620,28 +619,28 @@ impl BridgeManager {
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_pit_file(i);
             self.send_packet(&packet, 3000)
-                .map_err(|_| format!("Failed to request PIT file part #{}!", i))?;
+                .map_err(|_| BridgeError::PitFilePartRequestFailed(i))?;
 
             let part = self
                 .receive_packet::<packets::PitDataPacket>(3000)
-                .map_err(|_| format!("Failed to receive PIT file part #{}!", i))?;
+                .map_err(|_| BridgeError::PitFilePartReceiveFailed(i))?;
             buffer.extend_from_slice(&part.data);
         }
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send request to end PIT file transfer!".to_string())?;
+            .map_err(|_| BridgeError::PitFileEndSendFailed)?;
 
         Ok(buffer)
     }
 
-    pub(crate) fn download_pit_file(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn download_pit_file(&self) -> Result<Vec<u8>, BridgeError> {
         println!("Downloading device's PIT file...");
 
         let pit_file = self.receive_pit_file().map_err(|e| {
             print_error!("{}", e);
-            "Failed to download PIT file!".to_string()
+            BridgeError::PitDownloadFailed
         })?;
 
         println!("PIT file download successful.\n");
@@ -652,10 +651,13 @@ impl BridgeManager {
         self.lz4_supported
     }
 
-    pub(crate) fn send_file(&self, info: &mut crate::firmware::FirmwareFile) -> Result<(), String> {
+    pub(crate) fn send_file(
+        &self,
+        info: &mut crate::firmware::FirmwareFile,
+    ) -> Result<(), BridgeError> {
         let packet = RequestPacket::file_transfer_flash();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to initialise file transfer!".to_string())?;
+            .map_err(|_| BridgeError::FileTransferInitFailed)?;
 
         let sequences = crate::firmware::SequenceIterator::new(
             &mut info.file,
@@ -691,10 +693,10 @@ impl BridgeManager {
     pub(crate) fn send_lz4_file(
         &self,
         info: &mut crate::firmware::FirmwareLz4File,
-    ) -> Result<(), String> {
+    ) -> Result<(), BridgeError> {
         let packet = RequestPacket::lz4_file_transfer_flash();
         self.request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to initialise file transfer!".to_string())?;
+            .map_err(|_| BridgeError::FileTransferInitFailed)?;
 
         let sequences = crate::firmware::Lz4SequenceIterator::new(
             &mut info.file,
@@ -733,7 +735,7 @@ impl BridgeManager {
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
         mut sequence_data: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), BridgeError> {
         // Pad sequence_data to full packets
         let remainder = sequence_data.len() % self.file_transfer_packet_size;
         if remainder != 0 {
@@ -742,7 +744,7 @@ impl BridgeManager {
         }
 
         self.request_and_response(start_packet, 3000)
-            .map_err(|_| "Failed to begin file transfer sequence!".to_string())?;
+            .map_err(|_| BridgeError::FileTransferSequenceBeginFailed)?;
 
         for (file_part_index, file_buffer) in sequence_data
             .chunks(self.file_transfer_packet_size)
@@ -773,11 +775,10 @@ impl BridgeManager {
                             success = true;
                             break;
                         } else if retry == 0 {
-                            println!();
-                            return Err(format!(
-                                "Expected file part index: {} Received: {}",
-                                file_part_index, response.value
-                            ));
+                            return Err(BridgeError::FilePartIndexMismatch {
+                                expected: file_part_index,
+                                received: response.value,
+                            });
                         }
                     }
                     _ => {}
@@ -785,28 +786,24 @@ impl BridgeManager {
             }
 
             if !success {
-                println!();
-                return Err("Failed to receive file part response!".to_string());
+                return Err(BridgeError::FilePartResponseReceiveFailed);
             }
         }
 
         self.request_and_response(end_packet, self.file_transfer_sequence_timeout as i32)
-            .map_err(|_| "Failed to end file transfer sequence!".to_string())?;
+            .map_err(|_| BridgeError::FileTransferSequenceEndFailed)?;
 
         Ok(())
     }
 
-    pub(crate) fn set_total_bytes(&self, total_bytes: u64) -> Result<(), String> {
+    pub(crate) fn set_total_bytes(&self, total_bytes: u64) -> Result<(), BridgeError> {
         let packet = RequestPacket::total_bytes(total_bytes);
         let value = self
             .request_and_response(&packet, 3000)
-            .map_err(|_| "Failed to send total bytes packet!".to_string())?;
+            .map_err(|_| BridgeError::TotalBytesSendFailed)?;
 
         if value != 0 {
-            return Err(format!(
-                "Unexpected session total bytes response!\nExpected: 0\nReceived: {}",
-                value
-            ));
+            return Err(BridgeError::UnexpectedTotalBytesResponse(value));
         }
 
         Ok(())
