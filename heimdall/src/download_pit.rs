@@ -15,11 +15,8 @@
 
 use crate::odin_manager::OdinManager;
 use crate::print_error;
-use crate::version;
 use std::fs::File;
 use std::io::Write;
-use std::thread::sleep;
-use std::time::Duration;
 
 pub(crate) fn action_download_pit(
     output: &str,
@@ -31,10 +28,6 @@ pub(crate) fn action_download_pit(
         println!("Output file was not specified.\n");
         return 0;
     }
-
-    // Info
-    version::print_release_info();
-    sleep(Duration::from_millis(1000));
 
     // Open output file
     let mut output_file = match File::create(output) {

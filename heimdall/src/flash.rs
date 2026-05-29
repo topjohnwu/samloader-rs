@@ -18,14 +18,11 @@ use crate::firmware::{
 };
 use crate::odin_manager::OdinManager;
 use crate::print_error;
-use crate::version;
 use crate::PartitionArg;
 use libpit::PitData;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::thread::sleep;
-use std::time::Duration;
 
 pub(crate) fn init_session_and_get_pit(
     verbose: bool,
@@ -33,9 +30,6 @@ pub(crate) fn init_session_and_get_pit(
     usb_log_level: &str,
     pit_file_bytes: Option<&[u8]>,
 ) -> Result<(OdinManager, PitData), i32> {
-    version::print_release_info();
-    sleep(Duration::from_millis(1000));
-
     let mut odin_manager = OdinManager::new(verbose, wait);
     odin_manager.set_usb_log_level(usb_log_level);
 

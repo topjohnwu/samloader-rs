@@ -26,10 +26,6 @@ pub(crate) fn print_version() {
     println!("{}", VERSION);
 }
 
-pub(crate) fn print_release_info() {
-    print!("{}", RELEASE_INFO);
-}
-
 pub(crate) fn print_full_info() {
     print!("{}", RELEASE_INFO);
     print!("{}", EXTRA_INFO);

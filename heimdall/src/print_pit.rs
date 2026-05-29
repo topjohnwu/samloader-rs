@@ -15,17 +15,11 @@
 
 use crate::odin_manager::OdinManager;
 use crate::print_error;
-use crate::version;
 use libpit::PitData;
 use std::fs::File;
 use std::io::Read;
-use std::thread::sleep;
-use std::time::Duration;
 
 pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
-    version::print_release_info();
-    sleep(Duration::from_millis(1000));
-
     if !file.is_empty() {
         let mut f = match File::open(file) {
             Ok(f) => f,
