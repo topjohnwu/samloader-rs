@@ -89,7 +89,7 @@ pub(crate) fn download_latest_firmware(args: DownloadArgs) {
 
     let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
 
-    client.init_download();
+    client.init_download().expect("Download init failed");
 
     // Round up to the nearest 16 byte boundary
     let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
