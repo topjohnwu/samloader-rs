@@ -16,6 +16,7 @@ use crate::{auth, xml};
 use aes::cipher::KeyInit;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RANGE, USER_AGENT};
+use std::time::Duration;
 use xml::BinaryInform;
 
 pub type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
@@ -30,7 +31,17 @@ pub struct FusClient {
 
 impl FusClient {
     pub fn new() -> reqwest::Result<Self> {
-        let client = Client::builder().cookie_store(true).build()?;
+        let client = Client::builder()
+            .cookie_store(true)
+            // For the blocking client, `timeout` is applied per I/O operation with
+            // a fresh deadline each call (see its `Read` impl) — so it flags a
+            // stalled transfer (no data for 30s) without capping total download
+            // time. This is the timeout that surfaces as `Decode/TimedOut`; the
+            // download loop now resumes on it instead of aborting. 30s is also the
+            // library default, made explicit here so it can be tuned.
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(15))
+            .build()?;
         let mut fus = FusClient {
             client,
             auth: Default::default(),
