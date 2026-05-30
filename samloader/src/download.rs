@@ -32,6 +32,9 @@ pub(crate) struct DownloadArgs {
     /// Region CSC code (e.g. XAA)
     pub(crate) region: String,
 
+    /// Optional: firmware version. If None, downloads the latest.
+    pub(crate) version: Option<String>,
+
     /// Number of parallel connections
     pub(crate) threads: u64,
 
@@ -44,7 +47,15 @@ pub(crate) struct DownloadArgs {
 
 pub(crate) fn download_latest_firmware(args: DownloadArgs) {
     let mut client = FusClient::new().expect("Unable to establish FusClient");
-    client.fetch_binary_info(&args.model, &args.region);
+
+    match &args.version {
+        Some(version) => {
+            client.fetch_binary_info_for_version(&args.model, &args.region, version);
+        }
+        None => {
+            client.fetch_binary_info(&args.model, &args.region);
+        }
+    }
 
     println!("Firmware Version: {}", client.info.version);
 

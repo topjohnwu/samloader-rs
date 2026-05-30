@@ -73,6 +73,39 @@ impl FusClient {
         self.info = BinaryInform::parse(&xml).expect("Info request invalid");
     }
 
+    pub fn fetch_binary_info_for_version(&mut self, model: &str, region: &str, version: &str) {
+        let mut parts: Vec<&str> = version.split('/').collect();
+        if parts.len() == 3 {
+            parts.push(parts[0]);
+        }
+        let fw = parts.join("/");
+        let req_xml = xml::binary_inform_req_xml(model, region, &fw, &self.nonce);
+
+        let xml = self
+            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
+            .and_then(Response::text)
+            .expect("Info request failed");
+
+        self.info = BinaryInform::parse(&xml).expect("Info request invalid");
+    }
+
+    pub fn fetch_all_versions(&self, model: &str, region: &str) -> Vec<String> {
+        let version_url = format!(
+            "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
+            region, model
+        );
+        let version_xml = self
+            .client
+            .get(&version_url)
+            .header(USER_AGENT, "Kies2.0_FUS")
+            .send()
+            .expect("Failed to fetch version.xml")
+            .text()
+            .expect("Failed to read version.xml text");
+
+        xml::parse_version_xml_all(&version_xml)
+    }
+
     fn make_headers(&self) -> HeaderMap {
         let auth_val = format!(
             "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
