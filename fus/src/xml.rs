@@ -45,6 +45,54 @@ pub(crate) fn parse_version_xml(xml: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+pub(crate) fn parse_version_xml_all(xml: &str) -> Vec<String> {
+    let doc = Document::parse(xml).ok();
+    if doc.is_none() {
+        return Vec::new();
+    }
+    let doc = doc.unwrap();
+
+    let mut versions: Vec<String> = Vec::new();
+
+    for value_node in doc.descendants().filter(|n| n.has_tag_name("value")) {
+        if let Some(text) = value_node.text() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let mut parts: Vec<&str> = trimmed.split("/").collect();
+                if parts.len() == 3 {
+                    parts.push(parts[0]);
+                }
+                if parts.len() >= 3 && parts[2].is_empty() {
+                    parts[2] = parts[0];
+                }
+                versions.push(parts.join("/"));
+            }
+        }
+    }
+
+    if let Some(latest) = doc.descendants()
+        .find(|n| n.has_tag_name("latest"))
+        .and_then(|n| n.text())
+    {
+        let trimmed = latest.trim();
+        if !trimmed.is_empty() {
+            let mut parts: Vec<&str> = trimmed.split("/").collect();
+            if parts.len() == 3 {
+                parts.push(parts[0]);
+            }
+            if parts.len() >= 3 && parts[2].is_empty() {
+                parts[2] = parts[0];
+            }
+            versions.push(parts.join("/"));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    versions.retain(|v| seen.insert(v.clone()));
+
+    versions
+}
+
 pub(crate) fn binary_inform_req_xml(model: &str, region: &str, fw: &str, nonce: &str) -> String {
     let logic_check = get_logic_check(fw, nonce);
 

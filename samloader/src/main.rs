@@ -26,7 +26,7 @@ fn main() {
         .arg_required_else_help(true)
         .subcommand(
             Command::new("download")
-                .about("Download the latest firmware")
+                .about("Download firmware")
                 .arg(
                     Arg::new("model")
                         .short('m')
@@ -40,6 +40,12 @@ fn main() {
                         .long("region")
                         .required(true)
                         .help("Region CSC code (e.g. XAA)"),
+                )
+                .arg(
+                    Arg::new("version")
+                        .short('v')
+                        .long("version")
+                        .help("Firmware version string (e.g. PDA/CSC/MODEM). If omitted, downloads the latest."),
                 )
                 .arg(
                     Arg::new("threads")
@@ -64,7 +70,7 @@ fn main() {
         )
         .subcommand(
             Command::new("check-update")
-                .about("Check the latest version")
+                .about("Check available versions")
                 .arg(
                     Arg::new("model")
                         .short('m')
@@ -78,6 +84,13 @@ fn main() {
                         .long("region")
                         .required(true)
                         .help("Region CSC code (e.g. XAA)"),
+                )
+                .arg(
+                    Arg::new("all")
+                        .short('a')
+                        .long("all")
+                        .help("List all available firmware versions")
+                        .action(clap::ArgAction::SetTrue),
                 ),
         )
         .get_matches();
@@ -86,12 +99,14 @@ fn main() {
         Some(("download", sub_m)) => {
             let model = sub_m.get_one::<String>("model").cloned().unwrap();
             let region = sub_m.get_one::<String>("region").cloned().unwrap();
+            let version = sub_m.get_one::<String>("version").cloned();
             let threads = *sub_m.get_one::<u64>("threads").unwrap();
             let out_dir = sub_m.get_one::<String>("out_dir").cloned();
             let out_file = sub_m.get_one::<String>("out_file").cloned();
             let args = DownloadArgs {
                 model,
                 region,
+                version,
                 threads,
                 out_dir,
                 out_file,
@@ -101,9 +116,19 @@ fn main() {
         Some(("check-update", sub_m)) => {
             let model = sub_m.get_one::<String>("model").cloned().unwrap();
             let region = sub_m.get_one::<String>("region").cloned().unwrap();
+            let show_all = sub_m.get_one::<bool>("all").copied().unwrap_or(false);
+
             let mut client = FusClient::new().expect("Unable to establish FusClient");
-            client.fetch_binary_info(&model, &region);
-            println!("{}", client.info.version);
+
+            if show_all {
+                let versions = client.fetch_all_versions(&model, &region);
+                for v in &versions {
+                    println!("{}", v);
+                }
+            } else {
+                client.fetch_binary_info(&model, &region);
+                println!("{}", client.info.version);
+            }
         }
         _ => unreachable!(),
     };
