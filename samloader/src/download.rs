@@ -97,6 +97,8 @@ pub(crate) fn download_latest_firmware(args: DownloadArgs) {
     progress.enable_steady_tick(Duration::from_secs(1));
 
     thread::scope(|s| {
+        let progress = &progress;
+        let client = &client;
         let mut chunks = map.chunks_mut(chunk_size as usize).enumerate().peekable();
         while let Some((i, chunk)) = chunks.next() {
             let is_last = chunks.peek().is_none();
@@ -109,36 +111,9 @@ pub(crate) fn download_latest_firmware(args: DownloadArgs) {
                 Some(start + chunk_size - 1)
             };
 
-            let mut resp = client
-                .download_file(Some(start), end)
-                .expect("Download request failed");
+            s.spawn(move || download_chunk(client, chunk, start, end, progress));
 
-            let mut dec = client.get_decryptor();
-            let progress_ref = &progress;
-            s.spawn(move || {
-                let mut dl_pos = 0_usize;
-                let mut dec_pos = 0_usize;
-
-                loop {
-                    match resp.read(&mut chunk[dl_pos..]) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            dl_pos += n;
-                            progress_ref.inc(n as u64);
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                            continue;
-                        }
-                        Err(e) => panic!("Download failed: {e:?}"),
-                    }
-
-                    let encrypted = InOutBuf::from(&mut chunk[dec_pos..dl_pos]);
-                    let (blocks, tail) = encrypted.into_chunks();
-                    dec.decrypt_blocks_inout(blocks);
-                    dec_pos = dl_pos - tail.len();
-                }
-            });
-            // Wait 100ms between each request
+            // Stagger connection setup to avoid hammering the server
             thread::sleep(Duration::from_millis(100));
         }
     });
@@ -159,4 +134,94 @@ pub(crate) fn download_latest_firmware(args: DownloadArgs) {
     }
 
     progress.finish();
+}
+
+/// Maximum number of *consecutive* network failures tolerated while fetching a
+/// single chunk. The counter resets whenever a read makes forward progress, so
+/// this bounds stalls, not the total number of blips over a long download.
+const MAX_RETRIES: u32 = 8;
+
+/// Download the byte range `[start, end]` (or `[start, EOF]` when `end` is
+/// `None`) into `chunk`, decrypting in place as bytes arrive.
+///
+/// On a network error the request is re-issued from the last decrypted 16-byte
+/// boundary instead of restarting the chunk. This resume is correct because:
+///   * the firmware is served via HTTP range requests over static content, and
+///   * decryption is AES-ECB, which is position-independent — every 16-byte
+///     block decrypts on its own, so resuming at any block boundary is exact.
+///
+/// The re-fetched overlap is therefore at most the <16-byte undecrypted tail.
+fn download_chunk(
+    client: &FusClient,
+    chunk: &mut [u8],
+    start: u64,
+    end: Option<u64>,
+    progress: &ProgressBar,
+) {
+    // ECB keeps no state between blocks, so one decryptor is reused across every
+    // (re)connection.
+    let mut dec = client.get_decryptor();
+    let mut dec_pos = 0_usize; // bytes decrypted so far (always a multiple of 16)
+    let mut retries = 0_u32;
+
+    loop {
+        let mut resp = match client.download_file(Some(start + dec_pos as u64), end) {
+            Ok(resp) => resp,
+            Err(e) => {
+                retries += 1;
+                if retries > MAX_RETRIES {
+                    panic!("Download failed after {MAX_RETRIES} retries: {e:?}");
+                }
+                progress.println(format!(
+                    "Request error ({e}); retry {retries}/{MAX_RETRIES} at offset {}",
+                    start + dec_pos as u64
+                ));
+                thread::sleep(backoff(retries));
+                continue;
+            }
+        };
+
+        // We re-requested from `dec_pos`; discard the undecrypted tail and resume
+        // writing there. Progress only counts decrypted bytes, so the re-fetched
+        // overlap is never double-counted and there is nothing to roll back.
+        let resume_from = dec_pos;
+        let mut dl_pos = dec_pos; // bytes received into `chunk` this connection
+
+        let stall = loop {
+            match resp.read(&mut chunk[dl_pos..]) {
+                Ok(0) => return, // chunk fully received and decrypted
+                Ok(n) => dl_pos += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => break e, // connection dropped: resume the outer loop
+            }
+
+            let prev_dec = dec_pos;
+            let (blocks, tail) = InOutBuf::from(&mut chunk[dec_pos..dl_pos]).into_chunks();
+            dec.decrypt_blocks_inout(blocks);
+            dec_pos = dl_pos - tail.len();
+            progress.inc((dec_pos - prev_dec) as u64);
+        };
+
+        // Reset the budget only on real decryption progress (a whole new block),
+        // not on raw bytes read. This keeps isolated blips from exhausting the
+        // retries while guaranteeing that a chunk which never advances still
+        // terminates — `dec_pos` can only climb so many times.
+        if dec_pos > resume_from {
+            retries = 0;
+        }
+        retries += 1;
+        if retries > MAX_RETRIES {
+            panic!("Download failed after {MAX_RETRIES} retries: {stall:?}");
+        }
+        progress.println(format!(
+            "Download error ({stall}); retry {retries}/{MAX_RETRIES}, resuming at offset {}",
+            start + dec_pos as u64
+        ));
+        thread::sleep(backoff(retries));
+    }
+}
+
+/// Exponential backoff capped at 30s: 1s, 2s, 4s, 8s, 16s, 30s, ...
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs((1u64 << (attempt - 1).min(5)).min(30))
 }
