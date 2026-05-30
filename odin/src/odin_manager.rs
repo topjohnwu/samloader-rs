@@ -102,17 +102,17 @@ impl OdinManager {
 
     fn print_device_info(&self, device: &rusb::Device<Context>, handle: &DeviceHandle<Context>) {
         if let Ok(descriptor) = device.device_descriptor() {
-            if let Ok(languages) = handle.read_languages(Duration::from_secs(1)) {
-                if !languages.is_empty() {
-                    if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
-                        eprintln!("      Manufacturer: \"{}\"", manufacturer);
-                    }
-                    if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
-                        eprintln!("           Product: \"{}\"", product);
-                    }
-                    if let Ok(serial) = handle.read_serial_number_string_ascii(&descriptor) {
-                        eprintln!("         Serial No: \"{}\"", serial);
-                    }
+            if let Ok(languages) = handle.read_languages(Duration::from_secs(1))
+                && !languages.is_empty()
+            {
+                if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
+                    eprintln!("      Manufacturer: \"{}\"", manufacturer);
+                }
+                if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
+                    eprintln!("           Product: \"{}\"", product);
+                }
+                if let Ok(serial) = handle.read_serial_number_string_ascii(&descriptor) {
+                    eprintln!("         Serial No: \"{}\"", serial);
                 }
             }
 
@@ -277,15 +277,13 @@ impl OdinManager {
                 if self.interface_index < 0
                     && setting.num_endpoints() == 2
                     && setting.class_code() == USB_CLASS_CDC_DATA
-                {
-                    if let (Some(in_addr), Some(out_addr)) =
+                    && let (Some(in_addr), Some(out_addr)) =
                         (in_endpoint_address, out_endpoint_address)
-                    {
-                        self.interface_index = interface.number() as i32;
-                        self.alt_setting_index = setting.setting_number() as i32;
-                        self.in_endpoint = in_addr;
-                        self.out_endpoint = out_addr;
-                    }
+                {
+                    self.interface_index = interface.number() as i32;
+                    self.alt_setting_index = setting.setting_number() as i32;
+                    self.in_endpoint = in_addr;
+                    self.out_endpoint = out_addr;
                 }
             }
         }

@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::print_error;
 use crate::PartitionArg;
+use crate::print_error;
 use samloader_odin::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
 };
@@ -89,10 +89,8 @@ pub(crate) fn execute_flash_pipeline(
         }
     }
 
-    if repartition {
-        if let Some(bytes) = pit_file_bytes {
-            total_bytes += bytes.len() as u64;
-        }
+    if repartition && let Some(bytes) = pit_file_bytes {
+        total_bytes += bytes.len() as u64;
     }
 
     if let Err(e) = odin_manager.set_total_bytes(total_bytes) {

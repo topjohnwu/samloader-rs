@@ -252,7 +252,7 @@ impl Lz4FrameHeader {
                 return Err(format!(
                     "Invalid block max size code: {}",
                     block_max_size_code
-                ))
+                ));
             }
         };
 

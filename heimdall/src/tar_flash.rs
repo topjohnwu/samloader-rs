@@ -14,8 +14,8 @@
 
 use crate::print_error;
 use samloader_odin::{
-    verify_md5_footer, FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader,
-    TarEntryReader,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, TarEntryReader,
+    verify_md5_footer,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -56,11 +56,11 @@ pub(crate) fn action_tar_flash(
 ) -> i32 {
     // MD5 verification of .tar.md5 packages
     for pkg in packages {
-        if pkg.to_lowercase().ends_with(".md5") {
-            if let Err(e) = verify_md5_footer(pkg) {
-                print_error!("{}", e);
-                return 1;
-            }
+        if pkg.to_lowercase().ends_with(".md5")
+            && let Err(e) = verify_md5_footer(pkg)
+        {
+            print_error!("{}", e);
+            return 1;
         }
     }
 

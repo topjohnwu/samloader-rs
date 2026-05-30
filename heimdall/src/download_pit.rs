@@ -72,9 +72,5 @@ pub(crate) fn action_download_pit(
         success = false;
     }
 
-    if success {
-        0
-    } else {
-        1
-    }
+    if success { 0 } else { 1 }
 }

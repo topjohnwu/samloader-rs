@@ -87,10 +87,6 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_le
             success = false;
         }
 
-        if success {
-            0
-        } else {
-            1
-        }
+        if success { 0 } else { 1 }
     }
 }

@@ -19,7 +19,7 @@ pub mod packets;
 
 pub use error::OdinError;
 pub use firmware::{
-    verify_md5_footer, FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader,
-    TarEntryReader,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, TarEntryReader,
+    verify_md5_footer,
 };
 pub use odin_manager::OdinManager;

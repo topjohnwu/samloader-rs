@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use binrw::{binrw, io::Cursor, BinRead, BinWrite};
+use binrw::{BinRead, BinWrite, binrw, io::Cursor};
 use modular_bitfield::prelude::*;
 use std::borrow::Cow;
 use std::ffi::CStr;

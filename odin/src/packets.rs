@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use binrw::{io::Cursor, BinRead, BinWrite};
+use binrw::{BinRead, BinWrite, io::Cursor};
 use samloader_pit::{BinaryType, DeviceType, PitEntry};
 use std::fmt::Debug;
 

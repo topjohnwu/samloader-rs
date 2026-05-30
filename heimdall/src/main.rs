@@ -39,8 +39,7 @@ macro_rules! print_error {
 const VERBOSE_HELP: &str = "Enable verbose output";
 const USB_LOG_LEVEL_HELP: &str = "Set libusb log level (none, error, warning, info, debug)";
 const WAIT_HELP: &str = "Waits until a compatible device is connected.";
-const REPARTITION_HELP: &str =
-    "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
+const REPARTITION_HELP: &str = "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition.";
 const PIT_HELP: &str = "The PIT file to use for repartitioning or flashing.";
 const PARTITIONS_AND_FILES_HELP_BRIEF: &str =
@@ -63,8 +62,7 @@ const PRINT_PIT_ABOUT: &str = "Prints the contents of a PIT file in a human read
 const PRINT_PIT_HELP: &str = r#"Prints the contents of a PIT file in a human readable format. If
 a filename is not provided then Heimdall retrieves the PIT file from the
 connected device."#;
-const PRINT_PIT_FILE_HELP: &str =
-    "The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device.";
+const PRINT_PIT_FILE_HELP: &str = "The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device.";
 
 const FLASH_ABOUT: &str = "Flashes one or more firmware files to your phone.";
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
