@@ -19,7 +19,6 @@ mod download_pit;
 mod flash;
 mod print_pit;
 mod tar_flash;
-mod version;
 
 use clap::{Arg, ArgAction, Command};
 
@@ -216,8 +215,6 @@ fn main() {
                         .help(PACKAGES_HELP),
                 ),
         )
-        .subcommand(Command::new("info").about("Displays information about Heimdall."))
-        .subcommand(Command::new("version").about("Displays the version number of this binary."))
         .get_matches_from(args);
 
     let verbose = matches.get_flag("verbose");
@@ -288,14 +285,6 @@ fn main() {
                 sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
                 &packages,
             )
-        }
-        Some(("info", _)) => {
-            version::print_full_info();
-            0
-        }
-        Some(("version", _)) => {
-            version::print_version();
-            0
         }
         _ => unreachable!(),
     };
