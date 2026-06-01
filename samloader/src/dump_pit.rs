@@ -18,12 +18,7 @@ use samloader_odin::OdinManager;
 use std::fs::File;
 use std::io::Write;
 
-pub(crate) fn action_download_pit(
-    output: &str,
-    verbose: bool,
-    wait: bool,
-    usb_log_level: &str,
-) -> i32 {
+pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
     if output.is_empty() {
         println!("Output file was not specified.\n");
         return 0;

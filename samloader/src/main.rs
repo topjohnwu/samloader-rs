@@ -16,7 +16,7 @@
 
 mod detect;
 mod download;
-mod download_pit;
+mod dump_pit;
 mod flash;
 mod print_pit;
 mod tar_flash;
@@ -53,11 +53,11 @@ const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can
 Returns instantly per default, or waits until device is found
 when --wait argument is used."#;
 
-const DOWNLOAD_PIT_ABOUT: &str =
+const DUMP_PIT_ABOUT: &str =
     "Downloads the connected device's PIT file to the specified output file.";
-const DOWNLOAD_PIT_HELP: &str = r#"Downloads the connected device's PIT file to the specified
+const DUMP_PIT_HELP: &str = r#"Downloads the connected device's PIT file to the specified
 output file."#;
-const DOWNLOAD_PIT_OUTPUT_HELP: &str = "Output file path for the downloaded PIT file.";
+const DUMP_PIT_OUTPUT_HELP: &str = "Output file path for the downloaded PIT file.";
 
 const PRINT_PIT_ABOUT: &str = "Prints the contents of a PIT file in a human readable format.";
 const PRINT_PIT_HELP: &str = r#"Prints the contents of a PIT file in a human readable format. If
@@ -175,15 +175,15 @@ fn main() {
                 ),
         )
         .subcommand(
-            Command::new("download-pit")
-                .about(DOWNLOAD_PIT_ABOUT)
-                .long_about(DOWNLOAD_PIT_HELP)
+            Command::new("dump-pit")
+                .about(DUMP_PIT_ABOUT)
+                .long_about(DUMP_PIT_HELP)
                 .arg(
                     Arg::new("output")
                         .long("output")
                         .required(true)
                         .num_args(1)
-                        .help(DOWNLOAD_PIT_OUTPUT_HELP),
+                        .help(DUMP_PIT_OUTPUT_HELP),
                 )
                 .arg(
                     Arg::new("wait")
@@ -337,7 +337,7 @@ fn main() {
         Some(("detect", sub_matches)) => {
             detect::action_detect(verbose, sub_matches.get_flag("wait"), usb_log_level)
         }
-        Some(("download-pit", sub_matches)) => download_pit::action_download_pit(
+        Some(("dump-pit", sub_matches)) => dump_pit::action_dump_pit(
             sub_matches.get_one::<String>("output").unwrap(),
             verbose,
             sub_matches.get_flag("wait"),
