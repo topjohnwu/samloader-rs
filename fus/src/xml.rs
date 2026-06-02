@@ -29,69 +29,49 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
     out
 }
 
-pub(crate) fn parse_version_xml(xml: &str) -> Option<String> {
+pub(crate) struct VersionInfo {
+    pub(crate) latest: String,
+    pub(crate) upgrade: Vec<String>,
+}
+
+pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {
     let doc = Document::parse(xml).ok()?;
-    let latest = doc
-        .descendants()
-        .find(|n| n.has_tag_name("latest"))?
-        .text()?;
-    let mut parts: Vec<&str> = latest.split('/').collect();
+
+    let latest_node = doc.descendants().find(|n| n.has_tag_name("latest"))?;
+    let latest_text = latest_node.text()?.trim();
+    if latest_text.is_empty() {
+        return None;
+    }
+
+    let mut parts: Vec<&str> = latest_text.split('/').collect();
     if parts.len() == 3 {
         parts.push(parts[0]);
     }
     if parts.len() >= 3 && parts[2].is_empty() {
         parts[2] = parts[0];
     }
-    Some(parts.join("/"))
-}
+    let latest = parts.join("/");
 
-pub(crate) fn parse_version_xml_all(xml: &str) -> Vec<String> {
-    let doc = Document::parse(xml).ok();
-    if doc.is_none() {
-        return Vec::new();
-    }
-    let doc = doc.unwrap();
-
-    let mut versions: Vec<String> = Vec::new();
-
-    for value_node in doc.descendants().filter(|n| n.has_tag_name("value")) {
-        if let Some(text) = value_node.text() {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                let mut parts: Vec<&str> = trimmed.split("/").collect();
-                if parts.len() == 3 {
-                    parts.push(parts[0]);
+    let mut upgrade = Vec::new();
+    if let Some(upgrade_node) = doc.descendants().find(|n| n.has_tag_name("upgrade")) {
+        for value_node in upgrade_node.children().filter(|n| n.has_tag_name("value")) {
+            if let Some(text) = value_node.text() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let mut parts: Vec<&str> = trimmed.split('/').collect();
+                    if parts.len() == 3 {
+                        parts.push(parts[0]);
+                    }
+                    if parts.len() >= 3 && parts[2].is_empty() {
+                        parts[2] = parts[0];
+                    }
+                    upgrade.push(parts.join("/"));
                 }
-                if parts.len() >= 3 && parts[2].is_empty() {
-                    parts[2] = parts[0];
-                }
-                versions.push(parts.join("/"));
             }
         }
     }
 
-    if let Some(latest) = doc
-        .descendants()
-        .find(|n| n.has_tag_name("latest"))
-        .and_then(|n| n.text())
-    {
-        let trimmed = latest.trim();
-        if !trimmed.is_empty() {
-            let mut parts: Vec<&str> = trimmed.split("/").collect();
-            if parts.len() == 3 {
-                parts.push(parts[0]);
-            }
-            if parts.len() >= 3 && parts[2].is_empty() {
-                parts[2] = parts[0];
-            }
-            versions.push(parts.join("/"));
-        }
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    versions.retain(|v| seen.insert(v.clone()));
-
-    versions
+    Some(VersionInfo { latest, upgrade })
 }
 
 pub(crate) fn binary_inform_req_xml(model: &str, region: &str, fw: &str, nonce: &str) -> String {
@@ -211,5 +191,30 @@ impl BinaryInform {
             model_type: kv.remove("DEVICE_MODEL_TYPE")?,
             region: kv.remove("BINARY_LOCAL_CODE")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_version_xml() {
+        let xml_content = include_str!("test_version.xml");
+
+        let info = parse_version_xml(xml_content).unwrap();
+        assert_eq!(
+            info.latest,
+            "S931U1UESACZE1/S931U1OYMACZE1/S931U1UESACZE1/S931U1UESACZE1"
+        );
+        assert_eq!(info.upgrade.len(), 15);
+        assert_eq!(
+            info.upgrade[0],
+            "S931U1UES7BYJ5/S931U1OYM7BYJ5/S931U1UES7BYJ5/S931U1UES7BYJ5"
+        );
+        assert_eq!(
+            info.upgrade[14],
+            "S931U1UES8BZBB/S931U1OYM8BZBB/S931U1UES8BZBB/S931U1UES8BZBB"
+        );
     }
 }

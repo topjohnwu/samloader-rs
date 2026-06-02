@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<versioninfo>
+	<url>https://fota-cloud-dn.ospserver.net/firmware/</url>
+	<firmware>
+		<model>SM-S931U1</model>
+		<cc>XAA</cc>
+		<version>
+			<latest o="16">S931U1UESACZE1/S931U1OYMACZE1/S931U1UESACZE1</latest>
+			<upgrade>
+				<value rcount='5' fwsize='583308660'>S931U1UES7BYJ5/S931U1OYM7BYJ5/S931U1UES7BYJ5</value>
+				<value rcount='2' fwsize='545082651'>S931U1UES8BYLX/S931U1OYM8BYLX/S931U1UES8BYLX</value>
+				<value rcount='8' fwsize='3689066631'>S931U1UES5AYH2/S931U1OYM5AYH2/S931U1UES5AYH2</value>
+				<value rcount='12' fwsize='844605582'>S931U1UEU1AYB3/S931U1OYM1AYB3/S931U1UEU1AYB3</value>
+				<value rcount='10' fwsize='577909281'>S931U1UES4AYE3/S931U1OYM4AYE3/S931U1UES4AYE3</value>
+				<value rcount='12' fwsize='659756113'>S931U1UEU2AYD9/S931U1OYM2AYD9/S931U1UEU2AYD9</value>
+				<value rcount='9' fwsize='553758824'>S931U1UES5AYE7/S931U1OYM5AYE7/S931U1UES5AYE7</value>
+				<value rcount='7' fwsize='533790224'>S931U1UEU5BYI3/S931U1OYM5BYI3/S931U1UEU5BYI3</value>
+				<value rcount='12' fwsize='850570925'>S931U1UEU1AYA1/S931U1OYM1AYA1/S931U1UEU1AYA1</value>
+				<value rcount='11' fwsize='550923720'>S931U1UES3AYDF/S931U1OYM3AYDF/S931U1UES3AYDF</value>
+				<value rcount='12' fwsize='842649326'>S931U1UES1AYBC/S931U1OYM1AYBC/S931U1UES1AYBC</value>
+				<value rcount='3' fwsize='538809240'>S931U1UES7BYLR/S931U1OYM7BYLR/S931U1UES7BYLR</value>
+				<value rcount='6' fwsize='543618602'>S931U1UES6BYIF/S931U1OYM6BYIF/S931U1UES6BYIF</value>
+				<value rcount='4' fwsize='542263170'>S931U1UES7BYJ8/S931U1OYM7BYJ8/S931U1UES7BYJ8</value>
+				<value rcount='1' fwsize='529351239'>S931U1UES8BZBB/S931U1OYM8BZBB/S931U1UES8BZBB</value>
+			</upgrade>
+		</version>
+	</firmware>
+	<polling>
+		<period>7</period>
+		<time>15</time>
+		<range>23</range>
+	</polling>
+	<ActiveDeviceInfo>
+		<CycleOfDeviceHeartbeat>14</CycleOfDeviceHeartbeat>
+		<ServiceURL>https://ifota-apis.samsungdm.com/device/fumo/deviceheartbeat</ServiceURL>
+	</ActiveDeviceInfo>
+	<WiFiConnectedPollingInfo>
+		<Cycle></Cycle>
+		<Activated>FALSE</Activated>
+	</WiFiConnectedPollingInfo>
+</versioninfo>

@@ -84,7 +84,9 @@ impl FusClient {
             .text()
             .expect("Failed to read version.xml text");
 
-        let latest_fw = xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml");
+        let version_info =
+            xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml");
+        let latest_fw = version_info.latest;
 
         // 2. Compute Binary Inform req using actual latest_fw
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
@@ -129,7 +131,15 @@ impl FusClient {
             .text()
             .expect("Failed to read version.xml text");
 
-        xml::parse_version_xml_all(&version_xml)
+        if let Some(info) = xml::parse_version_xml(&version_xml) {
+            let mut versions = info.upgrade;
+            versions.push(info.latest);
+            let mut seen = std::collections::HashSet::new();
+            versions.retain(|v| seen.insert(v.clone()));
+            versions
+        } else {
+            Vec::new()
+        }
     }
 
     fn make_headers(&self) -> HeaderMap {
