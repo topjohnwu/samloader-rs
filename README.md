@@ -1,12 +1,6 @@
-# samloader-rs & Heimdall
+# samloader
 
-This repository is a unified Rust workspace containing both `samloader-rs` and `Heimdall`.
-
----
-
-# samloader-rs
-
-Download firmware for Samsung devices from official Samsung servers.
+An all-in-one Samsung firmware download and flash tool.
 
 ```
 Usage: samloader <COMMAND>
@@ -14,76 +8,50 @@ Usage: samloader <COMMAND>
 Commands:
   download      Download the latest firmware
   check-update  Check the latest version
+  detect        Indicates whether or not a download mode device can be detected
+  dump-pit      Downloads the connected device's PIT file to the specified output file
+  print-pit     Prints the contents of a PIT file in a human readable format
+  flash         Flashes one or more firmware files to your phone
+  tar-flash     Flashes Samsung firmware TAR/MD5 packages to your phone
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
-```
-
-```
-Usage: samloader download [OPTIONS] --model <model> --region <region>
-
-Options:
-  -m, --model <model>        The model name (e.g. SM-S931U1)
-  -r, --region <region>      Region CSC code (e.g. XAA)
-  -j, --threads <threads>    Number of parallel connections [default: 8]
-  -d, --out-dir <out_dir>    Output directory
-  -o, --out-file <out_file>  Output file path
+      --verbose              Enable verbose output
+      --usb-log-level <LVL>  Set libusb log level (none, error, warning, info, debug)
   -h, --help                 Print help
-```
-
-```
-Usage: samloader check-update --model <model> --region <region>
-
-Options:
-  -m, --model <model>    The model name (e.g. SM-S931U1)
-  -r, --region <region>  Region CSC code (e.g. XAA)
-  -h, --help             Print help
+  -V, --version              Print version
 ```
 
 ## Features
 
-- Samsung server throttles the download speed per connection. This tool downloads the firmware with multiple connections (default: 8) to fully utilize your network bandwidth.
-- Decryption happens on-the-fly. There are no separate download and decryption steps.
+- Combines both firmware downloading and flashing into a single utility.
+- Downloads firmware using multiple parallel connections (default: 8) to bypass server-side connection speed throttling and maximize bandwidth usage.
+- Decrypts firmware files on-the-fly, eliminating separate download and decryption steps.
+- Supports flashing raw images and official package files across Linux, macOS, and Windows.
+- Processes and extracts official TAR firmware packages in-memory, avoiding slow disk write operations.
+- Transmits raw LZ4-compressed data directly to supported devices to reduce USB transfer size and time.
 
 ## Install
 
-If you have a working Rust toolchain installed, you can simply install with the following command:
+If you have a working Rust toolchain installed, you can install with:
 
 ```bash
 cargo install samloader
 ```
 
-You can also download the prebuilt executables for Linux, macOS, and Windows in the [latest GitHub release](https://github.com/topjohnwu/samloader-rs/releases/latest).
+Prebuilt executables for Linux, macOS, and Windows are also available in the [latest GitHub release](https://github.com/topjohnwu/samloader-rs/releases/latest).
 
-## Notes
+## License & Open Source Acknowledgements
 
-This project was originally based on the work of [ananjaser1211/samloader](https://github.com/ananjaser1211/samloader).
+This project is licensed under the **Apache License, Version 2.0**.
 
----
+`samloader` is built on top of and inspired by several incredible open-source projects:
 
-# Heimdall
+- **Heimdall (Firmware Flashing):**
+  The core flashing functionality is a derivative work of [~grimler/Heimdall](https://git.sr.ht/~grimler/Heimdall). This implementation began as a precise 1-to-1 conversion of the original C++ project into safe and idiomatic Rust. The original code is licensed under the **MIT License** (preserved in this repository), and copyright headers are preserved in the relevant source files.
 
-Heimdall is a cross-platform open-source tool suite used to flash
-firmware (aka ROMs) onto Samsung mobile devices.
+- **Bifrost (FUS Authentication):**
+  The authentication mechanism used to communicate with Samsung's Firmware Update Server (FUS) was ported from [zacharee/Bifrost](https://github.com/zacharee/Bifrost). The original implementation is licensed under the **MIT License**, and relevant copyright headers have been preserved.
 
-## Supported Platforms
-
-Heimdall should work on Linux, macOS, and Windows.
-
-## How does Heimdall work?
-
-Heimdall connects to a mobile device over USB and interacts with
-low-level software running on the device, known as Loke. Loke and
-Heimdall communicate via the custom Samsung-developed protocol
-typically referred to as the 'Odin protocol'.
-
-USB communication in Heimdall is handled by the popular open-source
-USB library, [libusb](https://libusb.info).
-
-## Free & Open Source
-
-This project is a derivative work of [~grimler/Heimdall](https://git.sr.ht/~grimler/Heimdall).
-The original C++ code is licensed under the MIT License.
-The Rust rewrite and all new contributions are licensed under the Apache License, Version 2.0.
+- **libusb (USB Transport):**
+  All low-level USB communication is powered by the popular open-source USB library [libusb](https://libusb.info), which is licensed under the **LGPL-2.1**.
