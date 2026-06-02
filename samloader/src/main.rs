@@ -19,7 +19,6 @@ mod download;
 mod dump_pit;
 mod flash;
 mod print_pit;
-mod tar_flash;
 
 use clap::{Arg, ArgAction, Command};
 use samloader_fus::fetch_version_info;
@@ -67,14 +66,6 @@ const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Pa
 
 Example explicit flashing: samloader flash -p RECOVERY recovery.img
 Example auto-matching: samloader flash -f boot.img"#;
-
-const TAR_FLASH_ABOUT: &str = "Flashes Samsung firmware TAR/MD5 packages to your phone.";
-const TAR_FLASH_HELP: &str = r#"Flashes one or more Samsung firmware TAR/MD5 packages to your phone.
-The files within the packages are indexed and flashed in-memory, without
-unpacking them to disk."#;
-
-const NO_PACKAGES_ERROR: &str = "No packages specified for flashing. Please specify at least one of BL, AP, CP, CSC, or USERDATA.";
-const NO_FLASH_FILES_ERROR: &str = "No files or partitions specified for flashing. Please specify at least one file with --file or --partition.";
 
 fn main() {
     let matches = Command::new("samloader")
@@ -233,48 +224,6 @@ fn main() {
                         .action(ArgAction::SetTrue)
                         .help(SKIP_SIZE_CHECK_HELP),
                 )
-                .arg(Arg::new("pit").long("pit").num_args(1).help(PIT_HELP))
-                .arg(
-                    Arg::new("partition")
-                        .short('p')
-                        .long("partition")
-                        .action(ArgAction::Append)
-                        .num_args(2)
-                        .value_names(["PARTITION", "FILE"])
-                        .help("Explicit partition name/identifier and file to flash"),
-                )
-                .arg(
-                    Arg::new("file")
-                        .short('f')
-                        .long("file")
-                        .action(ArgAction::Append)
-                        .num_args(1)
-                        .value_name("FILE")
-                        .help("Automatic partition name matching file to flash"),
-                ),
-        )
-        .subcommand(
-            Command::new("tar-flash")
-                .about(TAR_FLASH_ABOUT)
-                .long_about(TAR_FLASH_HELP)
-                .arg(
-                    Arg::new("repartition")
-                        .long("repartition")
-                        .action(ArgAction::SetTrue)
-                        .help(REPARTITION_HELP),
-                )
-                .arg(
-                    Arg::new("wait")
-                        .long("wait")
-                        .action(ArgAction::SetTrue)
-                        .help(WAIT_HELP),
-                )
-                .arg(
-                    Arg::new("skip-size-check")
-                        .long("skip-size-check")
-                        .action(ArgAction::SetTrue)
-                        .help(SKIP_SIZE_CHECK_HELP),
-                )
                 .arg(
                     Arg::new("skip-md5")
                         .long("skip-md5")
@@ -308,7 +257,7 @@ fn main() {
                         .short('s')
                         .long("CSC")
                         .num_args(1)
-                        .help("CSC tar package file"),
+                        .help("CSC/HOME_CSC tar package file"),
                 )
                 .arg(
                     Arg::new("userdata")
@@ -316,6 +265,24 @@ fn main() {
                         .long("USERDATA")
                         .num_args(1)
                         .help("USERDATA tar package file"),
+                )
+                .arg(
+                    Arg::new("partition")
+                        .short('p')
+                        .long("partition")
+                        .action(ArgAction::Append)
+                        .num_args(2)
+                        .value_names(["PARTITION", "FILE"])
+                        .help("Explicit partition name/identifier and file to flash"),
+                )
+                .arg(
+                    Arg::new("file")
+                        .short('f')
+                        .long("file")
+                        .action(ArgAction::Append)
+                        .num_args(1)
+                        .value_name("FILE")
+                        .help("Automatic partition name matching file to flash"),
                 ),
         )
         .get_matches();
@@ -379,6 +346,23 @@ fn main() {
             usb_log_level,
         ),
         Some(("flash", sub_matches)) => {
+            let mut packages = Vec::new();
+            if let Some(bl) = sub_matches.get_one::<String>("bl") {
+                packages.push(bl.clone());
+            }
+            if let Some(ap) = sub_matches.get_one::<String>("ap") {
+                packages.push(ap.clone());
+            }
+            if let Some(cp) = sub_matches.get_one::<String>("cp") {
+                packages.push(cp.clone());
+            }
+            if let Some(csc) = sub_matches.get_one::<String>("csc") {
+                packages.push(csc.clone());
+            }
+            if let Some(userdata) = sub_matches.get_one::<String>("userdata") {
+                packages.push(userdata.clone());
+            }
+
             let mut partitions = Vec::new();
             if let Some(args) = sub_matches.get_many::<String>("partition") {
                 let args_vec: Vec<&String> = args.collect();
@@ -402,45 +386,12 @@ fn main() {
                 }
             }
 
-            if partitions.is_empty() {
-                print_error!("{}", NO_FLASH_FILES_ERROR);
+            if packages.is_empty() && partitions.is_empty() {
+                print_error!("No packages, files, or partitions specified for flashing.");
                 std::process::exit(1);
             }
 
-            flash::action_flash(
-                sub_matches.get_flag("repartition"),
-                verbose,
-                sub_matches.get_flag("wait"),
-                usb_log_level,
-                sub_matches.get_flag("skip-size-check"),
-                sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
-                &partitions,
-            )
-        }
-        Some(("tar-flash", sub_matches)) => {
-            let mut packages = Vec::new();
-            if let Some(bl) = sub_matches.get_one::<String>("bl") {
-                packages.push(bl.clone());
-            }
-            if let Some(ap) = sub_matches.get_one::<String>("ap") {
-                packages.push(ap.clone());
-            }
-            if let Some(cp) = sub_matches.get_one::<String>("cp") {
-                packages.push(cp.clone());
-            }
-            if let Some(csc) = sub_matches.get_one::<String>("csc") {
-                packages.push(csc.clone());
-            }
-            if let Some(userdata) = sub_matches.get_one::<String>("userdata") {
-                packages.push(userdata.clone());
-            }
-
-            if packages.is_empty() {
-                print_error!("{}", NO_PACKAGES_ERROR);
-                std::process::exit(1);
-            }
-
-            tar_flash::action_tar_flash(
+            let result = flash::action_flash(
                 sub_matches.get_flag("repartition"),
                 verbose,
                 sub_matches.get_flag("wait"),
@@ -449,7 +400,9 @@ fn main() {
                 sub_matches.get_flag("skip-md5"),
                 sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
                 &packages,
-            )
+                &partitions,
+            );
+            std::process::exit(result);
         }
         _ => unreachable!(),
     };

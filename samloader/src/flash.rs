@@ -1,4 +1,5 @@
 // Copyright 2026 Google LLC
+// Copyright 2021-2024 Henrik Grimler
 // Copyright 2010-2017 Benjamin Dobell, Glass Echidna
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,14 +17,192 @@
 use crate::PartitionArg;
 use crate::print_error;
 use samloader_odin::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
+    FirmwareInfo, FirmwareSource, Lz4FrameHeader, OdinManager, TarEntryReader, verify_md5_footer,
 };
 use samloader_pit::PitData;
-use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+use tar::Archive;
 
-pub(crate) fn init_session_and_get_pit(
+struct IndexedEntry {
+    package_path: String,
+    original_name: String,
+    normalized_name: String,
+    offset: u64,
+    size: u64,
+    is_lz4: bool,
+}
+
+fn normalize_basename(path_str: &str) -> (String, bool) {
+    let filename = Path::new(path_str)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if filename.to_lowercase().ends_with(".lz4") {
+        (filename[..filename.len() - 4].to_string(), true)
+    } else {
+        (filename, false)
+    }
+}
+
+fn scan_tar_packages(
+    packages: &[String],
+    skip_md5: bool,
+) -> Result<(Vec<IndexedEntry>, Option<Vec<u8>>), i32> {
+    // MD5 verification of .tar.md5 packages
+    if !skip_md5 {
+        for pkg in packages {
+            if pkg.to_lowercase().ends_with(".md5")
+                && let Err(e) = verify_md5_footer(pkg)
+            {
+                print_error!("{}", e);
+                return Err(1);
+            }
+        }
+    }
+
+    // Scan and index TAR containers
+    let mut archives_download_lists: Vec<HashSet<String>> = Vec::new();
+    let mut all_packages_entries: Vec<Vec<IndexedEntry>> = Vec::new();
+
+    for pkg in packages {
+        let file = match File::open(pkg) {
+            Ok(f) => f,
+            Err(_) => {
+                print_error!("Failed to open package file \"{}\"", pkg);
+                return Err(1);
+            }
+        };
+
+        let mut archive = Archive::new(file);
+        let entries = match archive.entries() {
+            Ok(e) => e,
+            Err(e) => {
+                print_error!("Failed to read archive entries for \"{}\": {}", pkg, e);
+                return Err(1);
+            }
+        };
+
+        let mut package_entries = Vec::new();
+
+        for entry_res in entries {
+            let entry = match entry_res {
+                Ok(e) => e,
+                Err(e) => {
+                    print_error!("Corrupted archive entry in \"{}\": {}", pkg, e);
+                    return Err(1);
+                }
+            };
+
+            let entry_path = match entry.path() {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+
+            let offset = entry.raw_file_position();
+            let size = entry.size();
+
+            let (normalized_name, is_lz4) = normalize_basename(&entry_path);
+
+            if normalized_name == "download-list.txt" {
+                // Read the allowlist manifest
+                let mut reader = entry;
+                let mut content = String::new();
+                if reader.read_to_string(&mut content).is_ok() {
+                    let download_list = content
+                        .lines()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| normalize_basename(s).0)
+                        .collect();
+                    archives_download_lists.push(download_list);
+                }
+            } else {
+                package_entries.push(IndexedEntry {
+                    package_path: pkg.clone(),
+                    original_name: entry_path,
+                    normalized_name,
+                    offset,
+                    size,
+                    is_lz4,
+                });
+            }
+        }
+
+        all_packages_entries.push(package_entries);
+    }
+
+    // If any package contained a manifest, we use it as our global download allowlist
+    let download_allowlist = if let Some((first, rest)) = archives_download_lists.split_first() {
+        // Cross-archive manifest consistency check
+        if !rest.iter().all(|m| m == first) {
+            print_error!("Cross-archive consistency check failed! download-list.txt do not match.");
+            return Err(1);
+        }
+        Some(first)
+    } else {
+        None
+    };
+
+    let mut resolved_entries: Vec<IndexedEntry> = Vec::new();
+    let mut pit_entry: Option<IndexedEntry> = None;
+
+    // Apply manifest filtering and positional precedence (last-writer-wins)
+    for package_entries in all_packages_entries {
+        for entry in package_entries {
+            if entry.normalized_name.ends_with(".pit") {
+                pit_entry = Some(entry);
+            } else if let Some(allowlist) = download_allowlist {
+                if allowlist.contains(&entry.normalized_name) {
+                    resolved_entries.push(entry);
+                } else {
+                    println!(
+                        "Skipping {} (not in download-list.txt)",
+                        entry.original_name
+                    );
+                }
+            } else {
+                resolved_entries.push(entry);
+            }
+        }
+    }
+
+    // Extract PIT local bytes if any from TAR archives
+    let mut local_pit_file = None;
+
+    if let Some(entry) = pit_entry {
+        let f = match File::open(&entry.package_path) {
+            Ok(file) => file,
+            Err(_) => {
+                print_error!(
+                    "Failed to open package containing PIT \"{}\"",
+                    entry.package_path
+                );
+                return Err(1);
+            }
+        };
+        match TarEntryReader::new(f, entry.offset, entry.size) {
+            Ok(reader) => {
+                let mut buffer = vec![0u8; entry.size as usize];
+                let mut r = reader;
+                if r.read_exact(&mut buffer).is_ok() {
+                    local_pit_file = Some(buffer);
+                }
+            }
+            Err(_) => {
+                print_error!("Failed to extract PIT from archive");
+                return Err(1);
+            }
+        }
+    }
+
+    Ok((resolved_entries, local_pit_file))
+}
+
+fn init_session_and_get_pit(
     verbose: bool,
     wait: bool,
     usb_log_level: &str,
@@ -73,21 +252,20 @@ pub(crate) fn init_session_and_get_pit(
     Ok((odin_manager, pit_data))
 }
 
-pub(crate) fn execute_flash_pipeline(
+fn execute_flash_pipeline(
     odin_manager: OdinManager,
     pit_data: &PitData,
     mut partition_infos: Vec<FirmwareInfo>,
     repartition: bool,
     pit_file_bytes: Option<&[u8]>,
 ) -> i32 {
-    let mut total_bytes: u64 = 0;
-
-    for part in &partition_infos {
-        match part {
-            FirmwareInfo::Normal(f) => total_bytes += f.file_size,
-            FirmwareInfo::Lz4(f) => total_bytes += f.header.content_size,
-        }
-    }
+    let mut total_bytes: u64 = partition_infos
+        .iter()
+        .map(|part| match part {
+            FirmwareInfo::Normal(f) => f.file_size,
+            FirmwareInfo::Lz4(f) => f.header.content_size,
+        })
+        .sum();
 
     if repartition && let Some(bytes) = pit_file_bytes {
         total_bytes += bytes.len() as u64;
@@ -136,27 +314,117 @@ pub(crate) fn execute_flash_pipeline(
     0
 }
 
+fn find_pit_entry_by_filename<'a>(
+    pit_data: &'a PitData,
+    filename: &str,
+) -> Option<&'a samloader_pit::PitEntry> {
+    pit_data.entries.iter().find(|e| {
+        let flash_fn = e.flash_filename.to_string_lossy();
+        flash_fn.eq_ignore_ascii_case(filename)
+    })
+}
+
+fn create_firmware_info<'a>(
+    mut source: FirmwareSource,
+    source_size: u64,
+    is_lz4_suffix: bool,
+    pit_entry: &'a samloader_pit::PitEntry,
+    lz4_supported: bool,
+    skip_size_check: bool,
+    file_display_name: &str,
+) -> Result<FirmwareInfo<'a>, i32> {
+    let lz4_hdr = if is_lz4_suffix {
+        match Lz4FrameHeader::from_read(&mut source) {
+            Ok(header) => Some(header),
+            Err(e) => {
+                print_error!(
+                    "Failed to parse LZ4 header for {}: {}",
+                    file_display_name,
+                    e
+                );
+                return Err(1);
+            }
+        }
+    } else {
+        match &mut source {
+            FirmwareSource::File(f) => {
+                let pos = f.stream_position().unwrap_or(0);
+                match Lz4FrameHeader::from_read(f) {
+                    Ok(header) => Some(header),
+                    Err(_) => {
+                        let _ = f.seek(SeekFrom::Start(pos));
+                        None
+                    }
+                }
+            }
+            FirmwareSource::Tar(_) => None,
+        }
+    };
+
+    if lz4_hdr.is_some() && !lz4_supported {
+        print_error!(
+            "Device does not support LZ4 compression, but file \"{}\" is LZ4 compressed.",
+            file_display_name
+        );
+        return Err(1);
+    }
+
+    if !skip_size_check {
+        let partition_size = pit_entry.partition_size();
+        let check_size = if let Some(ref h) = lz4_hdr {
+            h.content_size
+        } else {
+            source_size
+        };
+
+        if partition_size > 0 && check_size > partition_size {
+            print_error!(
+                "{} partition is too small for given file. Use --skip-size-check to flash anyways.",
+                pit_entry.partition_name
+            );
+            return Err(1);
+        }
+    }
+
+    if let Some(header) = lz4_hdr {
+        Ok(FirmwareInfo::Lz4(samloader_odin::FirmwareLz4File {
+            pit_entry,
+            file: source,
+            header,
+        }))
+    } else {
+        Ok(FirmwareInfo::Normal(samloader_odin::FirmwareFile {
+            pit_entry,
+            file: source,
+            file_size: source_size,
+        }))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn action_flash(
     repartition: bool,
     verbose: bool,
     wait: bool,
     usb_log_level: &str,
     skip_size_check: bool,
+    skip_md5: bool,
     pit: Option<&str>,
+    packages: &[String],
     partitions: &[PartitionArg],
 ) -> i32 {
-    if repartition && pit.is_none() {
+    if repartition && pit.is_none() && packages.is_empty() {
         println!("If you wish to repartition then a PIT file must be specified.\n");
         return 0;
     }
 
-    // Open files
+    // 1. Resolve explicit PIT file first if provided
     let mut pit_file_bytes = None;
     if let Some(pit_path) = pit {
         let mut f = match File::open(pit_path) {
             Ok(file) => file,
             Err(_) => {
-                print_error!("Failed to open file \"{}\"", pit_path);
+                print_error!("Failed to open explicit PIT file \"{}\"", pit_path);
                 return 1;
             }
         };
@@ -168,6 +436,20 @@ pub(crate) fn action_flash(
         pit_file_bytes = Some(buffer);
     }
 
+    // 2. Scan TAR packages next
+    let mut resolved_entries = Vec::new();
+    if !packages.is_empty() {
+        let (entries, local_pit) = match scan_tar_packages(packages, skip_md5) {
+            Ok(res) => res,
+            Err(code) => return code,
+        };
+        resolved_entries = entries;
+        if pit_file_bytes.is_none() {
+            pit_file_bytes = local_pit;
+        }
+    }
+
+    // 3. Initialize connection session and parse the PIT data
     let (odin_manager, pit_data) =
         match init_session_and_get_pit(verbose, wait, usb_log_level, pit_file_bytes.as_deref()) {
             Ok(res) => res,
@@ -176,20 +458,53 @@ pub(crate) fn action_flash(
 
     let mut partition_infos = Vec::new();
 
+    // 4. Build firmware partition infos from TAR packages (keeping package order)
+    for entry in &resolved_entries {
+        let Some(pit_entry) = find_pit_entry_by_filename(&pit_data, &entry.normalized_name) else {
+            println!(
+                "Skipping orphan file \"{}\" (no matching partition in PIT)",
+                entry.original_name
+            );
+            continue;
+        };
+
+        let pkg_file = match File::open(&entry.package_path) {
+            Ok(f) => f,
+            Err(_) => {
+                print_error!("Failed to open package file \"{}\"", entry.package_path);
+                return 1;
+            }
+        };
+
+        let reader = match TarEntryReader::new(pkg_file, entry.offset, entry.size) {
+            Ok(r) => r,
+            Err(_) => {
+                print_error!("Failed to seek to TAR entry \"{}\"", entry.original_name);
+                return 1;
+            }
+        };
+
+        let info = match create_firmware_info(
+            FirmwareSource::Tar(reader),
+            entry.size,
+            entry.is_lz4,
+            pit_entry,
+            odin_manager.is_lz4_supported(),
+            skip_size_check,
+            &entry.original_name,
+        ) {
+            Ok(info) => info,
+            Err(code) => return code,
+        };
+        partition_infos.push(info);
+    }
+
+    // 5. Build firmware partition infos from individual files
     for part in partitions {
+        let (filename, is_lz4_suffix) = normalize_basename(&part.filename);
         let entry = match &part.name {
             None => {
-                let mut filename = std::path::Path::new(&part.filename)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if filename.to_lowercase().ends_with(".lz4") {
-                    filename.truncate(filename.len() - 4);
-                }
-                let Some(entry) = pit_data.entries.iter().find(|e| {
-                    let flash_fn = e.flash_filename.to_string_lossy();
-                    flash_fn.eq_ignore_ascii_case(&filename)
-                }) else {
+                let Some(entry) = find_pit_entry_by_filename(&pit_data, &filename) else {
                     print_error!(
                         "File \"{}\" does not match any partition in the specified PIT.",
                         part.filename
@@ -228,56 +543,37 @@ pub(crate) fn action_flash(
             return 1;
         };
 
-        let mut source = FirmwareSource::File(file);
-
-        let is_lz4 = {
-            let pos = source.stream_position().unwrap_or(0);
-            match Lz4FrameHeader::from_read(&mut source) {
-                Ok(header) => Some(header),
-                Err(_) => {
-                    let _ = source.seek(SeekFrom::Start(pos));
-                    None
-                }
-            }
+        let info = match create_firmware_info(
+            FirmwareSource::File(file),
+            file_size,
+            is_lz4_suffix,
+            entry,
+            odin_manager.is_lz4_supported(),
+            skip_size_check,
+            &part.filename,
+        ) {
+            Ok(info) => info,
+            Err(code) => return code,
         };
-
-        if !skip_size_check {
-            let partition_size = entry.partition_size();
-            let check_size = if let Some(ref h) = is_lz4 {
-                h.content_size
-            } else {
-                file_size
-            };
-
-            if partition_size > 0 && check_size > partition_size {
-                let name = if let Some(ref n) = part.name {
-                    Cow::Borrowed(n.as_str())
-                } else {
-                    entry.partition_name.to_string_lossy()
-                };
-                print_error!(
-                    "{} partition is too small for given file. Use --skip-size-check to flash anyways.",
-                    name
-                );
-                return 1;
-            }
-        }
-
-        if let Some(header) = is_lz4 {
-            partition_infos.push(FirmwareInfo::Lz4(FirmwareLz4File {
-                pit_entry: entry,
-                file: source,
-                header,
-            }));
-        } else {
-            partition_infos.push(FirmwareInfo::Normal(FirmwareFile {
-                pit_entry: entry,
-                file: source,
-                file_size,
-            }));
-        }
+        partition_infos.push(info);
     }
 
+    // 6. Partition deduplication: last writer wins
+    let mut mapped_partition_ids = HashSet::new();
+    let mut unique_partition_infos = Vec::new();
+    for info in partition_infos.into_iter().rev() {
+        let id = match &info {
+            FirmwareInfo::Normal(f) => f.pit_entry.identifier,
+            FirmwareInfo::Lz4(f) => f.pit_entry.identifier,
+        };
+        if mapped_partition_ids.insert(id) {
+            unique_partition_infos.push(info);
+        }
+    }
+    unique_partition_infos.reverse();
+    let partition_infos = unique_partition_infos;
+
+    // 7. Execute flash pipeline
     execute_flash_pipeline(
         odin_manager,
         &pit_data,
