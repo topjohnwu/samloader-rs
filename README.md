@@ -41,7 +41,7 @@ cargo install samloader
 
 Prebuilt executables for Linux, macOS, and Windows are also available in the [latest GitHub release](https://github.com/topjohnwu/samloader-rs/releases/latest).
 
-## License & Open Source Acknowledgements
+## License & Acknowledgements
 
 This project is licensed under the **Apache License, Version 2.0**.
 
