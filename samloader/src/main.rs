@@ -26,7 +26,7 @@ use download::{DownloadArgs, download_latest_firmware};
 use samloader_fus::FusClient;
 
 pub(crate) struct PartitionArg {
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     pub(crate) filename: String,
 }
 
@@ -44,8 +44,6 @@ const WAIT_HELP: &str = "Waits until a compatible device is connected.";
 const REPARTITION_HELP: &str = "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition.";
 const PIT_HELP: &str = "The PIT file to use for repartitioning or flashing.";
-const PARTITIONS_AND_FILES_HELP_BRIEF: &str =
-    "Pairs of partition names/identifiers and filenames to flash.";
 
 const DETECT_ABOUT: &str = "Indicates whether or not a download mode device can be detected.";
 const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can be detected.
@@ -68,8 +66,9 @@ const PRINT_PIT_FILE_HELP: &str = "The PIT file to print. If not provided, Heimd
 const FLASH_ABOUT: &str = "Flashes one or more firmware files to your phone.";
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
 (or identifiers) can be obtained by executing the print-pit action.
-Using "@" as a partition name automatically determines the destination
-partition based on the filename."#;
+
+Example explicit flashing: samloader flash -p RECOVERY recovery.img
+Example auto-matching: samloader flash -f boot.img"#;
 
 const TAR_FLASH_ABOUT: &str = "Flashes Samsung firmware TAR/MD5 packages to your phone.";
 const TAR_FLASH_HELP: &str = r#"Flashes one or more Samsung firmware TAR/MD5 packages to your phone.
@@ -77,15 +76,7 @@ The files within the packages are indexed and flashed in-memory, without
 unpacking them to disk."#;
 
 const NO_PACKAGES_ERROR: &str = "No packages specified for flashing. Please specify at least one of BL, AP, CP, CSC, or USERDATA.";
-
-const PARTITIONS_AND_FILES_HELP: &str = r#"Pairs of partition names (or identifiers) and filenames to flash.
-
-Flashes the specified <FILE> to the specified <PARTITION>.
-If <PARTITION> is "@", the destination partition is automatically determined
-from the filename (ignoring casing and optional .lz4 suffix).
-
-Example: samloader flash RECOVERY recovery.img BOOT boot.img
-Example with auto-matching: samloader flash @ recovery.img @ boot.img"#;
+const NO_FLASH_FILES_ERROR: &str = "No files or partitions specified for flashing. Please specify at least one file with --file or --partition.";
 
 fn main() {
     let matches = Command::new("samloader")
@@ -233,13 +224,22 @@ fn main() {
                 )
                 .arg(Arg::new("pit").long("pit").num_args(1).help(PIT_HELP))
                 .arg(
-                    Arg::new("partitions-and-files")
-                        .required(true)
+                    Arg::new("partition")
+                        .short('p')
+                        .long("partition")
                         .action(ArgAction::Append)
-                        .num_args(1..)
+                        .num_args(2)
                         .value_names(["PARTITION", "FILE"])
-                        .help(PARTITIONS_AND_FILES_HELP_BRIEF)
-                        .long_help(PARTITIONS_AND_FILES_HELP),
+                        .help("Explicit partition name/identifier and file to flash"),
+                )
+                .arg(
+                    Arg::new("file")
+                        .short('f')
+                        .long("file")
+                        .action(ArgAction::Append)
+                        .num_args(1)
+                        .value_name("FILE")
+                        .help("Automatic partition name matching file to flash"),
                 ),
         )
         .subcommand(
@@ -360,22 +360,33 @@ fn main() {
         ),
         Some(("flash", sub_matches)) => {
             let mut partitions = Vec::new();
-            if let Some(args) = sub_matches.get_many::<String>("partitions-and-files") {
+            if let Some(args) = sub_matches.get_many::<String>("partition") {
                 let args_vec: Vec<&String> = args.collect();
                 let mut i = 0;
                 while i < args_vec.len() {
                     if i + 1 < args_vec.len() {
                         partitions.push(PartitionArg {
-                            name: args_vec[i].to_uppercase(),
+                            name: Some(args_vec[i].to_uppercase()),
                             filename: args_vec[i + 1].clone(),
                         });
                         i += 2;
-                    } else {
-                        print_error!("Partition \"{}\" is not paired with a file.", args_vec[i]);
-                        std::process::exit(1);
                     }
                 }
             }
+            if let Some(files) = sub_matches.get_many::<String>("file") {
+                for file in files {
+                    partitions.push(PartitionArg {
+                        name: None,
+                        filename: file.clone(),
+                    });
+                }
+            }
+
+            if partitions.is_empty() {
+                print_error!("{}", NO_FLASH_FILES_ERROR);
+                std::process::exit(1);
+            }
+
             flash::action_flash(
                 sub_matches.get_flag("repartition"),
                 verbose,
