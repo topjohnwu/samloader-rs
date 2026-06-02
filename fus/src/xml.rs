@@ -70,7 +70,8 @@ pub(crate) fn parse_version_xml_all(xml: &str) -> Vec<String> {
         }
     }
 
-    if let Some(latest) = doc.descendants()
+    if let Some(latest) = doc
+        .descendants()
         .find(|n| n.has_tag_name("latest"))
         .and_then(|n| n.text())
     {

@@ -210,7 +210,11 @@ impl FusClient {
         }
     }
 
-    fn download_file_once(&self, start: Option<u64>, end: Option<u64>) -> reqwest::Result<Response> {
+    fn download_file_once(
+        &self,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> reqwest::Result<Response> {
         let mut headers = self.make_headers();
         match (start, end) {
             (Some(s), Some(e)) => headers.insert(
@@ -254,7 +258,9 @@ impl FusClient {
         if *generation != gen_seen {
             return;
         }
-        if self.make_req("NF_SmartDownloadGenerateNonce.do", "").is_ok()
+        if self
+            .make_req("NF_SmartDownloadGenerateNonce.do", "")
+            .is_ok()
             && self.init_download().is_ok()
         {
             *generation += 1;
