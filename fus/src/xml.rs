@@ -29,9 +29,9 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
     out
 }
 
-pub(crate) struct VersionInfo {
-    pub(crate) latest: String,
-    pub(crate) upgrade: Vec<String>,
+pub struct VersionInfo {
+    pub latest: String,
+    pub upgrade: Vec<String>,
 }
 
 pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {

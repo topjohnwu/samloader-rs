@@ -69,38 +69,7 @@ impl FusClient {
         Ok(fus)
     }
 
-    pub fn fetch_binary_info(&mut self, model: &str, region: &str) {
-        // 1. Fetch latest version from version.xml
-        let version_url = format!(
-            "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
-            region, model
-        );
-        let version_xml = self
-            .client
-            .get(&version_url)
-            .header(USER_AGENT, "Kies2.0_FUS")
-            .send()
-            .expect("Failed to fetch version.xml")
-            .text()
-            .expect("Failed to read version.xml text");
-
-        let version_info =
-            xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml");
-        let latest_fw = version_info.latest;
-
-        // 2. Compute Binary Inform req using actual latest_fw
-        let nonce = self.auth_state.lock().unwrap().nonce.clone();
-        let req_xml = xml::binary_inform_req_xml(model, region, &latest_fw, &nonce);
-
-        let xml = self
-            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
-            .and_then(Response::text)
-            .expect("Info request failed");
-
-        self.info = BinaryInform::parse(&xml).expect("Info request invalid");
-    }
-
-    pub fn fetch_binary_info_for_version(&mut self, model: &str, region: &str, version: &str) {
+    pub fn fetch_binary_info(&mut self, model: &str, region: &str, version: &str) {
         let mut parts: Vec<&str> = version.split('/').collect();
         if parts.len() == 3 {
             parts.push(parts[0]);
@@ -115,31 +84,6 @@ impl FusClient {
             .expect("Info request failed");
 
         self.info = BinaryInform::parse(&xml).expect("Info request invalid");
-    }
-
-    pub fn fetch_all_versions(&self, model: &str, region: &str) -> Vec<String> {
-        let version_url = format!(
-            "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
-            region, model
-        );
-        let version_xml = self
-            .client
-            .get(&version_url)
-            .header(USER_AGENT, "Kies2.0_FUS")
-            .send()
-            .expect("Failed to fetch version.xml")
-            .text()
-            .expect("Failed to read version.xml text");
-
-        if let Some(info) = xml::parse_version_xml(&version_xml) {
-            let mut versions = info.upgrade;
-            versions.push(info.latest);
-            let mut seen = std::collections::HashSet::new();
-            versions.retain(|v| seen.insert(v.clone()));
-            versions
-        } else {
-            Vec::new()
-        }
     }
 
     fn make_headers(&self) -> HeaderMap {

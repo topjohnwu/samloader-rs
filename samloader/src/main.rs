@@ -22,8 +22,7 @@ mod print_pit;
 mod tar_flash;
 
 use clap::{Arg, ArgAction, Command};
-use download::{DownloadArgs, download_latest_firmware};
-use samloader_fus::FusClient;
+use samloader_fus::fetch_version_info;
 
 pub(crate) struct PartitionArg {
     pub(crate) name: Option<String>,
@@ -336,7 +335,7 @@ fn main() {
             let threads = *sub_m.get_one::<u64>("threads").unwrap();
             let out_dir = sub_m.get_one::<String>("out_dir").cloned();
             let out_file = sub_m.get_one::<String>("out_file").cloned();
-            let args = DownloadArgs {
+            let args = download::DownloadArgs {
                 model,
                 region,
                 version,
@@ -344,7 +343,7 @@ fn main() {
                 out_dir,
                 out_file,
             };
-            download_latest_firmware(args);
+            download::action_download(args);
             0
         }
         Some(("check-update", sub_m)) => {
@@ -352,17 +351,14 @@ fn main() {
             let region = sub_m.get_one::<String>("region").cloned().unwrap();
             let show_all = sub_m.get_one::<bool>("all").copied().unwrap_or(false);
 
-            let mut client = FusClient::new().expect("Unable to establish FusClient");
+            let info = fetch_version_info(&model, &region).expect("Failed to fetch version info");
 
             if show_all {
-                let versions = client.fetch_all_versions(&model, &region);
-                for v in &versions {
+                for v in &info.upgrade {
                     println!("{}", v);
                 }
-            } else {
-                client.fetch_binary_info(&model, &region);
-                println!("{}", client.info.version);
             }
+            println!("{}", info.latest);
             0
         }
         Some(("detect", sub_matches)) => {

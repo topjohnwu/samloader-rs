@@ -14,9 +14,9 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::MmapMut;
-use samloader_fus::FusClient;
 use samloader_fus::aes::cipher::BlockModeDecrypt;
 use samloader_fus::aes::cipher::inout::InOutBuf;
+use samloader_fus::{FusClient, fetch_version_info};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -47,17 +47,19 @@ pub(crate) struct DownloadArgs {
     pub(crate) out_file: Option<String>,
 }
 
-pub(crate) fn download_latest_firmware(args: DownloadArgs) {
+pub(crate) fn action_download(args: DownloadArgs) {
     let mut client = FusClient::new().expect("Unable to establish FusClient");
 
-    match &args.version {
-        Some(version) => {
-            client.fetch_binary_info_for_version(&args.model, &args.region, version);
-        }
+    let version = match &args.version {
+        Some(v) => v.clone(),
         None => {
-            client.fetch_binary_info(&args.model, &args.region);
+            let version_info = fetch_version_info(&args.model, &args.region)
+                .expect("Failed to fetch version info");
+            version_info.latest
         }
-    }
+    };
+
+    client.fetch_binary_info(&args.model, &args.region, &version);
 
     println!("Firmware Version: {}", client.info.version);
 
