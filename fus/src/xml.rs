@@ -29,8 +29,11 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
     out
 }
 
+/// Firmware version information parsed from version.xml.
 pub struct VersionInfo {
+    /// The latest available firmware version string.
     pub latest: String,
+    /// A list of upgrade firmware version strings, sorted from older build to newer build.
     pub upgrade: Vec<String>,
 }
 
@@ -52,12 +55,21 @@ pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {
     }
     let latest = parts.join("/");
 
-    let mut upgrade = Vec::new();
+    let mut upgrade_entries = Vec::new();
     if let Some(upgrade_node) = doc.descendants().find(|n| n.has_tag_name("upgrade")) {
         for value_node in upgrade_node.children().filter(|n| n.has_tag_name("value")) {
             if let Some(text) = value_node.text() {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
+                    let rcount = value_node
+                        .attribute("rcount")
+                        .and_then(|a| a.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let fwsize = value_node
+                        .attribute("fwsize")
+                        .and_then(|a| a.parse::<u64>().ok())
+                        .unwrap_or(0);
+
                     let mut parts: Vec<&str> = trimmed.split('/').collect();
                     if parts.len() == 3 {
                         parts.push(parts[0]);
@@ -65,11 +77,17 @@ pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {
                     if parts.len() >= 3 && parts[2].is_empty() {
                         parts[2] = parts[0];
                     }
-                    upgrade.push(parts.join("/"));
+                    upgrade_entries.push((rcount, fwsize, parts.join("/")));
                 }
             }
         }
     }
+
+    upgrade_entries.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let upgrade = upgrade_entries
+        .into_iter()
+        .map(|(_, _, version)| version)
+        .collect();
 
     Some(VersionInfo { latest, upgrade })
 }
@@ -210,7 +228,11 @@ mod tests {
         assert_eq!(info.upgrade.len(), 15);
         assert_eq!(
             info.upgrade[0],
-            "S931U1UES7BYJ5/S931U1OYM7BYJ5/S931U1UES7BYJ5/S931U1UES7BYJ5"
+            "S931U1UEU1AYA1/S931U1OYM1AYA1/S931U1UEU1AYA1/S931U1UEU1AYA1"
+        );
+        assert_eq!(
+            info.upgrade[1],
+            "S931U1UEU1AYB3/S931U1OYM1AYB3/S931U1UEU1AYB3/S931U1UEU1AYB3"
         );
         assert_eq!(
             info.upgrade[14],

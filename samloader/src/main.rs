@@ -162,8 +162,8 @@ fn main() {
                     Arg::new("all")
                         .short('a')
                         .long("all")
-                        .help("List all available firmware versions")
-                        .action(clap::ArgAction::SetTrue),
+                        .help("List all available firmware versions, sorted from old to new")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
