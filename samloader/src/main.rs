@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 John "topjohnwu" Wu
 // Copyright 2021-2024 Henrik Grimler
 // Copyright 2010-2017 Benjamin Dobell, Glass Echidna
 //
