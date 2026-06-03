@@ -14,11 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod detect;
+mod actions;
 mod download;
-mod dump_pit;
 mod flash;
-mod print_pit;
 
 use clap::{Arg, ArgAction, Command};
 use samloader_fus::fetch_version_info;
@@ -328,15 +326,15 @@ fn main() {
             0
         }
         Some(("detect", sub_matches)) => {
-            detect::action_detect(verbose, sub_matches.get_flag("wait"), usb_log_level)
+            actions::action_detect(verbose, sub_matches.get_flag("wait"), usb_log_level)
         }
-        Some(("dump-pit", sub_matches)) => dump_pit::action_dump_pit(
+        Some(("dump-pit", sub_matches)) => actions::action_dump_pit(
             sub_matches.get_one::<String>("output").unwrap(),
             verbose,
             sub_matches.get_flag("wait"),
             usb_log_level,
         ),
-        Some(("print-pit", sub_matches)) => print_pit::action_print_pit(
+        Some(("print-pit", sub_matches)) => actions::action_print_pit(
             sub_matches
                 .get_one::<String>("file")
                 .map(|s| s.as_str())

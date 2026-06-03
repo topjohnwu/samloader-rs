@@ -17,7 +17,71 @@ use crate::print_error;
 use samloader_odin::OdinManager;
 use samloader_pit::PitData;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
+
+pub(crate) fn action_detect(verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
+    let mut odin_manager = OdinManager::new(verbose, wait);
+    odin_manager.set_usb_log_level(usb_log_level);
+
+    if let Err(e) = odin_manager.detect_device() {
+        eprintln!("ERROR: {}", e);
+        1
+    } else {
+        0
+    }
+}
+
+pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
+    if output.is_empty() {
+        println!("Output file was not specified.\n");
+        return 0;
+    }
+
+    // Open output file
+    let mut output_file = match File::create(output) {
+        Ok(f) => f,
+        Err(_) => {
+            print_error!("Failed to open output file \"{}\"", output);
+            return 1;
+        }
+    };
+
+    // Download PIT file from device.
+    let mut odin_manager = OdinManager::new(verbose, wait);
+    odin_manager.set_usb_log_level(usb_log_level);
+
+    if let Err(e) = odin_manager.initialise() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    if let Err(e) = odin_manager.begin_session() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    let mut success = true;
+
+    match odin_manager.download_pit_file() {
+        Ok(pit_buffer) => {
+            if let Err(e) = output_file.write_all(&pit_buffer) {
+                print_error!("Failed to write PIT data to output file: {}", e);
+                success = false;
+            }
+        }
+        Err(e) => {
+            print_error!("{}", e);
+            success = false;
+        }
+    }
+
+    if let Err(e) = odin_manager.end_session() {
+        print_error!("{}", e);
+        success = false;
+    }
+
+    if success { 0 } else { 1 }
+}
 
 pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_level: &str) -> i32 {
     if !file.is_empty() {
