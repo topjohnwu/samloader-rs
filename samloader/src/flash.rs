@@ -17,12 +17,13 @@
 use crate::PartitionArg;
 use crate::print_error;
 use samloader_odin::{
-    FirmwareInfo, FirmwareSource, Lz4FrameHeader, OdinManager, TarEntryReader, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
+    TarEntryReader, verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 use tar::Archive;
 
@@ -36,13 +37,14 @@ struct IndexedEntry {
 }
 
 fn normalize_basename(path_str: &str) -> (String, bool) {
-    let filename = Path::new(path_str)
+    let mut filename = Path::new(path_str)
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
 
     if filename.to_lowercase().ends_with(".lz4") {
-        (filename[..filename.len() - 4].to_string(), true)
+        filename.truncate(filename.len() - 4);
+        (filename, true)
     } else {
         (filename, false)
     }
@@ -114,9 +116,14 @@ fn scan_tar_packages(
                 if reader.read_to_string(&mut content).is_ok() {
                     let download_list = content
                         .lines()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(|s| normalize_basename(s).0)
+                        .filter_map(|s| {
+                            let s = s.trim();
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.to_string())
+                            }
+                        })
                         .collect();
                     archives_download_lists.push(download_list);
                 }
@@ -314,10 +321,7 @@ fn execute_flash_pipeline(
     0
 }
 
-fn find_pit_entry_by_filename<'a>(
-    pit_data: &'a PitData,
-    filename: &str,
-) -> Option<&'a PitEntry> {
+fn find_pit_entry_by_filename<'a>(pit_data: &'a PitData, filename: &str) -> Option<&'a PitEntry> {
     pit_data.entries.iter().find(|e| {
         let flash_fn = e.flash_filename.to_string_lossy();
         flash_fn.eq_ignore_ascii_case(filename)
@@ -346,19 +350,7 @@ fn create_firmware_info<'a>(
             }
         }
     } else {
-        match &mut source {
-            FirmwareSource::File(f) => {
-                let pos = f.stream_position().unwrap_or(0);
-                match Lz4FrameHeader::from_read(f) {
-                    Ok(header) => Some(header),
-                    Err(_) => {
-                        let _ = f.seek(SeekFrom::Start(pos));
-                        None
-                    }
-                }
-            }
-            FirmwareSource::Tar(_) => None,
-        }
+        None
     };
 
     if lz4_hdr.is_some() && !lz4_supported {
@@ -387,13 +379,13 @@ fn create_firmware_info<'a>(
     }
 
     if let Some(header) = lz4_hdr {
-        Some(FirmwareInfo::Lz4(samloader_odin::FirmwareLz4File {
+        Some(FirmwareInfo::Lz4(FirmwareLz4File {
             pit_entry,
             file: source,
             header,
         }))
     } else {
-        Some(FirmwareInfo::Normal(samloader_odin::FirmwareFile {
+        Some(FirmwareInfo::Normal(FirmwareFile {
             pit_entry,
             file: source,
             file_size: source_size,
