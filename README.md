@@ -3,23 +3,22 @@
 An all-in-one Samsung firmware download and flash tool.
 
 ```
-Usage: samloader <COMMAND>
+Usage: samloader [OPTIONS] <COMMAND>
 
 Commands:
-  download      Download the latest firmware
-  check-update  Check the latest version
-  detect        Indicates whether or not a download mode device can be detected
-  dump-pit      Downloads the connected device's PIT file to the specified output file
-  print-pit     Prints the contents of a PIT file in a human readable format
-  flash         Flashes one or more firmware files to your phone
-  tar-flash     Flashes Samsung firmware TAR/MD5 packages to your phone
+  download      Download firmware
+  check-update  Check available versions
+  detect        Indicates whether or not a download mode device can be detected.
+  dump-pit      Dumps the connected device's PIT file to the specified output file.
+  print-pit     Prints the contents of a PIT file in a human readable format.
+  flash         Flashes one or more firmware files to your phone.
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-      --verbose              Enable verbose output
-      --usb-log-level <LVL>  Set libusb log level (none, error, warning, info, debug)
-  -h, --help                 Print help
-  -V, --version              Print version
+      --verbose                        Enable verbose output
+      --usb-log-level <usb-log-level>  Set libusb log level (none, error, warning, info, debug)
+  -h, --help                           Print help
+  -V, --version                        Print version
 ```
 
 ## Features
