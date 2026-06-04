@@ -6,13 +6,14 @@ An all-in-one Samsung firmware download and flash tool.
 Usage: samloader [OPTIONS] <COMMAND>
 
 Commands:
-  download      Download firmware
-  check-update  Check available versions
-  detect        Indicates whether or not a download mode device can be detected.
-  dump-pit      Dumps the connected device's PIT file to the specified output file.
-  print-pit     Prints the contents of a PIT file in a human readable format.
-  flash         Flashes one or more firmware files to your phone.
-  help          Print this message or the help of the given subcommand(s)
+  download         Download firmware
+  check-update     Check available versions
+  detect           Indicates whether or not a download mode device can be detected.
+  dump-pit         Dumps the connected device's PIT file to the specified output file.
+  print-pit        Prints the contents of a PIT file in a human readable format.
+  flash            Flashes one or more firmware files to your phone.
+  reboot-download  Boot a connected Samsung device into download mode
+  help             Print this message or the help of the given subcommand(s)
 
 Options:
       --verbose                        Enable verbose output

@@ -22,4 +22,4 @@ pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, TarEntryReader,
     verify_md5_footer,
 };
-pub use odin_manager::OdinManager;
+pub use odin_manager::{OdinManager, reboot_download};

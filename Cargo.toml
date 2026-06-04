@@ -33,6 +33,7 @@ indicatif = "0.18"
 binrw = "0.15"
 modular-bitfield = "0.13.1"
 rusb = { version = "0.9", features = ["vendored"] }
+serialport = "4.3"
 tar = "0.4"
 md5 = "0.8"
 thiserror = "2"

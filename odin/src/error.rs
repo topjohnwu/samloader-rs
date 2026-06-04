@@ -116,6 +116,9 @@ pub enum OdinError {
     #[error("Unexpected session total bytes response!\nExpected: 0\nReceived: {0}")]
     UnexpectedTotalBytesResponse(u32),
 
+    #[error("Serial port error: {0}")]
+    SerialError(String),
+
     #[error("{0}")]
     ParseError(String),
 }

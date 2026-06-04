@@ -820,3 +820,44 @@ impl Drop for OdinManager {
         }
     }
 }
+
+pub fn reboot_download() -> Result<(), OdinError> {
+    use std::io::Write;
+
+    // List all available ports
+    let ports = serialport::available_ports()
+        .map_err(|e| OdinError::SerialError(format!("Failed to list serial ports: {}", e)))?;
+
+    // Find first Samsung device
+    let mut samsung_port = None;
+    for port in ports {
+        match port.port_type {
+            serialport::SerialPortType::UsbPort(info) if info.vid == VID_SAMSUNG => {
+                samsung_port = Some(port.port_name);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let port_name = samsung_port
+        .ok_or_else(|| OdinError::SerialError("No Samsung serial port found".to_string()))?;
+
+    let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
+
+    // Open connection at 115200 baud with 1s timeout
+    let mut port = serialport::new(&port_name, 115_200)
+        .timeout(Duration::from_secs(1))
+        .open()
+        .map_err(|e| OdinError::SerialError(format!("Failed to open port {}: {}", port_name, e)))?;
+
+    // Write command
+    port.write_all(cmd)
+        .map_err(|e| OdinError::SerialError(format!("Failed to send data: {}", e)))?;
+
+    // Flush port output buffer
+    port.flush()
+        .map_err(|e| OdinError::SerialError(format!("Failed to flush serial buffer: {}", e)))?;
+
+    Ok(())
+}

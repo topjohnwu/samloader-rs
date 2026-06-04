@@ -283,6 +283,10 @@ fn main() {
                         .help("Automatic partition name matching file to flash"),
                 ),
         )
+        .subcommand(
+            Command::new("reboot-download")
+                .about("Boot a connected Samsung device into download mode"),
+        )
         .get_matches();
 
     let verbose = matches.get_flag("verbose");
@@ -402,6 +406,7 @@ fn main() {
             );
             std::process::exit(result);
         }
+        Some(("reboot-download", _sub_matches)) => actions::action_reboot_download(verbose),
         _ => unreachable!(),
     };
 

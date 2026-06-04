@@ -154,3 +154,17 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool, usb_log_le
         if success { 0 } else { 1 }
     }
 }
+
+pub(crate) fn action_reboot_download(_verbose: bool) -> i32 {
+    println!("Sending serial command...");
+    match samloader_odin::reboot_download() {
+        Ok(()) => {
+            println!("Done");
+            0
+        }
+        Err(e) => {
+            print_error!("{}", e);
+            1
+        }
+    }
+}

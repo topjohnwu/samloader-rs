@@ -10,4 +10,5 @@ samloader-pit = { workspace = true }
 rusb = { workspace = true }
 binrw = { workspace = true }
 md5 = { workspace = true }
+serialport = { workspace = true }
 thiserror = { workspace = true }
