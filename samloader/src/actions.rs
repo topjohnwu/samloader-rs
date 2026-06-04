@@ -53,7 +53,7 @@ pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
         }
     };
 
-    if let Err(e) = odin_manager.initialise() {
+    if let Err(e) = odin_manager.init() {
         print_error!("{}", e);
         return 1;
     }
@@ -121,7 +121,7 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool) -> i32 {
             }
         };
 
-        if let Err(e) = odin_manager.initialise() {
+        if let Err(e) = odin_manager.init() {
             print_error!("{}", e);
             return 1;
         }

@@ -222,7 +222,7 @@ fn init_session_and_get_pit(
         }
     };
 
-    if let Err(e) = odin_manager.initialise() {
+    if let Err(e) = odin_manager.init() {
         print_error!("{}", e);
         return Err(1);
     }

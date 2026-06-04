@@ -294,38 +294,6 @@ impl<'a> OutboundPacket for FilePartPacket<'a> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct HandshakePacket;
-
-impl HandshakePacket {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
-
-impl OutboundPacket for HandshakePacket {
-    fn pack(&self) -> Vec<u8> {
-        b"ODIN".to_vec()
-    }
-}
-
-#[derive(BinRead, Debug)]
-#[brw(little)]
-pub(crate) enum HandshakeResponse {
-    #[br(magic = b"LOKE")]
-    Loke,
-    Unknown(#[br(parse_with = binrw::helpers::until_eof)] Vec<u8>),
-}
-
-impl InboundPacket for HandshakeResponse {
-    const SIZE: usize = 4;
-
-    fn unpack(buffer: &[u8]) -> Result<Self, String> {
-        let mut reader = Cursor::new(buffer);
-        Self::read(&mut reader).map_err(|_| "Failed to unpack packet".to_string())
-    }
-}
-
 pub(crate) struct PitDataPacket {
     pub data: Vec<u8>,
 }

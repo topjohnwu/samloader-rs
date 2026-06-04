@@ -98,7 +98,7 @@ pub enum OdinError {
     #[error("Failed to send reboot device packet!")]
     RebootDeviceSendFailed,
 
-    #[error("Failed to initialise PIT file transfer!")]
+    #[error("Failed to initialize PIT file transfer!")]
     PitFileTransferInitFailed,
 
     #[error("Failed to send PIT file part information!")]
@@ -107,7 +107,7 @@ pub enum OdinError {
     #[error("Failed to send end PIT file transfer packet!")]
     PitFileTransferEndSendFailed,
 
-    #[error("Failed to initialise file transfer!")]
+    #[error("Failed to initialize file transfer!")]
     FileTransferInitFailed,
 
     #[error("Failed to send total bytes packet!")]

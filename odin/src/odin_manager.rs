@@ -91,34 +91,28 @@ impl OdinManager {
         eprintln!("\n           VID:PID: {:04X}:{:04X}", info.vid, info.pid);
     }
 
-    pub fn initialise(&mut self) -> Result<(), OdinError> {
-        println!("Initialising protocol...");
+    pub fn init(&mut self) -> Result<(), OdinError> {
+        println!("Initializing protocol...");
 
         if let Err(e) = self.port.clear(ClearBuffer::All) {
             print_warning!("Failed to clear serial buffers! Result: {}", e);
         }
 
-        self.send_packet(&packets::HandshakePacket::new(), 1000)
+        self.send_string("ODIN", 1000)
             .map_err(|_| OdinError::HandshakeSendFailed)?;
 
         let response = self
-            .receive_packet::<packets::HandshakeResponse>(1000)
+            .receive_string(1000)
             .map_err(|_| OdinError::HandshakeReceiveFailed)?;
 
-        match response {
-            packets::HandshakeResponse::Loke => {
-                println!("Protocol initialisation successful.\n");
-                Ok(())
-            }
-            packets::HandshakeResponse::Unknown(raw_data) => {
-                if self.verbose {
-                    return Err(OdinError::HandshakeMismatch {
-                        expected: "LOKE".to_string(),
-                        received: String::from_utf8_lossy(&raw_data).into_owned(),
-                    });
-                }
-                Err(OdinError::UnexpectedHandshake)
-            }
+        if response == "LOKE" {
+            println!("Protocol initialization successful.\n");
+            Ok(())
+        } else {
+            Err(OdinError::HandshakeMismatch {
+                expected: "LOKE".to_string(),
+                received: response,
+            })
         }
     }
 
@@ -240,6 +234,63 @@ impl OdinManager {
             }
         }
         Err(())
+    }
+
+    fn send_string(&mut self, s: &str, timeout: i32) -> Result<(), OdinError> {
+        if self.verbose {
+            eprintln!("Sending string: {:?}", s);
+        }
+        if !self.send_bulk_transfer(s.as_bytes(), timeout, true) {
+            return Err(OdinError::SendPacketFailed);
+        }
+        Ok(())
+    }
+
+    fn receive_string(&mut self, timeout: i32) -> Result<String, OdinError> {
+        let mut buffer = [0u8; 1024];
+        let mut data = Vec::new();
+
+        self.port
+            .set_timeout(Duration::from_millis(timeout as u64))
+            .map_err(|e| OdinError::SerialError(format!("Failed to set timeout: {}", e)))?;
+
+        match self.port.read(&mut buffer) {
+            Ok(0) => return Err(OdinError::ReceivePacketFailed),
+            Ok(n) => {
+                data.extend_from_slice(&buffer[0..n]);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err(OdinError::ReceivePacketFailed);
+            }
+            Err(e) => {
+                return Err(OdinError::SerialError(format!("Read error: {}", e)));
+            }
+        }
+
+        let _ = self.port.set_timeout(Duration::from_millis(10));
+        loop {
+            match self.port.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    data.extend_from_slice(&buffer[0..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    break;
+                }
+                Err(e) => {
+                    return Err(OdinError::SerialError(format!("Read error: {}", e)));
+                }
+            }
+        }
+
+        let response = String::from_utf8(data)
+            .map_err(|e| OdinError::ParseError(format!("Invalid UTF-8: {}", e)))?;
+
+        if self.verbose {
+            eprintln!("Received string: {:?}", response);
+        }
+
+        Ok(response)
     }
 
     fn send_packet(
