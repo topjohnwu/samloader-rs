@@ -209,60 +209,6 @@ fn scan_tar_packages(
     Ok((resolved_entries, local_pit_file))
 }
 
-fn init_session_and_get_pit(
-    verbose: bool,
-    wait: bool,
-    pit_file_bytes: Option<&[u8]>,
-) -> Result<(OdinManager, PitData), i32> {
-    let mut odin_manager = match OdinManager::new(verbose, wait) {
-        Ok(m) => m,
-        Err(e) => {
-            print_error!("{}", e);
-            return Err(1);
-        }
-    };
-
-    if let Err(e) = odin_manager.init() {
-        print_error!("{}", e);
-        return Err(1);
-    }
-
-    if let Err(e) = odin_manager.begin_session() {
-        print_error!("{}", e);
-        return Err(1);
-    }
-
-    let pit_data = if let Some(bytes) = pit_file_bytes {
-        match PitData::new(bytes) {
-            Ok(data) => Some(data),
-            Err(_) => {
-                print_error!("Failed to unpack PIT file!");
-                None
-            }
-        }
-    } else {
-        match odin_manager.download_pit_file() {
-            Ok(pit_buffer) => match PitData::new(&pit_buffer) {
-                Ok(device_pit_data) => Some(device_pit_data),
-                Err(_) => {
-                    print_error!("Failed to unpack device's PIT file!");
-                    None
-                }
-            },
-            Err(e) => {
-                print_error!("{}", e);
-                None
-            }
-        }
-    };
-
-    let Some(pit_data) = pit_data else {
-        return Err(1);
-    };
-
-    Ok((odin_manager, pit_data))
-}
-
 fn execute_flash_pipeline(
     mut odin_manager: OdinManager,
     pit_data: &PitData,
@@ -445,11 +391,47 @@ pub(crate) fn action_flash(
     }
 
     // 3. Initialize connection session and parse the PIT data
-    let (odin_manager, pit_data) =
-        match init_session_and_get_pit(verbose, wait, pit_file_bytes.as_deref()) {
-            Ok(res) => res,
-            Err(code) => return code,
-        };
+    let mut odin_manager = match OdinManager::new(verbose, wait) {
+        Ok(m) => m,
+        Err(e) => {
+            print_error!("{}", e);
+            return 1;
+        }
+    };
+
+    if let Err(e) = odin_manager.init() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    if let Err(e) = odin_manager.begin_session() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    let pit_data = if let Some(bytes) = pit_file_bytes.as_deref() {
+        match PitData::new(bytes) {
+            Ok(data) => data,
+            Err(_) => {
+                print_error!("Failed to unpack PIT file!");
+                return 1;
+            }
+        }
+    } else {
+        match odin_manager.download_pit_file() {
+            Ok(pit_buffer) => match PitData::new(&pit_buffer) {
+                Ok(device_pit_data) => device_pit_data,
+                Err(_) => {
+                    print_error!("Failed to unpack device's PIT file!");
+                    return 1;
+                }
+            },
+            Err(e) => {
+                print_error!("{}", e);
+                return 1;
+            }
+        }
+    };
 
     let mut partition_infos = Vec::new();
 

@@ -389,7 +389,9 @@ impl OdinManager {
         Ok(())
     }
 
-    fn receive_pit_file(&mut self) -> Result<Vec<u8>, OdinError> {
+    pub fn download_pit_file(&mut self) -> Result<Vec<u8>, OdinError> {
+        println!("Downloading device's PIT file...");
+
         let packet = RequestPacket::pit_file_dump();
         let file_size = self
             .request_and_response(&packet, 3000)
@@ -416,18 +418,8 @@ impl OdinManager {
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::PitFileEndSendFailed)?;
 
-        Ok(buffer)
-    }
-
-    pub fn download_pit_file(&mut self) -> Result<Vec<u8>, OdinError> {
-        println!("Downloading device's PIT file...");
-
-        let pit_file = self
-            .receive_pit_file()
-            .map_err(|_| OdinError::PitDownloadFailed)?;
-
         println!("PIT file download successful.\n");
-        Ok(pit_file)
+        Ok(buffer)
     }
 
     pub fn is_lz4_supported(&self) -> bool {
