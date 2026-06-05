@@ -21,7 +21,6 @@ use std::ffi::CStr;
 
 const FILE_IDENTIFIER: u32 = 0x12349876;
 const HEADER_DATA_SIZE: u32 = 28;
-const PADDED_SIZE_MULTIPLICAND: u32 = 4096;
 
 const DATA_SIZE: usize = 132;
 const PARTITION_NAM_LENGTH: usize = 32;
@@ -175,19 +174,6 @@ impl PitData {
         Self::read(&mut cursor)
     }
 
-    fn get_data_size(&self) -> u32 {
-        HEADER_DATA_SIZE + (self.entries.len() * DATA_SIZE) as u32
-    }
-
-    pub fn get_padded_size(&self) -> u32 {
-        let data_size = self.get_data_size();
-        let mut padded_size = (data_size / PADDED_SIZE_MULTIPLICAND) * PADDED_SIZE_MULTIPLICAND;
-        if !data_size.is_multiple_of(PADDED_SIZE_MULTIPLICAND) {
-            padded_size += PADDED_SIZE_MULTIPLICAND;
-        }
-        padded_size
-    }
-
     pub fn find_entry_by_name(&self, name: &str) -> Option<&PitEntry> {
         self.entries.iter().find(|e| e.partition_name == name)
     }
@@ -196,11 +182,10 @@ impl PitData {
         self.entries.iter().find(|e| e.identifier == id)
     }
 
-    pub fn pack(&self, data: &mut [u8]) {
-        let mut cursor = Cursor::new(data);
-        if let Err(e) = self.write(&mut cursor) {
-            eprintln!("Failed to pack PIT: {}", e);
-        }
+    pub fn pack(&self) -> Result<Vec<u8>, binrw::Error> {
+        let mut cursor = Cursor::new(Vec::new());
+        self.write(&mut cursor)?;
+        Ok(cursor.into_inner())
     }
 }
 
@@ -288,5 +273,29 @@ impl std::fmt::Display for PitData {
             writeln!(f, "FOTA Filename: {}", entry.fota_filename)?;
         }
         writeln!(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pit_repack() {
+        let original_bytes = include_bytes!("Q7MQ_EUR_OPENX.pit");
+        let pit_data = PitData::new(original_bytes).expect("Failed to parse original PIT");
+        let repacked_bytes = pit_data.pack().expect("Failed to repack PIT");
+
+        let entry_count = u32::from_le_bytes(original_bytes[4..8].try_into().unwrap());
+        let expected_data_size = HEADER_DATA_SIZE as usize + (entry_count as usize * DATA_SIZE);
+
+        // Verify that the packed bytes are exactly of the expected length
+        assert_eq!(repacked_bytes.len(), expected_data_size);
+
+        // Note: The original file contains an appended 512-byte Samsung cryptographic
+        // signature ("SignerVer02...") at the end, which is ignored by PitData during
+        // parsing and not serialized by PitData::pack(). We verify that the actual
+        // PIT data itself matches the original file exactly byte-for-byte.
+        assert_eq!(&repacked_bytes, &original_bytes[..expected_data_size]);
     }
 }

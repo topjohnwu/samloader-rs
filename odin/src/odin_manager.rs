@@ -352,7 +352,12 @@ impl OdinManager {
     }
 
     pub fn send_pit_data(&mut self, pit_data: &PitData) -> Result<(), OdinError> {
-        let pit_buffer_size = pit_data.get_padded_size();
+        // Create packed in-memory PIT file
+        let pit_buffer = pit_data
+            .pack()
+            .map_err(|e| OdinError::ParseError(format!("Failed to pack PIT: {}", e)))?;
+
+        let pit_buffer_size = pit_buffer.len() as u32;
 
         // Start file transfer
         let packet = RequestPacket::pit_file_flash();
@@ -363,10 +368,6 @@ impl OdinManager {
         let packet = RequestPacket::flash_part_pit_file(pit_buffer_size);
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::PitFilePartInfoSendFailed)?;
-
-        // Create packed in-memory PIT file
-        let mut pit_buffer = vec![0u8; pit_buffer_size as usize];
-        pit_data.pack(&mut pit_buffer);
 
         // Flash pit file
         let packet = packets::FilePartPacket::new(&pit_buffer, pit_buffer_size);
