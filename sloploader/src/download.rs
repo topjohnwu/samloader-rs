@@ -14,9 +14,9 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::MmapMut;
-use samloader_fus::aes::cipher::BlockModeDecrypt;
-use samloader_fus::aes::cipher::inout::InOutBuf;
-use samloader_fus::{FusClient, fetch_version_info};
+use sloploader_fus::aes::cipher::BlockModeDecrypt;
+use sloploader_fus::aes::cipher::inout::InOutBuf;
+use sloploader_fus::{FusClient, fetch_version_info};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -48,7 +48,7 @@ pub(crate) struct DownloadArgs {
 }
 
 pub(crate) fn action_download(args: DownloadArgs) {
-    let mut client = FusClient::new().expect("Unable to establish FusClient");
+    let mut goblin_client = FusClient::new().expect("Unable to establish FusClient");
 
     let version = match &args.version {
         Some(v) => v.clone(),
@@ -59,15 +59,15 @@ pub(crate) fn action_download(args: DownloadArgs) {
         }
     };
 
-    client.fetch_binary_info(&args.model, &args.region, &version);
+    goblin_client.fetch_binary_info(&args.model, &args.region, &version);
 
-    println!("Firmware Version: {}", client.info.version);
+    println!("Firmware Version: {}", goblin_client.info.version);
 
-    let default_name = client
+    let default_name = goblin_client
         .info
         .filename
         .strip_suffix(".enc4")
-        .unwrap_or(client.info.filename.as_str());
+        .unwrap_or(goblin_client.info.filename.as_str());
 
     let final_out = match (args.out_file, args.out_dir) {
         (Some(name), _) => name,
@@ -75,9 +75,9 @@ pub(crate) fn action_download(args: DownloadArgs) {
         _ => default_name.to_string(),
     };
 
-    println!("Downloading {} to {}", client.info.filename, final_out);
+    println!("Downloading {} to {}", goblin_client.info.filename, final_out);
 
-    let file = OpenOptions::new()
+    let blob_file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -86,17 +86,17 @@ pub(crate) fn action_download(args: DownloadArgs) {
         .unwrap();
 
     // Pre-allocate file
-    file.set_len(client.info.size)
+    blob_file.set_len(goblin_client.info.size)
         .expect("Cannot pre-allocate file");
 
-    let mut map = unsafe { MmapMut::map_mut(&file).expect("Cannot map file") };
+    let mut map = unsafe { MmapMut::map_mut(&blob_file).expect("Cannot map file") };
 
-    client.init_download().expect("Download init failed");
+    goblin_client.init_download().expect("Download init failed");
 
     // Round up to the nearest 16 byte boundary
-    let chunk_size = (client.info.size / args.threads / 16 + 1) * 16;
+    let chunk_size = (goblin_client.info.size / args.threads / 16 + 1) * 16;
 
-    let progress = ProgressBar::new(client.info.size)
+    let progress = ProgressBar::new(goblin_client.info.size)
         .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
     progress.enable_steady_tick(Duration::from_secs(1));
 
@@ -134,7 +134,7 @@ pub(crate) fn action_download(args: DownloadArgs) {
 
     thread::scope(|s| {
         let pool = &pool;
-        let client = &client;
+        let client = &goblin_client;
         let progress = &progress;
         for _ in 0..n_workers {
             s.spawn(move || run_worker(pool, client, progress));
@@ -154,12 +154,12 @@ pub(crate) fn action_download(args: DownloadArgs) {
 
     // Handle padding removal if needed
     if last_byte > 0 && last_byte <= 16 {
-        let file_len = file
+        let file_len = blob_file
             .metadata()
             .ok()
             .map(|m| m.len())
-            .unwrap_or(client.info.size);
-        file.set_len(file_len - last_byte as u64)
+            .unwrap_or(goblin_client.info.size);
+        blob_file.set_len(file_len - last_byte as u64)
             .expect("Failed to truncate file");
     }
 

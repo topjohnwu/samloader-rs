@@ -1,5 +1,5 @@
 [package]
-name = "samloader"
+name = "sloploader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ description = "Download and flash firmware for Samsung devices"
 keywords = ["samsung", "firmware"]
 
 [dependencies]
-samloader-fus = { workspace = true }
-samloader-pit = { workspace = true }
-samloader-odin = { workspace = true }
+sloploader-fus = { workspace = true }
+sloploader-pit = { workspace = true }
+sloploader-odin = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 indicatif = { workspace = true }
 memmap2 = { workspace = true }

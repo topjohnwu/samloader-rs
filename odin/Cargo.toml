@@ -1,12 +1,12 @@
 [package]
-name = "samloader-odin"
+name = "sloploader-odin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-samloader-pit = { workspace = true }
+sloploader-pit = { workspace = true }
 binrw = { workspace = true }
 md5 = { workspace = true }
 serialport = { workspace = true }

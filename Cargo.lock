@@ -1218,20 +1218,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "samloader"
+name = "sloploader"
 version = "1.2.0"
 dependencies = [
  "clap",
  "indicatif",
  "memmap2",
- "samloader-fus",
- "samloader-odin",
- "samloader-pit",
+ "sloploader-fus",
+ "sloploader-odin",
+ "sloploader-pit",
  "tar",
 ]
 
 [[package]]
-name = "samloader-fus"
+name = "sloploader-fus"
 version = "1.2.0"
 dependencies = [
  "aes",
@@ -1242,18 +1242,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "samloader-odin"
+name = "sloploader-odin"
 version = "1.2.0"
 dependencies = [
  "binrw",
  "md5",
- "samloader-pit",
+ "sloploader-pit",
  "serialport",
  "thiserror",
 ]
 
 [[package]]
-name = "samloader-pit"
+name = "sloploader-pit"
 version = "1.2.0"
 dependencies = [
  "binrw",

@@ -1,5 +1,5 @@
 [package]
-name = "samloader-pit"
+name = "sloploader-pit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

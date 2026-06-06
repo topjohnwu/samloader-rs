@@ -16,7 +16,7 @@
 use crate::error::OdinError;
 use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
-use samloader_pit::{BinaryType, PitData};
+use sloploader_pit::{BinaryType, PitData};
 use serialport::{ClearBuffer, SerialPort, SerialPortType, UsbPortInfo};
 use std::io::{Read, Write};
 use std::time::Duration;

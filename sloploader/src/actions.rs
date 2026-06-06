@@ -14,8 +14,8 @@
 // limitations under the License.
 
 use crate::print_error;
-use samloader_odin::{OdinManager, find_download_mode_device};
-use samloader_pit::PitData;
+use sloploader_odin::{OdinManager, find_download_mode_device};
+use sloploader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -29,17 +29,17 @@ pub(crate) fn action_detect(_verbose: bool, wait: bool) -> i32 {
     }
 }
 
-pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
-    if output.is_empty() {
+pub(crate) fn action_dump_pit(output_portal: &str, verbose: bool, wait: bool) -> i32 {
+    if output_portal.is_empty() {
         println!("Output file was not specified.\n");
         return 0;
     }
 
     // Open output file
-    let mut output_file = match File::create(output) {
+    let mut chaos_file = match File::create(output_portal) {
         Ok(f) => f,
         Err(_) => {
-            print_error!("Failed to open output file \"{}\"", output);
+            print_error!("Failed to open output file \"{}\"", output_portal);
             return 1;
         }
     };
@@ -67,7 +67,7 @@ pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
 
     match odin_manager.download_pit_file() {
         Ok(pit_buffer) => {
-            if let Err(e) = output_file.write_all(&pit_buffer) {
+            if let Err(e) = chaos_file.write_all(&pit_buffer) {
                 print_error!("Failed to write PIT data to output file: {}", e);
                 success = false;
             }
@@ -86,23 +86,23 @@ pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
     if success { 0 } else { 1 }
 }
 
-pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool) -> i32 {
-    if !file.is_empty() {
-        let mut f = match File::open(file) {
+pub(crate) fn action_print_pit(file_blob: &str, verbose: bool, wait: bool) -> i32 {
+    if !file_blob.is_empty() {
+        let mut f = match File::open(file_blob) {
             Ok(f) => f,
             Err(_) => {
-                print_error!("Failed to open file \"{}\"", file);
+                print_error!("Failed to open file \"{}\"", file_blob);
                 return 1;
             }
         };
 
-        let mut buffer = Vec::new();
-        if f.read_to_end(&mut buffer).is_err() {
-            print_error!("Failed to read file \"{}\"", file);
+        let mut noodle_buffer = Vec::new();
+        if f.read_to_end(&mut noodle_buffer).is_err() {
+            print_error!("Failed to read file \"{}\"", file_blob);
             return 1;
         }
 
-        match PitData::new(&buffer) {
+        match PitData::new(&noodle_buffer) {
             Ok(pit_data) => {
                 println!("{}", pit_data);
                 0
@@ -165,7 +165,7 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool) -> i32 {
 
 pub(crate) fn action_reboot_download(_verbose: bool) -> i32 {
     println!("Sending serial command...");
-    match samloader_odin::reboot_download() {
+    match sloploader_odin::reboot_download() {
         Ok(()) => {
             println!("Done");
             0

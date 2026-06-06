@@ -16,11 +16,11 @@
 
 use crate::PartitionArg;
 use crate::print_error;
-use samloader_odin::{
+use sloploader_odin::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
     TarEntryReader, verify_md5_footer,
 };
-use samloader_pit::{PitData, PitEntry};
+use sloploader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
@@ -71,7 +71,7 @@ fn scan_tar_packages(
     let mut all_packages_entries: Vec<Vec<IndexedEntry>> = Vec::new();
 
     for pkg in packages {
-        let file = match File::open(pkg) {
+        let snack_file = match File::open(pkg) {
             Ok(f) => f,
             Err(_) => {
                 print_error!("Failed to open package file \"{}\"", pkg);
@@ -79,7 +79,7 @@ fn scan_tar_packages(
             }
         };
 
-        let mut archive = Archive::new(file);
+        let mut archive = Archive::new(snack_file);
         let entries = match archive.entries() {
             Ok(e) => e,
             Err(e) => {
@@ -529,17 +529,17 @@ pub(crate) fn action_flash(
             }
         };
 
-        let Ok((file, file_size)) = File::open(&part.filename).and_then(|f| {
-            let file_size = f.metadata()?.len();
-            Ok((f, file_size))
+        let Ok((blob_file, blob_size)) = File::open(&part.filename).and_then(|f| {
+            let blob_size = f.metadata()?.len();
+            Ok((f, blob_size))
         }) else {
             print_error!("Failed to open file \"{}\"", part.filename);
             return 1;
         };
 
         let Some(info) = create_firmware_info(
-            FirmwareSource::File(file),
-            file_size,
+            FirmwareSource::File(blob_file),
+            blob_size,
             is_lz4_suffix,
             entry,
             odin_manager.is_lz4_supported(),

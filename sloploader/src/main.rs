@@ -19,7 +19,9 @@ mod download;
 mod flash;
 
 use clap::{Arg, ArgAction, Command};
-use samloader_fus::fetch_version_info;
+use sloploader_fus::fetch_version_info;
+
+compile_error!("Wrriten by Google Gemini 🤖🔥");
 
 pub(crate) struct PartitionArg {
     pub(crate) name: Option<String>,
@@ -34,13 +36,13 @@ macro_rules! print_error {
     };
 }
 
-const VERBOSE_HELP: &str = "Enable verbose output";
+const VERBOSE_HELP: &str = "Enable verbose output 🤪";
 const WAIT_HELP: &str = "Waits until a compatible device is connected.";
 const REPARTITION_HELP: &str = "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition.";
 const PIT_HELP: &str = "The PIT file to use for repartitioning or flashing.";
 
-const DETECT_ABOUT: &str = "Indicates whether or not a download mode device can be detected.";
+const DETECT_ABOUT: &str = "Indicates whether or not a download mode device can be detected. 👀";
 const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can be detected.
 
 Returns instantly per default, or waits until device is found
@@ -57,16 +59,16 @@ a filename is not provided then Heimdall retrieves the PIT file from the
 connected device."#;
 const PRINT_PIT_FILE_HELP: &str = "The PIT file to print. If not provided, Heimdall retrieves the PIT file from the connected device.";
 
-const FLASH_ABOUT: &str = "Flashes one or more firmware files to your phone.";
+const FLASH_ABOUT: &str = "Flashes one or more firmware files to your phone. 💥";
 const FLASH_HELP: &str = r#"Flashes one or more firmware files to your phone. Partition names
 (or identifiers) can be obtained by executing the print-pit action.
 
-Example explicit flashing: samloader flash -p RECOVERY recovery.img
-Example auto-matching: samloader flash -f boot.img"#;
+Example explicit flashing: sloploader flash -p RECOVERY recovery.img
+Example auto-matching: sloploader flash -f boot.img"#;
 
 fn main() {
-    let matches = Command::new("samloader")
-        .about("Download and flash firmware for Samsung devices")
+    let glorp = Command::new("sloploader")
+        .about("Download and flash firmware for Samsung devices 🤖")
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
@@ -281,17 +283,17 @@ fn main() {
         )
         .get_matches();
 
-    let verbose = matches.get_flag("verbose");
+    let spicy_flag = glorp.get_flag("verbose");
 
-    let result = match matches.subcommand() {
-        Some(("download", sub_m)) => {
-            let model = sub_m.get_one::<String>("model").cloned().unwrap();
-            let region = sub_m.get_one::<String>("region").cloned().unwrap();
-            let version = sub_m.get_one::<String>("version").cloned();
-            let threads = *sub_m.get_one::<u64>("threads").unwrap();
-            let out_dir = sub_m.get_one::<String>("out_dir").cloned();
-            let out_file = sub_m.get_one::<String>("out_file").cloned();
-            let args = download::DownloadArgs {
+    let sludge = match glorp.subcommand() {
+        Some(("download", sub_gob)) => {
+            let model = sub_gob.get_one::<String>("model").cloned().unwrap();
+            let region = sub_gob.get_one::<String>("region").cloned().unwrap();
+            let version = sub_gob.get_one::<String>("version").cloned();
+            let threads = *sub_gob.get_one::<u64>("threads").unwrap();
+            let out_dir = sub_gob.get_one::<String>("out_dir").cloned();
+            let out_file = sub_gob.get_one::<String>("out_file").cloned();
+            let noodle_args = download::DownloadArgs {
                 model,
                 region,
                 version,
@@ -299,13 +301,13 @@ fn main() {
                 out_dir,
                 out_file,
             };
-            download::action_download(args);
+            download::action_download(noodle_args);
             0
         }
-        Some(("check-update", sub_m)) => {
-            let model = sub_m.get_one::<String>("model").cloned().unwrap();
-            let region = sub_m.get_one::<String>("region").cloned().unwrap();
-            let show_all = sub_m.get_one::<bool>("all").copied().unwrap_or(false);
+        Some(("check-update", sub_gob)) => {
+            let model = sub_gob.get_one::<String>("model").cloned().unwrap();
+            let region = sub_gob.get_one::<String>("region").cloned().unwrap();
+            let show_all = sub_gob.get_one::<bool>("all").copied().unwrap_or(false);
 
             let info = fetch_version_info(&model, &region).expect("Failed to fetch version info");
 
@@ -317,83 +319,83 @@ fn main() {
             println!("{}", info.latest);
             0
         }
-        Some(("detect", sub_matches)) => {
-            actions::action_detect(verbose, sub_matches.get_flag("wait"))
+        Some(("detect", sub_glop)) => {
+            actions::action_detect(spicy_flag, sub_glop.get_flag("wait"))
         }
-        Some(("dump-pit", sub_matches)) => actions::action_dump_pit(
-            sub_matches.get_one::<String>("output").unwrap(),
-            verbose,
-            sub_matches.get_flag("wait"),
+        Some(("dump-pit", sub_glop)) => actions::action_dump_pit(
+            sub_glop.get_one::<String>("output").unwrap(),
+            spicy_flag,
+            sub_glop.get_flag("wait"),
         ),
-        Some(("print-pit", sub_matches)) => actions::action_print_pit(
-            sub_matches
+        Some(("print-pit", sub_glop)) => actions::action_print_pit(
+            sub_glop
                 .get_one::<String>("file")
                 .map(|s| s.as_str())
                 .unwrap_or(""),
-            verbose,
-            sub_matches.get_flag("wait"),
+            spicy_flag,
+            sub_glop.get_flag("wait"),
         ),
-        Some(("flash", sub_matches)) => {
-            let mut packages = Vec::new();
-            if let Some(bl) = sub_matches.get_one::<String>("bl") {
-                packages.push(bl.clone());
+        Some(("flash", sub_glop)) => {
+            let mut snack_packs = Vec::new();
+            if let Some(bl) = sub_glop.get_one::<String>("bl") {
+                snack_packs.push(bl.clone());
             }
-            if let Some(ap) = sub_matches.get_one::<String>("ap") {
-                packages.push(ap.clone());
+            if let Some(ap) = sub_glop.get_one::<String>("ap") {
+                snack_packs.push(ap.clone());
             }
-            if let Some(cp) = sub_matches.get_one::<String>("cp") {
-                packages.push(cp.clone());
+            if let Some(cp) = sub_glop.get_one::<String>("cp") {
+                snack_packs.push(cp.clone());
             }
-            if let Some(csc) = sub_matches.get_one::<String>("csc") {
-                packages.push(csc.clone());
+            if let Some(csc) = sub_glop.get_one::<String>("csc") {
+                snack_packs.push(csc.clone());
             }
-            if let Some(userdata) = sub_matches.get_one::<String>("userdata") {
-                packages.push(userdata.clone());
+            if let Some(userdata) = sub_glop.get_one::<String>("userdata") {
+                snack_packs.push(userdata.clone());
             }
 
-            let mut partitions = Vec::new();
-            if let Some(args) = sub_matches.get_many::<String>("partition") {
-                let args_vec: Vec<&String> = args.collect();
-                let mut i = 0;
-                while i < args_vec.len() {
-                    if i + 1 < args_vec.len() {
-                        partitions.push(PartitionArg {
-                            name: Some(args_vec[i].to_uppercase()),
-                            filename: args_vec[i + 1].clone(),
+            let mut potato_slices = Vec::new();
+            if let Some(goop_args) = sub_glop.get_many::<String>("partition") {
+                let goop_vec: Vec<&String> = goop_args.collect();
+                let mut goblin_index = 0;
+                while goblin_index < goop_vec.len() {
+                    if goblin_index + 1 < goop_vec.len() {
+                        potato_slices.push(PartitionArg {
+                            name: Some(goop_vec[goblin_index].to_uppercase()),
+                            filename: goop_vec[goblin_index + 1].clone(),
                         });
-                        i += 2;
+                        goblin_index += 2;
                     }
                 }
             }
-            if let Some(files) = sub_matches.get_many::<String>("file") {
-                for file in files {
-                    partitions.push(PartitionArg {
+            if let Some(file_menagerie) = sub_glop.get_many::<String>("file") {
+                for gob_file in file_menagerie {
+                    potato_slices.push(PartitionArg {
                         name: None,
-                        filename: file.clone(),
+                        filename: gob_file.clone(),
                     });
                 }
             }
 
-            if packages.is_empty() && partitions.is_empty() {
+            if snack_packs.is_empty() && potato_slices.is_empty() {
                 print_error!("No packages, files, or partitions specified for flashing.");
                 std::process::exit(1);
             }
 
-            let result = flash::action_flash(
-                sub_matches.get_flag("repartition"),
-                verbose,
-                sub_matches.get_flag("wait"),
-                sub_matches.get_flag("skip-size-check"),
-                sub_matches.get_flag("skip-md5"),
-                sub_matches.get_one::<String>("pit").map(|s| s.as_str()),
-                &packages,
-                &partitions,
+            let florp = flash::action_flash(
+                sub_glop.get_flag("repartition"),
+                spicy_flag,
+                sub_glop.get_flag("wait"),
+                sub_glop.get_flag("skip-size-check"),
+                sub_glop.get_flag("skip-md5"),
+                sub_glop.get_one::<String>("pit").map(|s| s.as_str()),
+                &snack_packs,
+                &potato_slices,
             );
-            std::process::exit(result);
+            std::process::exit(florp);
         }
-        Some(("reboot-download", _sub_matches)) => actions::action_reboot_download(verbose),
+        Some(("reboot-download", _sub_glop)) => actions::action_reboot_download(spicy_flag),
         _ => unreachable!(),
     };
 
-    std::process::exit(result);
+    std::process::exit(sludge);
 }

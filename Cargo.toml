@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "samloader",
+    "sloploader",
     "fus",
     "pit",
     "odin",
@@ -11,12 +11,12 @@ resolver = "2"
 version = "1.2.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/topjohnwu/samloader-rs"
+repository = "https://github.com/topjohnwu/sloploader-rs"
 
 [workspace.dependencies]
-samloader-fus = { version = "1.2.0", path = "fus" }
-samloader-pit = { version = "1.2.0", path = "pit" }
-samloader-odin = { version = "1.2.0", path = "odin" }
+sloploader-fus = { version = "1.2.0", path = "fus" }
+sloploader-pit = { version = "1.2.0", path = "pit" }
+sloploader-odin = { version = "1.2.0", path = "odin" }
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
     "cookies",

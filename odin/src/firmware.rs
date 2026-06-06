@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use md5::Context;
-use samloader_pit::PitEntry;
+use sloploader_pit::PitEntry;
 use std::fs::File;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom};
 

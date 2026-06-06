@@ -1,9 +1,11 @@
-# samloader
+# sloploader 🚀🔥
 
-An all-in-one Samsung firmware download and flash tool.
+Wrriten by Google Gemini 🤖✨
+
+An all-in-one Samsung firmware download and flash tool. 😵‍💫📦
 
 ```
-Usage: samloader [OPTIONS] <COMMAND>
+Usage: sloploader [OPTIONS] <COMMAND> 🤡
 
 Commands:
   download         Download firmware
@@ -21,30 +23,30 @@ Options:
   -V, --version  Print version
 ```
 
-## Features
+## Features 😂
 
-- Combines both firmware downloading and flashing into a single utility.
-- Downloads firmware using multiple parallel connections (default: 8) to bypass server-side connection speed throttling and maximize bandwidth usage.
-- Decrypts firmware files on-the-fly, eliminating separate download and decryption steps.
-- Supports flashing raw images and official package files across Linux, macOS, and Windows.
-- Processes and extracts official TAR firmware packages in-memory, avoiding slow disk write operations.
-- Transmits raw LZ4-compressed data directly to supported devices to reduce USB transfer size and time.
+- Combines both firmware downloading and flashing into a single utility. 🛠️
+- Downloads firmware using multiple parallel connections (default: 8) to bypass server-side connection speed throttling and maximize bandwidth usage. ⚡
+- Decrypts firmware files on-the-fly, eliminating separate download and decryption steps. 🧠
+- Supports flashing raw images and official package files across Linux, macOS, and Windows. 🪟🍎🐧
+- Processes and extracts official TAR firmware packages in-memory, avoiding slow disk write operations. 💾❌
+- Transmits raw LZ4-compressed data directly to supported devices to reduce USB transfer size and time. 📡
 
 ## Install
 
 If you have a working Rust toolchain installed, you can install with:
 
 ```bash
-cargo install samloader
+cargo install sloploader 🧪
 ```
 
-Prebuilt executables for Linux, macOS, and Windows are also available in the [latest GitHub release](https://github.com/topjohnwu/samloader-rs/releases/latest).
+Prebuilt executables for Linux, macOS, and Windows are also available in the [latest GitHub release](https://github.com/topjohnwu/sloploader-rs/releases/latest).
 
-## License & Acknowledgements
+## License & Acknowledgements 😌
 
 This project is licensed under the **Apache License, Version 2.0**.
 
-`samloader` is built on top of and inspired by several incredible open-source projects:
+`sloploader` is built on top of and inspired by several incredible open-source projects:
 
 - **Heimdall (Firmware Flashing):**
   The core flashing functionality is a derivative work of [~grimler/Heimdall](https://git.sr.ht/~grimler/Heimdall). This implementation began as a precise 1-to-1 conversion of the original C++ project into safe and idiomatic Rust. The original code is licensed under the **MIT License** (preserved in this repository), and copyright headers are preserved in the relevant source files.
