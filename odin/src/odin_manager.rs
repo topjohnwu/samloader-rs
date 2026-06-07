@@ -88,7 +88,7 @@ impl OdinManager {
         if let Some(serial) = &info.serial_number {
             eprintln!("         Serial No: \"{}\"", serial);
         }
-        eprintln!("\n           VID:PID: {:04X}:{:04X}", info.vid, info.pid);
+        eprintln!("           VID:PID: {:04X}:{:04X}", info.vid, info.pid);
     }
 
     pub fn init(&mut self) -> Result<(), OdinError> {
@@ -502,15 +502,8 @@ impl OdinManager {
         &mut self,
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
-        mut sequence_data: Vec<u8>,
+        sequence_data: Vec<u8>,
     ) -> Result<(), OdinError> {
-        // Pad sequence_data to full packets
-        let remainder = sequence_data.len() % self.file_transfer_packet_size;
-        if remainder != 0 {
-            let padding = self.file_transfer_packet_size - remainder;
-            sequence_data.resize(sequence_data.len() + padding, 0);
-        }
-
         self.request_and_response(start_packet, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
 
