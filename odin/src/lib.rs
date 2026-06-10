@@ -25,4 +25,4 @@ pub use firmware::{
 };
 pub use odin::{OdinManager, reboot_download};
 pub use rusb;
-pub use usb::{UsbManager, find_download_mode_device};
+pub use usb::{RusbBackend, UsbBackend, UsbTransfer};

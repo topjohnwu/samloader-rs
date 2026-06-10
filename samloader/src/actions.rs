@@ -14,13 +14,13 @@
 // limitations under the License.
 
 use crate::print_error;
-use samloader_odin::{OdinManager, UsbManager, find_download_mode_device, verify_md5_footer};
+use samloader_odin::{OdinManager, RusbBackend, UsbBackend, verify_md5_footer};
 use samloader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
 pub(crate) fn action_detect(_verbose: bool, wait: bool) -> i32 {
-    if find_download_mode_device(wait).is_ok() {
+    if RusbBackend::find_device(wait).is_ok() {
         println!("Device detected");
         0
     } else {
@@ -45,7 +45,7 @@ pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
     };
 
     // Download PIT file from device.
-    let usb = match UsbManager::new(verbose, wait) {
+    let usb = match RusbBackend::new(verbose, wait) {
         Ok(u) => u,
         Err(e) => {
             print_error!("{}", e);
@@ -114,7 +114,7 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool) -> i32 {
             }
         }
     } else {
-        let usb = match UsbManager::new(verbose, wait) {
+        let usb = match RusbBackend::new(verbose, wait) {
             Ok(u) => u,
             Err(e) => {
                 print_error!("{}", e);

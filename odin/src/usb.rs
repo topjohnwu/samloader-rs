@@ -37,7 +37,19 @@ const SUPPORTED_DEVICES: &[(u16, u16)] = &[
 
 const USB_CLASS_CDC_DATA: u8 = 0x0A;
 
-pub struct UsbManager {
+pub trait UsbTransfer {
+    fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool;
+    fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32;
+}
+
+pub trait UsbBackend: Sized + UsbTransfer {
+    type UsbDevice;
+
+    fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError>;
+    fn find_device(wait: bool) -> Result<Self::UsbDevice, OdinError>;
+}
+
+pub struct RusbBackend {
     verbose: bool,
     handle: DeviceHandle<Context>,
 
@@ -46,9 +58,55 @@ pub struct UsbManager {
     out_endpoint: u8,
 }
 
-impl UsbManager {
-    pub fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError> {
-        let device = find_download_mode_device(wait_for_device)?;
+impl RusbBackend {
+    fn print_device_info(device: &rusb::Device<Context>, handle: &DeviceHandle<Context>) {
+        if let Ok(descriptor) = device.device_descriptor() {
+            if let Ok(languages) = handle.read_languages(Duration::from_secs(1))
+                && !languages.is_empty()
+            {
+                if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
+                    eprintln!("      Manufacturer: \"{}\"", manufacturer);
+                }
+                if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
+                    eprintln!("           Product: \"{}\"", product);
+                }
+                if let Ok(serial) = handle.read_serial_number_string_ascii(&descriptor) {
+                    eprintln!("         Serial No: \"{}\"", serial);
+                }
+            }
+
+            eprintln!("\n            length: {}", descriptor.length());
+            eprintln!("      device class: {}", descriptor.class_code());
+            eprintln!(
+                "               S/N: {}",
+                descriptor.serial_number_string_index().unwrap_or(0)
+            );
+            eprintln!(
+                "           VID:PID: {:04X}:{:04X}",
+                descriptor.vendor_id(),
+                descriptor.product_id()
+            );
+
+            let version = descriptor.device_version();
+            let bcd = (version.0 as u16) << 8 | (version.1 as u16) << 4 | (version.2 as u16);
+            eprintln!("         bcdDevice: {:04X}", bcd);
+
+            eprintln!(
+                "   iMan:iProd:iSer: {}:{}:{}",
+                descriptor.manufacturer_string_index().unwrap_or(0),
+                descriptor.product_string_index().unwrap_or(0),
+                descriptor.serial_number_string_index().unwrap_or(0)
+            );
+            eprintln!("          nb confs: {}", descriptor.num_configurations());
+        }
+    }
+}
+
+impl UsbBackend for RusbBackend {
+    type UsbDevice = rusb::Device<Context>;
+
+    fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError> {
+        let device = Self::find_device(wait_for_device)?;
 
         let handle = match device.open() {
             Ok(h) => h,
@@ -146,49 +204,43 @@ impl UsbManager {
         })
     }
 
-    fn print_device_info(device: &rusb::Device<Context>, handle: &DeviceHandle<Context>) {
-        if let Ok(descriptor) = device.device_descriptor() {
-            if let Ok(languages) = handle.read_languages(Duration::from_secs(1))
-                && !languages.is_empty()
-            {
-                if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
-                    eprintln!("      Manufacturer: \"{}\"", manufacturer);
-                }
-                if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
-                    eprintln!("           Product: \"{}\"", product);
-                }
-                if let Ok(serial) = handle.read_serial_number_string_ascii(&descriptor) {
-                    eprintln!("         Serial No: \"{}\"", serial);
+    fn find_device(wait: bool) -> Result<Self::UsbDevice, OdinError> {
+        let context = Context::new().map_err(|e| {
+            OdinError::SerialError(format!("Failed to create libusb context: {}", e))
+        })?;
+
+        if wait {
+            println!("Waiting for device...");
+        } else {
+            println!("Detecting device...");
+        }
+
+        loop {
+            if let Ok(devices) = context.devices() {
+                for device in devices.iter() {
+                    if let Ok(descriptor) = device.device_descriptor() {
+                        for &(vid, pid) in SUPPORTED_DEVICES {
+                            if descriptor.vendor_id() == vid && descriptor.product_id() == pid {
+                                return Ok(device);
+                            }
+                        }
+                    }
                 }
             }
 
-            eprintln!("\n            length: {}", descriptor.length());
-            eprintln!("      device class: {}", descriptor.class_code());
-            eprintln!(
-                "               S/N: {}",
-                descriptor.serial_number_string_index().unwrap_or(0)
-            );
-            eprintln!(
-                "           VID:PID: {:04X}:{:04X}",
-                descriptor.vendor_id(),
-                descriptor.product_id()
-            );
-
-            let version = descriptor.device_version();
-            let bcd = (version.0 as u16) << 8 | (version.1 as u16) << 4 | (version.2 as u16);
-            eprintln!("         bcdDevice: {:04X}", bcd);
-
-            eprintln!(
-                "   iMan:iProd:iSer: {}:{}:{}",
-                descriptor.manufacturer_string_index().unwrap_or(0),
-                descriptor.product_string_index().unwrap_or(0),
-                descriptor.serial_number_string_index().unwrap_or(0)
-            );
-            eprintln!("          nb confs: {}", descriptor.num_configurations());
+            if wait {
+                std::thread::sleep(Duration::from_secs(1));
+            } else {
+                break;
+            }
         }
-    }
 
-    pub fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool {
+        Err(OdinError::DeviceNotFound)
+    }
+}
+
+impl UsbTransfer for RusbBackend {
+    fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool {
         let max_attempts = if retry { 6 } else { 1 };
         for attempt in 0..max_attempts {
             if attempt > 0 {
@@ -219,7 +271,7 @@ impl UsbManager {
         false
     }
 
-    pub fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32 {
+    fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32 {
         let max_attempts = if retry { 6 } else { 1 };
 
         for attempt in 0..max_attempts {
@@ -251,7 +303,7 @@ impl UsbManager {
     }
 }
 
-impl Drop for UsbManager {
+impl Drop for RusbBackend {
     fn drop(&mut self) {
         println!("Releasing device interface...");
         let _ = self.handle.release_interface(self.interface_index as u8);
@@ -261,37 +313,4 @@ impl Drop for UsbManager {
             let _ = self.handle.attach_kernel_driver(self.interface_index as u8);
         }
     }
-}
-
-pub fn find_download_mode_device(wait: bool) -> Result<rusb::Device<Context>, OdinError> {
-    let context = Context::new()
-        .map_err(|e| OdinError::SerialError(format!("Failed to create libusb context: {}", e)))?;
-
-    if wait {
-        println!("Waiting for device...");
-    } else {
-        println!("Detecting device...");
-    }
-
-    loop {
-        if let Ok(devices) = context.devices() {
-            for device in devices.iter() {
-                if let Ok(descriptor) = device.device_descriptor() {
-                    for &(vid, pid) in SUPPORTED_DEVICES {
-                        if descriptor.vendor_id() == vid && descriptor.product_id() == pid {
-                            return Ok(device);
-                        }
-                    }
-                }
-            }
-        }
-
-        if wait {
-            std::thread::sleep(Duration::from_secs(1));
-        } else {
-            break;
-        }
-    }
-
-    Err(OdinError::DeviceNotFound)
 }

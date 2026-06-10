@@ -16,13 +16,13 @@
 use crate::error::OdinError;
 use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
-use crate::usb::UsbManager;
+use crate::usb::UsbTransfer;
 use samloader_pit::BinaryType;
 use std::time::Duration;
 
 pub struct OdinManager {
     verbose: bool,
-    usb: UsbManager,
+    usb: Box<dyn UsbTransfer>,
 
     file_transfer_sequence_max_length: usize,
     file_transfer_packet_size: usize,
@@ -35,10 +35,10 @@ const FILE_TRANSFER_PACKET_SIZE_DEFAULT: usize = 0x20000;
 const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
 
 impl OdinManager {
-    pub fn new(usb: UsbManager, verbose: bool) -> Self {
+    pub fn new(usb: impl UsbTransfer + 'static, verbose: bool) -> Self {
         Self {
             verbose,
-            usb,
+            usb: Box::new(usb),
 
             file_transfer_sequence_max_length: FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT,
             file_transfer_packet_size: FILE_TRANSFER_PACKET_SIZE_DEFAULT,
