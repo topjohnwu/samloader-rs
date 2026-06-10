@@ -107,6 +107,10 @@ impl OdinManager {
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::EndSessionSendFailed)?;
 
+        Ok(())
+    }
+
+    pub fn reboot_device(&mut self) -> Result<(), OdinError> {
         println!("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();

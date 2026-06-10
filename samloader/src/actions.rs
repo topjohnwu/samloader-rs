@@ -90,6 +90,11 @@ pub(crate) fn action_dump_pit(usb_backend: &str, output: &str, verbose: bool, wa
         success = false;
     }
 
+    if let Err(e) = odin_manager.reboot_device() {
+        print_error!("{}", e);
+        success = false;
+    }
+
     if success { 0 } else { 1 }
 }
 
@@ -163,6 +168,11 @@ pub(crate) fn action_print_pit(usb_backend: &str, file: &str, verbose: bool, wai
         }
 
         if let Err(e) = odin_manager.end_session() {
+            print_error!("{}", e);
+            success = false;
+        }
+
+        if let Err(e) = odin_manager.reboot_device() {
             print_error!("{}", e);
             success = false;
         }

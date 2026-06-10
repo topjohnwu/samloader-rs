@@ -35,6 +35,7 @@ macro_rules! print_error {
 }
 
 const VERBOSE_HELP: &str = "Enable verbose output";
+const NO_REBOOT_HELP: &str = "Disables automatic reboot after flashing.";
 const WAIT_HELP: &str = "Waits until a compatible device is connected.";
 const REPARTITION_HELP: &str = "Repartition the device. WARNING: It's strongly recommended you specify all files at your disposal.";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition.";
@@ -204,6 +205,12 @@ fn main() {
             Command::new("flash")
                 .about(FLASH_ABOUT)
                 .long_about(FLASH_HELP)
+                .arg(
+                    Arg::new("no-reboot")
+                        .long("no-reboot")
+                        .action(ArgAction::SetTrue)
+                        .help(NO_REBOOT_HELP),
+                )
                 .arg(
                     Arg::new("repartition")
                         .long("repartition")
@@ -407,6 +414,7 @@ fn main() {
                 usb_backend,
                 sub_matches.get_flag("repartition"),
                 verbose,
+                !sub_matches.get_flag("no-reboot"),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("skip-size-check"),
                 sub_matches.get_flag("skip-md5"),

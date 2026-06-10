@@ -214,6 +214,7 @@ fn scan_tar_packages(
 fn execute_flash_pipeline(
     mut odin_manager: OdinManager,
     mut partition_infos: Vec<FirmwareInfo>,
+    reboot_device: bool,
 ) -> i32 {
     let total_bytes: u64 = partition_infos
         .iter()
@@ -252,6 +253,13 @@ fn execute_flash_pipeline(
     if let Err(e) = odin_manager.end_session() {
         print_error!("{}", e);
         return 1;
+    }
+
+    if reboot_device {
+        if let Err(e) = odin_manager.reboot_device() {
+            print_error!("{}", e);
+            return 1;
+        }
     }
 
     0
@@ -334,6 +342,7 @@ pub(crate) fn action_flash(
     usb_backend: &str,
     repartition: bool,
     verbose: bool,
+    reboot_device: bool,
     wait: bool,
     skip_size_check: bool,
     skip_md5: bool,
@@ -538,5 +547,5 @@ pub(crate) fn action_flash(
     let partition_infos = unique_partition_infos;
 
     // 7. Execute flash pipeline
-    execute_flash_pipeline(odin_manager, partition_infos)
+    execute_flash_pipeline(odin_manager, partition_infos, reboot_device)
 }
