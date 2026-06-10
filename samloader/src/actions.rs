@@ -14,20 +14,13 @@
 // limitations under the License.
 
 use crate::print_error;
-use samloader_odin::{OdinManager, find_download_mode_device, rusb};
+use samloader_odin::{OdinManager, UsbManager, find_download_mode_device};
 use samloader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
 pub(crate) fn action_detect(_verbose: bool, wait: bool) -> i32 {
-    let context = match rusb::Context::new() {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("ERROR: Failed to create libusb context.");
-            return 1;
-        }
-    };
-    if find_download_mode_device(&context, wait).is_ok() {
+    if find_download_mode_device(wait).is_ok() {
         println!("Device detected");
         0
     } else {
@@ -52,13 +45,14 @@ pub(crate) fn action_dump_pit(output: &str, verbose: bool, wait: bool) -> i32 {
     };
 
     // Download PIT file from device.
-    let mut odin_manager = match OdinManager::new(verbose, wait) {
-        Ok(m) => m,
+    let usb = match UsbManager::new(verbose, wait) {
+        Ok(u) => u,
         Err(e) => {
             print_error!("{}", e);
             return 1;
         }
     };
+    let mut odin_manager = OdinManager::new(usb, verbose);
 
     if let Err(e) = odin_manager.init() {
         print_error!("{}", e);
@@ -120,13 +114,14 @@ pub(crate) fn action_print_pit(file: &str, verbose: bool, wait: bool) -> i32 {
             }
         }
     } else {
-        let mut odin_manager = match OdinManager::new(verbose, wait) {
-            Ok(m) => m,
+        let usb = match UsbManager::new(verbose, wait) {
+            Ok(u) => u,
             Err(e) => {
                 print_error!("{}", e);
                 return 1;
             }
         };
+        let mut odin_manager = OdinManager::new(usb, verbose);
 
         if let Err(e) = odin_manager.init() {
             print_error!("{}", e);

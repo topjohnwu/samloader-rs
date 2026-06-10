@@ -18,7 +18,7 @@ use crate::PartitionArg;
 use crate::print_error;
 use samloader_odin::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
-    TarEntryReader, verify_md5_footer,
+    TarEntryReader, UsbManager, verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -375,13 +375,14 @@ pub(crate) fn action_flash(
     }
 
     // 3. Initialize connection session and parse the PIT data
-    let mut odin_manager = match OdinManager::new(verbose, wait) {
-        Ok(m) => m,
+    let usb = match UsbManager::new(verbose, wait) {
+        Ok(u) => u,
         Err(e) => {
             print_error!("{}", e);
             return 1;
         }
     };
+    let mut odin_manager = OdinManager::new(usb, verbose);
 
     if let Err(e) = odin_manager.init() {
         print_error!("{}", e);

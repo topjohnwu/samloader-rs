@@ -16,11 +16,13 @@ pub mod error;
 pub mod firmware;
 pub mod odin_manager;
 pub mod packets;
+pub mod usb;
 
 pub use error::OdinError;
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, TarEntryReader,
     verify_md5_footer,
 };
-pub use odin_manager::{OdinManager, find_download_mode_device, reboot_download};
+pub use odin_manager::{OdinManager, reboot_download};
 pub use rusb;
+pub use usb::{UsbManager, find_download_mode_device};
