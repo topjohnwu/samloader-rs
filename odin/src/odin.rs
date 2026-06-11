@@ -130,6 +130,11 @@ impl OdinManager {
         Ok(())
     }
 
+    fn receive_empty(&mut self, timeout: i32) {
+        let mut buffer = vec![0u8; 1];
+        self.usb.receive_data(&mut buffer, timeout, false);
+    }
+
     fn receive_string(&mut self, timeout: i32) -> Result<String, OdinError> {
         let mut buffer = [0u8; 1024];
         let received_size = self.usb.receive_data(&mut buffer, timeout, true);
@@ -267,6 +272,10 @@ impl OdinManager {
                 .map_err(|_| OdinError::PitFilePartReceiveFailed(i as u32))?;
             buffer.extend_from_slice(&part.data);
         }
+
+        // Receive empty packet after the last PIT transfer,
+        // this is required for some older devices e.g. Tab S2 VE.
+        self.receive_empty(100);
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
