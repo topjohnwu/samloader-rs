@@ -77,13 +77,25 @@ fn main() {
                 .global(true)
                 .help(VERBOSE_HELP),
         )
+        // On Windows, the default USB backend is set to VCOM rather than libusb.
+        // This is because libusb requires replacing the standard device driver
+        // with a WinUSB/generic driver (e.g., using a utility like Zadig).
+        // This manual driver swap breaks compatibility with the official
+        // Samsung USB drivers, creating a poor user experience.
+        // In contrast, the VCOM (Virtual COM Port/usbser.sys) implementation
+        // on Windows works out-of-the-box, requires no special driver
+        // modifications, and performs extremely fast.
         .arg(
             Arg::new("usb_backend")
                 .long("usb-backend")
                 .global(true)
-                .default_value("libusb")
-                .value_parser(["libusb", "serial"])
-                .help("The USB backend to use (libusb or serial)"),
+                .default_value(if cfg!(target_os = "windows") {
+                    "vcom"
+                } else {
+                    "libusb"
+                })
+                .value_parser(["libusb", "vcom"])
+                .help("The USB backend to use (libusb or vcom)"),
         )
         .subcommand(
             Command::new("download")

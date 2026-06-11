@@ -23,7 +23,7 @@ use std::io::{Read, Write};
 
 pub(crate) fn action_detect(usb_backend: &str, _verbose: bool, wait: bool) -> i32 {
     let detected = match usb_backend {
-        "serial" => SerialBackend::find_device(wait).is_ok(),
+        "vcom" => SerialBackend::find_device(wait).is_ok(),
         _ => RusbBackend::find_device(wait).is_ok(),
     };
     if detected {

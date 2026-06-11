@@ -468,7 +468,7 @@ pub fn create_backend(
     wait: bool,
 ) -> Result<Box<dyn UsbTransfer>, OdinError> {
     match usb_backend {
-        "serial" => {
+        "vcom" => {
             let backend = SerialBackend::new(verbose, wait)?;
             Ok(Box::new(backend))
         }
