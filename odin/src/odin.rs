@@ -17,6 +17,7 @@ use crate::error::OdinError;
 use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
 use crate::usb::UsbTransfer;
+use lz4_flex::block::decompress;
 use samloader_pit::BinaryType;
 use std::time::Duration;
 
@@ -286,10 +287,6 @@ impl OdinManager {
         Ok(buffer)
     }
 
-    pub fn is_lz4_supported(&self) -> bool {
-        self.lz4_supported
-    }
-
     pub fn send_file(&mut self, info: &mut crate::firmware::FirmwareFile) -> Result<(), OdinError> {
         let packet = RequestPacket::file_transfer_flash();
         self.request_and_response(&packet, 3000)
@@ -330,7 +327,11 @@ impl OdinManager {
         &mut self,
         info: &mut crate::firmware::FirmwareLz4File,
     ) -> Result<(), OdinError> {
-        let packet = RequestPacket::lz4_file_transfer_flash();
+        let packet = if self.lz4_supported {
+            RequestPacket::lz4_file_transfer_flash()
+        } else {
+            RequestPacket::file_transfer_flash()
+        };
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
@@ -342,22 +343,73 @@ impl OdinManager {
         );
 
         let mut sequences = sequences.peekable();
-        while let Some((decompressed_size, sequence_data)) = sequences.next() {
-            let start_packet =
-                RequestPacket::flash_lz4_part_file_transfer(sequence_data.len() as u32);
+        while let Some((decompressed_size, mut sequence_data)) = sequences.next() {
+            if !self.lz4_supported {
+                let mut new_sequence_data = Vec::with_capacity(decompressed_size);
+                let mut pos = 0;
+
+                while pos < sequence_data.len() {
+                    let block_size_bytes = &sequence_data[pos..pos + 4];
+                    let block_size = u32::from_le_bytes(block_size_bytes.try_into().unwrap());
+                    pos += block_size_bytes.len();
+
+                    let data_size = (block_size & 0x7FFF_FFFF) as usize;
+                    let data = &sequence_data[pos..pos + data_size];
+                    pos += data.len();
+
+                    let is_compressed = (block_size & 0x8000_0000) == 0;
+
+                    if is_compressed {
+                        new_sequence_data.extend_from_slice(
+                            &decompress(data, info.header.block_max_size).unwrap(),
+                        );
+                    } else {
+                        new_sequence_data.extend_from_slice(data);
+                    }
+                }
+
+                assert_eq!(new_sequence_data.len(), decompressed_size);
+                sequence_data = new_sequence_data;
+            }
+
+            let start_packet = if self.lz4_supported {
+                RequestPacket::flash_lz4_part_file_transfer(sequence_data.len() as u32)
+            } else {
+                RequestPacket::flash_part_file_transfer(sequence_data.len() as u32)
+            };
 
             let is_last_sequence = sequences.peek().is_none();
             let end_packet = match info.pit_entry.binary_type {
-                BinaryType::ApplicationProcessor => RequestPacket::end_lz4_phone_file_transfer(
-                    decompressed_size as u32,
-                    info.pit_entry,
-                    is_last_sequence,
-                ),
-                BinaryType::CommunicationProcessor => RequestPacket::end_lz4_modem_file_transfer(
-                    decompressed_size as u32,
-                    info.pit_entry,
-                    is_last_sequence,
-                ),
+                BinaryType::ApplicationProcessor => {
+                    if self.lz4_supported {
+                        RequestPacket::end_lz4_phone_file_transfer(
+                            decompressed_size as u32,
+                            info.pit_entry,
+                            is_last_sequence,
+                        )
+                    } else {
+                        RequestPacket::end_phone_file_transfer(
+                            decompressed_size as u32,
+                            info.pit_entry,
+                            is_last_sequence,
+                        )
+                    }
+                }
+                BinaryType::CommunicationProcessor => {
+                    if self.lz4_supported {
+                        RequestPacket::end_lz4_modem_file_transfer(
+                            decompressed_size as u32,
+                            info.pit_entry,
+                            is_last_sequence,
+                        )
+                    } else {
+                        RequestPacket::end_modem_file_transfer(
+                            decompressed_size as u32,
+                            info.pit_entry,
+                            is_last_sequence,
+                        )
+                    }
+                }
             };
 
             self.send_file_sequence(&start_packet, &end_packet, sequence_data)?;

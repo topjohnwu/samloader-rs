@@ -12,3 +12,4 @@ binrw = { workspace = true }
 fast-md5 = { workspace = true }
 serialport = { workspace = true }
 thiserror = { workspace = true }
+lz4_flex = { workspace = true }
