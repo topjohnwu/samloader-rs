@@ -54,7 +54,7 @@ pub fn verify_md5_footer(path: &str) -> Result<(), String> {
     let footer_start = null_idx + 1;
     let footer_bytes = &last_bytes[footer_start..];
     let footer_str = String::from_utf8_lossy(footer_bytes);
-    let footer_line = footer_str.trim();
+    let footer_line = footer_str.lines().last().unwrap_or_default();
 
     if footer_line.len() < 32 {
         return Err("Could not find a valid MD5 checksum at the end of the file".to_string());
@@ -69,7 +69,7 @@ pub fn verify_md5_footer(path: &str) -> Result<(), String> {
     }
 
     // The payload size is the exact position up to the MD5 footer text
-    let payload_size = seek_pos + footer_start as u64;
+    let payload_size = file_size - footer_line.len() as u64 - 1;
 
     // Reset file pointer and compute MD5 over the payload only
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
