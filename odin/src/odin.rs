@@ -50,6 +50,8 @@ impl OdinManager {
     pub fn init(&mut self) -> Result<(), OdinError> {
         println!("Initializing protocol...");
 
+        self.usb.reset_device();
+
         self.send_string("ODIN", 1000)
             .map_err(|_| OdinError::HandshakeSendFailed)?;
 

@@ -39,6 +39,7 @@ const SUPPORTED_DEVICES: &[(u16, u16)] = &[
 const USB_CLASS_CDC_DATA: u8 = 0x0A;
 
 pub trait UsbTransfer {
+    fn reset_device(&mut self) {}
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool;
     fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32;
 }
@@ -241,6 +242,16 @@ impl UsbBackend for RusbBackend {
 }
 
 impl UsbTransfer for RusbBackend {
+    fn reset_device(&mut self) {
+        if self.verbose {
+            eprintln!("Resetting device...");
+        }
+
+        if let Err(err) = self.handle.reset() {
+            print_warning!("libusb error {} whilst resetting device.", err);
+        }
+    }
+
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool {
         let max_attempts = if retry { 6 } else { 1 };
         for attempt in 0..max_attempts {
