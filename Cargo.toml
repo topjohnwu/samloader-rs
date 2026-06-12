@@ -17,7 +17,7 @@ repository = "https://github.com/topjohnwu/samloader-rs"
 samloader-fus = { version = "1.2.0", path = "fus" }
 samloader-pit = { version = "1.2.0", path = "pit" }
 samloader-odin = { version = "1.2.0", path = "odin" }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "cookies"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "cookies", "default-tls"] }
 aes = "0.9"
 ecb = "0.2"
 roxmltree = "0.21"
