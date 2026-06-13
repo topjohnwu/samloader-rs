@@ -31,6 +31,14 @@ pub struct OdinManager {
     bootloader_protocol_version: u32,
 }
 
+#[derive(PartialEq, Eq, Copy, Clone)]
+pub enum EmptySendKind {
+    None,
+    Before,
+    After,
+    BeforeAndAfter,
+}
+
 const FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT: usize = 800;
 const FILE_TRANSFER_PACKET_SIZE_DEFAULT: usize = 0x20000;
 const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
@@ -75,7 +83,7 @@ impl OdinManager {
 
         let packet = RequestPacket::begin_session();
         let session_response = self
-            .request_and_response(&packet, 3000)
+            .request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::BeginSessionFailed)?;
 
         self.bootloader_protocol_version = if session_response == 0 {
@@ -95,7 +103,7 @@ impl OdinManager {
 
             let packet = RequestPacket::file_part_size(self.file_transfer_packet_size as u32);
             let value = self
-                .request_and_response(&packet, 3000)
+                .request_and_response(&packet, EmptySendKind::After, 3000)
                 .map_err(|_| OdinError::FilePartSizeSendFailed)?;
 
             if value != 0 {
@@ -111,7 +119,7 @@ impl OdinManager {
         println!("Ending session...");
 
         let packet = RequestPacket::end_session();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::EndSessionSendFailed)?;
 
         Ok(())
@@ -121,7 +129,7 @@ impl OdinManager {
         println!("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::RebootDeviceSendFailed)?;
 
         Ok(())
@@ -161,14 +169,25 @@ impl OdinManager {
     fn send_packet(
         &mut self,
         packet: &(impl packets::OutboundPacket + std::fmt::Debug),
+        empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<(), ()> {
         if self.verbose {
             eprintln!("Sending packet: {:#04X?}", packet);
         }
         let packet_bytes = packet.pack();
+        if empty_send_kind == EmptySendKind::Before
+            || empty_send_kind == EmptySendKind::BeforeAndAfter
+        {
+            self.usb.send_data(&[], 100, false);
+        }
         if !self.usb.send_data(&packet_bytes, timeout, true) {
             return Err(());
+        }
+        if empty_send_kind == EmptySendKind::After
+            || empty_send_kind == EmptySendKind::BeforeAndAfter
+        {
+            self.usb.send_data(&[], 100, false);
         }
         Ok(())
     }
@@ -203,9 +222,10 @@ impl OdinManager {
     fn request_and_response(
         &mut self,
         packet: &RequestPacket,
+        empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<u32, OdinError> {
-        self.send_packet(packet, timeout)
+        self.send_packet(packet, empty_send_kind, timeout)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
         let response = self.receive_packet::<packets::Response>(timeout)?;
@@ -226,17 +246,17 @@ impl OdinManager {
 
         // Start file transfer
         let packet = RequestPacket::pit_file_flash();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFileTransferInitFailed)?;
 
         // Transfer file size
         let packet = RequestPacket::flash_part_pit_file(pit_buffer_size);
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFilePartInfoSendFailed)?;
 
         // Flash pit file
         let packet = packets::FilePartPacket::new(pit_buffer, pit_buffer_size);
-        self.send_packet(&packet, 3000)
+        self.send_packet(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
         let response = self.receive_packet::<packets::Response>(3000)?;
@@ -250,7 +270,7 @@ impl OdinManager {
 
         // End pit file transfer
         let packet = RequestPacket::end_pit_file_transfer(pit_buffer_size);
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFileTransferEndSendFailed)?;
 
         Ok(())
@@ -261,7 +281,7 @@ impl OdinManager {
 
         let packet = RequestPacket::pit_file_dump();
         let file_size = self
-            .request_and_response(&packet, 3000)
+            .request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFileSizeReceiveFailed)? as usize;
 
         let transfer_count = file_size.div_ceil(PitDataPacket::SIZE);
@@ -269,7 +289,7 @@ impl OdinManager {
 
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_pit_file(i as u32);
-            self.send_packet(&packet, 3000)
+            self.send_packet(&packet, EmptySendKind::After, 3000)
                 .map_err(|_| OdinError::PitFilePartRequestFailed(i as u32))?;
 
             let expected_size = std::cmp::min(file_size - buffer.len(), PitDataPacket::SIZE);
@@ -286,7 +306,7 @@ impl OdinManager {
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFileEndSendFailed)?;
 
         println!("PIT file download successful.\n");
@@ -311,7 +331,7 @@ impl OdinManager {
         Iter: Iterator<Item = Bytes>,
     {
         let packet = RequestPacket::file_transfer_flash();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let mut sequences = sequences.peekable();
@@ -357,7 +377,7 @@ impl OdinManager {
         }
 
         let packet = RequestPacket::lz4_file_transfer_flash();
-        self.request_and_response(&packet, 3000)
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let sequences =
@@ -394,7 +414,7 @@ impl OdinManager {
         end_packet: &RequestPacket,
         sequence_data: &[u8],
     ) -> Result<(), OdinError> {
-        self.request_and_response(start_packet, 3000)
+        self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
 
         for (file_part_index, file_buffer) in sequence_data
@@ -412,7 +432,13 @@ impl OdinManager {
                     self.file_transfer_packet_size as u32,
                 );
 
-                if self.send_packet(&packet, 3000).is_err() {
+                let empty_send_kind = if file_part_index == 0 {
+                    EmptySendKind::None
+                } else {
+                    EmptySendKind::Before
+                };
+
+                if self.send_packet(&packet, empty_send_kind, 3000).is_err() {
                     continue;
                 }
 
@@ -441,8 +467,12 @@ impl OdinManager {
             }
         }
 
-        self.request_and_response(end_packet, self.file_transfer_sequence_timeout as i32)
-            .map_err(|_| OdinError::FileTransferSequenceEndFailed)?;
+        self.request_and_response(
+            end_packet,
+            EmptySendKind::BeforeAndAfter,
+            self.file_transfer_sequence_timeout as i32,
+        )
+        .map_err(|_| OdinError::FileTransferSequenceEndFailed)?;
 
         Ok(())
     }
@@ -450,7 +480,7 @@ impl OdinManager {
     pub fn set_total_bytes(&mut self, total_bytes: u64) -> Result<(), OdinError> {
         let packet = RequestPacket::total_bytes(total_bytes);
         let value = self
-            .request_and_response(&packet, 3000)
+            .request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::TotalBytesSendFailed)?;
 
         if value != 0 {
