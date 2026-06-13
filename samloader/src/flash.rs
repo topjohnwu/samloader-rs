@@ -255,11 +255,9 @@ fn execute_flash_pipeline(
         return 1;
     }
 
-    if reboot_device {
-        if let Err(e) = odin_manager.reboot_device() {
-            print_error!("{}", e);
-            return 1;
-        }
+    if reboot_device && let Err(e) = odin_manager.reboot_device() {
+        print_error!("{}", e);
+        return 1;
     }
 
     0
