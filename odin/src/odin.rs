@@ -290,16 +290,15 @@ impl OdinManager {
         self.lz4_supported
     }
 
-    pub fn send_file(&mut self, info: &mut crate::firmware::FirmwareFile) -> Result<(), OdinError> {
+    pub fn send_file(&mut self, info: &crate::firmware::FirmwareFile) -> Result<(), OdinError> {
         let packet = RequestPacket::file_transfer_flash();
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let sequences = crate::firmware::SequenceIterator::new(
-            &mut info.file,
+            &info.file,
             info.file_size,
-            self.file_transfer_packet_size,
-            self.file_transfer_sequence_max_length,
+            self.file_transfer_packet_size * self.file_transfer_sequence_max_length,
         );
 
         let mut sequences = sequences.peekable();
@@ -328,17 +327,16 @@ impl OdinManager {
 
     pub fn send_lz4_file(
         &mut self,
-        info: &mut crate::firmware::FirmwareLz4File,
+        info: &crate::firmware::FirmwareLz4File,
     ) -> Result<(), OdinError> {
         let packet = RequestPacket::lz4_file_transfer_flash();
         self.request_and_response(&packet, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let sequences = crate::firmware::Lz4SequenceIterator::new(
-            &mut info.file,
+            &info.file,
             &info.header,
-            self.file_transfer_packet_size,
-            self.file_transfer_sequence_max_length,
+            self.file_transfer_packet_size * self.file_transfer_sequence_max_length,
         );
 
         let mut sequences = sequences.peekable();

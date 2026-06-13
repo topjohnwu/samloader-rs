@@ -1391,6 +1391,7 @@ version = "1.2.0"
 dependencies = [
  "binrw",
  "fast-md5",
+ "memmap2",
  "rusb",
  "samloader-pit",
  "serialport",

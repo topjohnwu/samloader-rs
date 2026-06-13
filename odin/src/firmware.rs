@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use fast_md5::Md5;
+use memmap2::Mmap;
 use samloader_pit::PitEntry;
 use std::fs::File;
-use std::io::{Read, Result as IoResult, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
+
+// This is asserted by Lz4FrameHeader so the header size is always 15
+const LZ4_HEADER_SIZE: usize = 15;
 
 pub fn verify_md5_footer(path: &str) -> Result<(), String> {
     let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
@@ -93,101 +97,6 @@ pub fn verify_md5_footer(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub struct TarEntryReader {
-    file: File,
-    start_offset: u64,
-    size: u64,
-    current_offset: u64,
-}
-
-impl TarEntryReader {
-    pub fn new(mut file: File, start_offset: u64, size: u64) -> IoResult<Self> {
-        file.seek(SeekFrom::Start(start_offset))?;
-        Ok(Self {
-            file,
-            start_offset,
-            size,
-            current_offset: 0,
-        })
-    }
-}
-
-impl Read for TarEntryReader {
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        if self.current_offset >= self.size {
-            return Ok(0);
-        }
-        let remaining = self.size - self.current_offset;
-        let max_to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
-        let bytes_read = self.file.read(&mut buf[..max_to_read])?;
-        self.current_offset += bytes_read as u64;
-        Ok(bytes_read)
-    }
-}
-
-impl Seek for TarEntryReader {
-    fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
-        let new_offset = match pos {
-            SeekFrom::Start(offset) => offset,
-            SeekFrom::End(offset) => {
-                let target = (self.size as i64) + offset;
-                if target < 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "invalid seek to a negative offset",
-                    ));
-                }
-                target as u64
-            }
-            SeekFrom::Current(offset) => {
-                let target = (self.current_offset as i64) + offset;
-                if target < 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "invalid seek to a negative offset",
-                    ));
-                }
-                target as u64
-            }
-        };
-
-        if new_offset > self.size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "seek past end of tar entry",
-            ));
-        }
-
-        self.file
-            .seek(SeekFrom::Start(self.start_offset + new_offset))?;
-        self.current_offset = new_offset;
-        Ok(self.current_offset)
-    }
-}
-
-pub enum FirmwareSource {
-    File(File),
-    Tar(TarEntryReader),
-}
-
-impl Read for FirmwareSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            FirmwareSource::File(f) => f.read(buf),
-            FirmwareSource::Tar(r) => r.read(buf),
-        }
-    }
-}
-
-impl Seek for FirmwareSource {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        match self {
-            FirmwareSource::File(f) => f.seek(pos),
-            FirmwareSource::Tar(r) => r.seek(pos),
-        }
-    }
-}
-
 pub struct Lz4FrameHeader {
     pub content_size: u64,
     pub block_max_size: usize,
@@ -232,6 +141,9 @@ impl Lz4FrameHeader {
         if !block_independence {
             return Err("LZ4 block independence must be enabled".to_string());
         }
+        if dict_id_flag {
+            return Err("LZ4 dictionary ID must be disabled".to_string());
+        }
 
         let mut bd_byte = [0u8; 1];
         reader
@@ -259,13 +171,6 @@ impl Lz4FrameHeader {
             .map_err(|_| "Failed to read content size")?;
         let content_size = u64::from_le_bytes(content_size_bytes);
 
-        if dict_id_flag {
-            let mut dict_id_bytes = [0u8; 4];
-            reader
-                .read_exact(&mut dict_id_bytes)
-                .map_err(|_| "Failed to read dictionary ID")?;
-        }
-
         let mut hc_byte = [0u8; 1];
         reader
             .read_exact(&mut hc_byte)
@@ -280,13 +185,13 @@ impl Lz4FrameHeader {
 
 pub struct FirmwareFile<'a> {
     pub pit_entry: &'a PitEntry,
-    pub file: FirmwareSource,
+    pub file: Mmap,
     pub file_size: u64,
 }
 
 pub struct FirmwareLz4File<'a> {
     pub pit_entry: &'a PitEntry,
-    pub file: FirmwareSource,
+    pub file: Mmap,
     pub header: Lz4FrameHeader,
 }
 
@@ -296,10 +201,9 @@ pub enum FirmwareInfo<'a> {
 }
 
 pub(crate) struct SequenceIterator<'a> {
-    file: &'a mut FirmwareSource,
+    file: &'a Mmap,
     file_size: u64,
-    packet_size: usize,
-    sequence_max_length: usize,
+    sequence_max_bytes: usize,
     bytes_read: u64,
 }
 
@@ -312,15 +216,11 @@ impl<'a> Iterator for SequenceIterator<'a> {
         }
 
         let remaining = self.file_size - self.bytes_read;
-        let sequence_byte_count = std::cmp::min(
-            remaining,
-            (self.sequence_max_length * self.packet_size) as u64,
-        ) as usize;
+        let sequence_byte_count = std::cmp::min(remaining, self.sequence_max_bytes as u64) as usize;
 
-        let mut data = vec![0u8; sequence_byte_count];
-        if self.file.read_exact(&mut data).is_err() {
-            return None;
-        }
+        let start = self.bytes_read as usize;
+        let end = start + sequence_byte_count;
+        let data = self.file[start..end].to_vec();
 
         self.bytes_read += sequence_byte_count as u64;
 
@@ -329,44 +229,38 @@ impl<'a> Iterator for SequenceIterator<'a> {
 }
 
 impl<'a> SequenceIterator<'a> {
-    pub(crate) fn new(
-        file: &'a mut FirmwareSource,
-        file_size: u64,
-        packet_size: usize,
-        sequence_max_length: usize,
-    ) -> Self {
+    pub(crate) fn new(file: &'a Mmap, file_size: u64, sequence_max_bytes: usize) -> Self {
         Self {
             file,
             file_size,
-            packet_size,
-            sequence_max_length,
+            sequence_max_bytes,
             bytes_read: 0,
         }
     }
 }
 
 pub(crate) struct Lz4SequenceIterator<'a> {
-    file: &'a mut FirmwareSource,
+    file: &'a Mmap,
     header: &'a Lz4FrameHeader,
-    packet_size: usize,
-    sequence_max_length: usize,
+    sequence_max_bytes: usize,
     remaining_decompressed: u64,
+    bytes_read: usize,
     finished: bool,
 }
 
 impl<'a> Lz4SequenceIterator<'a> {
     pub(crate) fn new(
-        file: &'a mut FirmwareSource,
+        file: &'a Mmap,
         header: &'a Lz4FrameHeader,
-        packet_size: usize,
-        sequence_max_length: usize,
+        sequence_max_bytes: usize,
     ) -> Self {
         Self {
             file,
             header,
-            packet_size,
-            sequence_max_length,
+            sequence_max_bytes,
             remaining_decompressed: header.content_size,
+            // We skip the header, and start with reading blocks
+            bytes_read: LZ4_HEADER_SIZE,
             finished: false,
         }
     }
@@ -380,51 +274,53 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
             return None;
         }
 
-        let sequence_bytes = self.sequence_max_length * self.packet_size;
-        let next_decompressed_size = if self.remaining_decompressed >= sequence_bytes as u64 {
-            sequence_bytes
-        } else {
-            self.remaining_decompressed as usize
-        };
+        let next_decompressed_size =
+            std::cmp::min(self.remaining_decompressed, self.sequence_max_bytes as u64) as usize;
         self.remaining_decompressed -= next_decompressed_size as u64;
 
         let mut decompressed_size_upper_bound = 0;
-        let mut sequence_data = Vec::new();
+        let start_pos = self.bytes_read;
+        let mut end_pos = start_pos;
 
         loop {
-            let mut block_size_bytes = [0u8; 4];
-            if self.file.read_exact(&mut block_size_bytes).is_err() {
+            if self.bytes_read + 4 > self.file.len() {
                 self.finished = true;
                 break;
             }
-            let block_size = u32::from_le_bytes(block_size_bytes);
+            let block_size = u32::from_le_bytes(
+                self.file[self.bytes_read..self.bytes_read + 4]
+                    .try_into()
+                    .unwrap(),
+            );
 
             if block_size == 0 {
-                // EndMark
+                self.bytes_read += 4; // Advance past EndMark
                 self.finished = true;
                 break;
             }
-
-            decompressed_size_upper_bound += self.header.block_max_size;
-            sequence_data.extend_from_slice(&block_size_bytes);
 
             let data_size = (block_size & 0x7FFF_FFFF) as usize;
-            let mut data = vec![0u8; data_size];
-            if self.file.read_exact(&mut data).is_err() {
+            if self.bytes_read + 4 + data_size > self.file.len() {
                 self.finished = true;
                 break;
             }
-            sequence_data.extend_from_slice(&data);
+
+            self.bytes_read += 4 + data_size;
+            end_pos = self.bytes_read;
+            decompressed_size_upper_bound += self.header.block_max_size;
 
             if decompressed_size_upper_bound >= next_decompressed_size {
                 break;
             }
         }
 
-        if sequence_data.is_empty() {
+        if start_pos == end_pos {
             return None;
         }
 
-        Some((next_decompressed_size, sequence_data))
+        Some((
+            next_decompressed_size,
+            self.file[start_pos..end_pos].to_vec(),
+        ))
     }
 }

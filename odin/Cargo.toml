@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 samloader-pit = { workspace = true }
+memmap2 = { workspace = true }
 rusb = { workspace = true }
 binrw = { workspace = true }
 fast-md5 = { workspace = true }

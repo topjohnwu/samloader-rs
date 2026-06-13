@@ -16,9 +16,10 @@
 
 use crate::PartitionArg;
 use crate::print_error;
+use memmap2::{Mmap, MmapOptions};
 use samloader_odin::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, FirmwareSource, Lz4FrameHeader, OdinManager,
-    TarEntryReader, create_backend, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, OdinManager, create_backend,
+    verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -28,11 +29,9 @@ use std::path::Path;
 use tar::Archive;
 
 struct IndexedEntry {
-    package_path: String,
     original_name: String,
     normalized_name: String,
-    offset: u64,
-    size: u64,
+    mmap: Mmap,
     is_lz4: bool,
 }
 
@@ -81,7 +80,7 @@ fn scan_tar_packages(
             }
         };
 
-        let mut archive = Archive::new(file);
+        let mut archive = Archive::new(&file);
         let entries = match archive.entries() {
             Ok(e) => e,
             Err(e) => {
@@ -130,12 +129,27 @@ fn scan_tar_packages(
                     archives_download_lists.push(download_list);
                 }
             } else {
+                let mmap = match unsafe {
+                    MmapOptions::new()
+                        .offset(offset)
+                        .len(size as usize)
+                        .map(&file)
+                } {
+                    Ok(m) => m,
+                    Err(_) => {
+                        print_error!(
+                            "Failed to memory map entry \"{}\" in package \"{}\"",
+                            entry_path,
+                            pkg
+                        );
+                        return Err(1);
+                    }
+                };
+
                 package_entries.push(IndexedEntry {
-                    package_path: pkg.clone(),
                     original_name: entry_path,
                     normalized_name,
-                    offset,
-                    size,
+                    mmap,
                     is_lz4,
                 });
             }
@@ -183,29 +197,7 @@ fn scan_tar_packages(
     let mut local_pit_file = None;
 
     if let Some(entry) = pit_entry {
-        let f = match File::open(&entry.package_path) {
-            Ok(file) => file,
-            Err(_) => {
-                print_error!(
-                    "Failed to open package containing PIT \"{}\"",
-                    entry.package_path
-                );
-                return Err(1);
-            }
-        };
-        match TarEntryReader::new(f, entry.offset, entry.size) {
-            Ok(reader) => {
-                let mut buffer = vec![0u8; entry.size as usize];
-                let mut r = reader;
-                if r.read_exact(&mut buffer).is_ok() {
-                    local_pit_file = Some(buffer);
-                }
-            }
-            Err(_) => {
-                print_error!("Failed to extract PIT from archive");
-                return Err(1);
-            }
-        }
+        local_pit_file = Some(entry.mmap.to_vec());
     }
 
     Ok((resolved_entries, local_pit_file))
@@ -271,7 +263,7 @@ fn find_pit_entry_by_filename<'a>(pit_data: &'a PitData, filename: &str) -> Opti
 }
 
 fn create_firmware_info<'a>(
-    mut source: FirmwareSource,
+    mmap: Mmap,
     source_size: u64,
     is_lz4_suffix: bool,
     pit_entry: &'a PitEntry,
@@ -279,8 +271,9 @@ fn create_firmware_info<'a>(
     skip_size_check: bool,
     file_display_name: &str,
 ) -> Option<FirmwareInfo<'a>> {
+    let mut slice = &mmap[..];
     let lz4_hdr = if is_lz4_suffix {
-        match Lz4FrameHeader::from_read(&mut source) {
+        match Lz4FrameHeader::from_read(&mut slice) {
             Ok(header) => Some(header),
             Err(e) => {
                 print_error!(
@@ -323,13 +316,13 @@ fn create_firmware_info<'a>(
     if let Some(header) = lz4_hdr {
         Some(FirmwareInfo::Lz4(FirmwareLz4File {
             pit_entry,
-            file: source,
+            file: mmap,
             header,
         }))
     } else {
         Some(FirmwareInfo::Normal(FirmwareFile {
             pit_entry,
-            file: source,
+            file: mmap,
             file_size: source_size,
         }))
     }
@@ -432,7 +425,7 @@ pub(crate) fn action_flash(
     let mut partition_infos = Vec::new();
 
     // 4. Build firmware partition infos from TAR packages (keeping package order)
-    for entry in &resolved_entries {
+    for entry in resolved_entries {
         let Some(pit_entry) = find_pit_entry_by_filename(&pit_data, &entry.normalized_name) else {
             println!(
                 "Skipping orphan file \"{}\" (no matching partition in PIT)",
@@ -441,25 +434,10 @@ pub(crate) fn action_flash(
             continue;
         };
 
-        let pkg_file = match File::open(&entry.package_path) {
-            Ok(f) => f,
-            Err(_) => {
-                print_error!("Failed to open package file \"{}\"", entry.package_path);
-                return 1;
-            }
-        };
-
-        let reader = match TarEntryReader::new(pkg_file, entry.offset, entry.size) {
-            Ok(r) => r,
-            Err(_) => {
-                print_error!("Failed to seek to TAR entry \"{}\"", entry.original_name);
-                return 1;
-            }
-        };
-
+        let size = entry.mmap.len() as u64;
         let Some(info) = create_firmware_info(
-            FirmwareSource::Tar(reader),
-            entry.size,
+            entry.mmap,
+            size,
             entry.is_lz4,
             pit_entry,
             odin_manager.is_lz4_supported(),
@@ -507,16 +485,17 @@ pub(crate) fn action_flash(
             }
         };
 
-        let Ok((file, file_size)) = File::open(&part.filename).and_then(|f| {
+        let Ok((mmap, file_size)) = File::open(&part.filename).and_then(|f| {
             let file_size = f.metadata()?.len();
-            Ok((f, file_size))
+            let mmap = unsafe { MmapOptions::new().len(file_size as usize).map(&f)? };
+            Ok((mmap, file_size))
         }) else {
-            print_error!("Failed to open file \"{}\"", part.filename);
+            print_error!("Failed to open or memory map file \"{}\"", part.filename);
             return 1;
         };
 
         let Some(info) = create_firmware_info(
-            FirmwareSource::File(file),
+            mmap,
             file_size,
             is_lz4_suffix,
             entry,
