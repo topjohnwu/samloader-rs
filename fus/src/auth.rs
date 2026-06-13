@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The code was not reverse engineered by the author of this project (@topjohnwu), but
-// ported from the Bifrost project (https://github.com/zacharee/Bifrost).
-// The original implementation is licensed under MIT license.
-// Copyright (c) 2021 Zachary Wander
-
 use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 
+// This auth key is provided by @henr1kas and @ducthoe
 const AUTH_AES_KEY: [u8; 16] = [
     0x42, 0x2e, 0x73, 0x73, 0x36, 0x17, 0xae, 0x2b, 0x19, 0x89, 0x40, 0xfd, 0x4e, 0x32, 0xb0, 0xa5,
 ];
