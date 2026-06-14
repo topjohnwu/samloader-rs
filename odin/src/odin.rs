@@ -321,6 +321,10 @@ impl OdinManager {
         self.bootloader_protocol_version
     }
 
+    fn file_transfer_sequence_max_bytes(&self) -> usize {
+        self.file_transfer_packet_size * self.file_transfer_sequence_max_length
+    }
+
     fn send_raw_sequences<Iter, Bytes>(
         &mut self,
         sequences: Iter,
@@ -360,8 +364,7 @@ impl OdinManager {
     }
 
     pub fn send_file(&mut self, info: &crate::firmware::FirmwareFile) -> Result<(), OdinError> {
-        let sequences =
-            info.sequences(self.file_transfer_packet_size * self.file_transfer_sequence_max_length);
+        let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
         self.send_raw_sequences(sequences, info.pit_entry)
     }
 
@@ -369,10 +372,8 @@ impl OdinManager {
         &mut self,
         info: &crate::firmware::FirmwareLz4File,
     ) -> Result<(), OdinError> {
-        if !self.lz4_supported {
-            let sequences = info
-                .sequences(self.file_transfer_packet_size * self.file_transfer_sequence_max_length)
-                .decompressed();
+        if !self.lz4_supported || info.header.block_max_size != 1024 * 1024 {
+            let sequences = info.decompressed_sequences(self.file_transfer_sequence_max_bytes());
             return self.send_raw_sequences(sequences, info.pit_entry);
         }
 
@@ -380,8 +381,7 @@ impl OdinManager {
         self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
-        let sequences =
-            info.sequences(self.file_transfer_packet_size * self.file_transfer_sequence_max_length);
+        let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
 
         let mut sequences = sequences.peekable();
         while let Some((decompressed_size, sequence_data)) = sequences.next() {

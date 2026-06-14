@@ -20,7 +20,7 @@ mod usb;
 
 pub use error::OdinError;
 pub use firmware::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, parse_lz4_frame_header, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
 pub use odin::{OdinManager, reboot_download};
 pub use usb::{RusbBackend, SerialBackend, UsbBackend, UsbTransfer, create_backend};

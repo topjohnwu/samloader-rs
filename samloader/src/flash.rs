@@ -18,8 +18,8 @@ use crate::PartitionArg;
 use crate::print_error;
 use memmap2::{Mmap, MmapOptions};
 use samloader_odin::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, OdinManager, create_backend,
-    parse_lz4_frame_header, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, OdinManager, create_backend,
+    verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -212,7 +212,7 @@ fn execute_flash_pipeline(
         .iter()
         .map(|part| match part {
             FirmwareInfo::Normal(f) => f.file.len() as u64,
-            FirmwareInfo::Lz4(f) => f.content_size,
+            FirmwareInfo::Lz4(f) => f.header.content_size,
         })
         .sum();
 
@@ -272,7 +272,7 @@ fn create_firmware_info<'a>(
 ) -> Option<FirmwareInfo<'a>> {
     let lz4_frame_header = if is_lz4_suffix {
         let cursor = std::io::Cursor::new(&mmap);
-        match parse_lz4_frame_header(cursor) {
+        match Lz4FrameHeader::parse(cursor) {
             Ok(fh) => Some(fh),
             Err(e) => {
                 print_error!(
@@ -304,12 +304,11 @@ fn create_firmware_info<'a>(
         }
     }
 
-    if let Some(fh) = &lz4_frame_header {
+    if let Some(header) = lz4_frame_header {
         Some(FirmwareInfo::Lz4(FirmwareLz4File {
             pit_entry,
             file: mmap,
-            content_size: fh.content_size,
-            block_max_size: fh.block_max_size,
+            header,
         }))
     } else {
         Some(FirmwareInfo::Normal(FirmwareFile {
