@@ -19,7 +19,7 @@ use crate::print_error;
 use memmap2::{Mmap, MmapOptions};
 use samloader_odin::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, OdinManager, create_backend,
-    parse_lz4_content_size, verify_md5_footer,
+    parse_lz4_frame_header, verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -270,10 +270,10 @@ fn create_firmware_info<'a>(
     skip_size_check: bool,
     file_display_name: &str,
 ) -> Option<FirmwareInfo<'a>> {
-    let content_size = if is_lz4_suffix {
+    let lz4_frame_header = if is_lz4_suffix {
         let cursor = std::io::Cursor::new(&mmap);
-        match parse_lz4_content_size(cursor) {
-            Ok(size) => Some(size),
+        match parse_lz4_frame_header(cursor) {
+            Ok(fh) => Some(fh),
             Err(e) => {
                 print_error!(
                     "Failed to parse LZ4 header for {}: {}",
@@ -289,8 +289,8 @@ fn create_firmware_info<'a>(
 
     if !skip_size_check {
         let partition_size = pit_entry.partition_size();
-        let check_size = if let Some(cs) = content_size {
-            cs
+        let check_size = if let Some(fh) = &lz4_frame_header {
+            fh.content_size
         } else {
             source_size
         };
@@ -304,11 +304,12 @@ fn create_firmware_info<'a>(
         }
     }
 
-    if let Some(cs) = content_size {
+    if let Some(fh) = &lz4_frame_header {
         Some(FirmwareInfo::Lz4(FirmwareLz4File {
             pit_entry,
             file: mmap,
-            content_size: cs,
+            content_size: fh.content_size,
+            block_max_size: fh.block_max_size,
         }))
     } else {
         Some(FirmwareInfo::Normal(FirmwareFile {

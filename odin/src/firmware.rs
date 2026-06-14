@@ -97,7 +97,12 @@ pub fn verify_md5_footer(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_lz4_content_size<R: Read>(mut reader: R) -> Result<u64, String> {
+pub struct Lz4FrameHeader {
+    pub content_size: u64,
+    pub block_max_size: u64,
+}
+
+pub fn parse_lz4_frame_header<R: Read>(mut reader: R) -> Result<Lz4FrameHeader, String> {
     let mut magic_bytes = [0u8; 4];
     reader
         .read_exact(&mut magic_bytes)
@@ -146,12 +151,18 @@ pub fn parse_lz4_content_size<R: Read>(mut reader: R) -> Result<u64, String> {
     let bd = bd_byte[0];
 
     let block_max_size_code = (bd >> 4) & 0x07;
-    if block_max_size_code != 6 {
-        return Err(format!(
-            "Only 1MB block size (code 6) is supported. Received code: {}",
-            block_max_size_code
-        ));
-    }
+    let block_max_size = match block_max_size_code {
+        4 => 64 * 1024,
+        5 => 256 * 1024,
+        6 => 1024 * 1024,
+        7 => 4 * 1024 * 1024,
+        _ => {
+            return Err(format!(
+                "Invalid block max size code: {}",
+                block_max_size_code
+            ));
+        }
+    };
 
     let mut content_size_bytes = [0u8; 8];
     reader
@@ -164,7 +175,10 @@ pub fn parse_lz4_content_size<R: Read>(mut reader: R) -> Result<u64, String> {
         .read_exact(&mut hc_byte)
         .map_err(|_| "Failed to read header checksum")?;
 
-    Ok(content_size)
+    Ok(Lz4FrameHeader {
+        content_size,
+        block_max_size,
+    })
 }
 
 pub struct FirmwareFile<'a> {
@@ -182,12 +196,14 @@ pub struct FirmwareLz4File<'a> {
     pub pit_entry: &'a PitEntry,
     pub file: Mmap,
     pub content_size: u64,
+    pub block_max_size: u64,
 }
 
 impl<'a> FirmwareLz4File<'a> {
     pub(crate) fn sequences(&self, sequence_max_bytes: usize) -> Lz4SequenceIterator<'_> {
         Lz4SequenceIterator {
             file: &self.file,
+            block_max_size: self.block_max_size,
             max_blocks: sequence_max_bytes / (1024 * 1024),
             remaining_decompressed: self.content_size,
             bytes_read: LZ4_HEADER_SIZE,
@@ -203,6 +219,7 @@ pub enum FirmwareInfo<'a> {
 
 pub(crate) struct Lz4SequenceIterator<'a> {
     file: &'a Mmap,
+    block_max_size: u64,
     max_blocks: usize,
     remaining_decompressed: u64,
     bytes_read: usize,
@@ -213,6 +230,7 @@ impl<'a> Lz4SequenceIterator<'a> {
     pub(crate) fn decompressed(self) -> Lz4DecompressedSequenceIterator<'a> {
         Lz4DecompressedSequenceIterator {
             file: self.file,
+            block_max_size: self.block_max_size,
             max_blocks: self.max_blocks,
             remaining_decompressed: self.remaining_decompressed,
             bytes_read: self.bytes_read,
@@ -267,7 +285,7 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
 
         let decompressed_size = std::cmp::min(
             self.remaining_decompressed,
-            (num_blocks as u64) * 1024 * 1024,
+            (num_blocks as u64) * self.block_max_size,
         ) as usize;
         self.remaining_decompressed -= decompressed_size as u64;
 
@@ -277,6 +295,7 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
 
 pub struct Lz4DecompressedSequenceIterator<'a> {
     file: &'a Mmap,
+    block_max_size: u64,
     max_blocks: usize,
     remaining_decompressed: u64,
     bytes_read: usize,
@@ -319,7 +338,7 @@ impl<'a> Iterator for Lz4DecompressedSequenceIterator<'a> {
             }
 
             let block_uncompressed_size =
-                std::cmp::min(self.remaining_decompressed, 1024 * 1024) as usize;
+                std::cmp::min(self.remaining_decompressed, self.block_max_size) as usize;
             let block_bytes = &self.file[self.bytes_read + 4..self.bytes_read + 4 + data_size];
 
             if is_compressed {
