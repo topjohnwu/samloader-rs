@@ -192,7 +192,7 @@ impl<'a> FirmwareLz4File<'a> {
     pub(crate) fn sequences(&self, sequence_max_bytes: usize) -> Lz4SequenceIterator<'_> {
         Lz4SequenceIterator {
             file: &self.file,
-            sequence_max_bytes,
+            max_blocks: sequence_max_bytes / (1024 * 1024),
             remaining_decompressed: self.content_size,
             bytes_read: LZ4_HEADER_SIZE,
             finished: false,
@@ -235,7 +235,7 @@ impl<'a> Iterator for SequenceIterator<'a> {
 
 pub(crate) struct Lz4SequenceIterator<'a> {
     file: &'a Mmap,
-    sequence_max_bytes: usize,
+    max_blocks: usize,
     remaining_decompressed: u64,
     bytes_read: usize,
     finished: bool,
@@ -249,15 +249,11 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
             return None;
         }
 
-        let next_decompressed_size =
-            std::cmp::min(self.remaining_decompressed, self.sequence_max_bytes as u64) as usize;
-        self.remaining_decompressed -= next_decompressed_size as u64;
-
-        let mut decompressed_size_upper_bound = 0;
         let start_pos = self.bytes_read;
         let mut end_pos = start_pos;
+        let mut num_blocks = 0;
 
-        loop {
+        while num_blocks < self.max_blocks {
             if self.bytes_read + 4 > self.file.len() {
                 self.finished = true;
                 break;
@@ -282,17 +278,19 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
 
             self.bytes_read += 4 + data_size;
             end_pos = self.bytes_read;
-            decompressed_size_upper_bound += 1024 * 1024; // 1MB
-
-            if decompressed_size_upper_bound >= next_decompressed_size {
-                break;
-            }
+            num_blocks += 1;
         }
 
         if start_pos == end_pos {
             return None;
         }
 
-        Some((next_decompressed_size, &self.file[start_pos..end_pos]))
+        let decompressed_size = std::cmp::min(
+            self.remaining_decompressed,
+            (num_blocks as u64) * 1024 * 1024,
+        ) as usize;
+        self.remaining_decompressed -= decompressed_size as u64;
+
+        Some((decompressed_size, &self.file[start_pos..end_pos]))
     }
 }
