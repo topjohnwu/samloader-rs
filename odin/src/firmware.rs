@@ -208,7 +208,7 @@ pub(crate) struct SequenceIterator<'a> {
 }
 
 impl<'a> Iterator for SequenceIterator<'a> {
-    type Item = Vec<u8>;
+    type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.bytes_read >= self.file_size {
@@ -220,7 +220,7 @@ impl<'a> Iterator for SequenceIterator<'a> {
 
         let start = self.bytes_read as usize;
         let end = start + sequence_byte_count;
-        let data = self.file[start..end].to_vec();
+        let data = &self.file[start..end];
 
         self.bytes_read += sequence_byte_count as u64;
 
@@ -267,7 +267,7 @@ impl<'a> Lz4SequenceIterator<'a> {
 }
 
 impl<'a> Iterator for Lz4SequenceIterator<'a> {
-    type Item = (usize, Vec<u8>);
+    type Item = (usize, &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -318,9 +318,6 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
             return None;
         }
 
-        Some((
-            next_decompressed_size,
-            self.file[start_pos..end_pos].to_vec(),
-        ))
+        Some((next_decompressed_size, &self.file[start_pos..end_pos]))
     }
 }

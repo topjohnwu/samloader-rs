@@ -368,7 +368,7 @@ impl OdinManager {
         &mut self,
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
-        sequence_data: Vec<u8>,
+        sequence_data: &[u8],
     ) -> Result<(), OdinError> {
         self.request_and_response(start_packet, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
