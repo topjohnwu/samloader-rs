@@ -60,6 +60,8 @@ impl OdinManager {
     pub fn init(&mut self) -> Result<(), OdinError> {
         println!("Initializing protocol...");
 
+        self.usb.reset();
+
         self.send_string("ODIN", 1000)
             .map_err(|_| OdinError::HandshakeSendFailed)?;
 
@@ -491,134 +493,22 @@ impl OdinManager {
     }
 }
 
-fn reboot_download_serial() -> Result<(), OdinError> {
-    use std::io::Write;
-
-    // List all available ports
-    let ports = serialport::available_ports()
-        .map_err(|e| OdinError::SerialError(format!("Failed to list serial ports: {}", e)))?;
-
-    // Find first Samsung device
-    let mut samsung_port = None;
-    for port in ports {
-        match port.port_type {
-            serialport::SerialPortType::UsbPort(info) if info.vid == crate::usb::VID_SAMSUNG => {
-                samsung_port = Some(port.port_name);
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    let port_name = samsung_port
-        .ok_or_else(|| OdinError::SerialError("No Samsung serial port found".to_string()))?;
-
-    let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
-
-    // Open connection at 115200 baud with 1s timeout
-    let mut port = serialport::new(&port_name, 115_200)
-        .timeout(Duration::from_secs(1))
-        .open()
-        .map_err(|e| OdinError::SerialError(format!("Failed to open port {}: {}", port_name, e)))?;
-
-    // Write command
-    port.write_all(cmd)
-        .map_err(|e| OdinError::SerialError(format!("Failed to send data: {}", e)))?;
-
-    // Flush port output buffer
-    port.flush()
-        .map_err(|e| OdinError::SerialError(format!("Failed to flush serial buffer: {}", e)))?;
-
-    Ok(())
-}
-
-fn reboot_download_rusb() -> Result<(), OdinError> {
-    use rusb::{Context, Direction, TransferType, UsbContext};
-
-    let context = Context::new()
-        .map_err(|e| OdinError::SerialError(format!("Failed to create libusb context: {}", e)))?;
-
-    let devices = context
-        .devices()
-        .map_err(|e| OdinError::SerialError(format!("Failed to list USB devices: {}", e)))?;
-
-    let mut target_device = None;
-    for device in devices.iter() {
-        if let Ok(desc) = device.device_descriptor()
-            && desc.vendor_id() == crate::usb::VID_SAMSUNG
-        {
-            target_device = Some(device);
-            break;
-        }
-    }
-
-    let device = target_device
-        .ok_or_else(|| OdinError::SerialError("No Samsung USB device found".to_string()))?;
-
-    let handle = device
-        .open()
-        .map_err(|e| OdinError::SerialError(format!("Failed to open USB device: {}", e)))?;
-
-    let config_desc = device
-        .config_descriptor(0)
-        .map_err(|e| OdinError::SerialError(format!("Failed to get config descriptor: {}", e)))?;
-
-    let mut target_interface = None;
-    let mut target_endpoint = None;
-
-    // Look for CDC Data interface or vendor specific interface with bulk out
-    for interface in config_desc.interfaces() {
-        for setting in interface.descriptors() {
-            // CDC Data is 0x0A (10), Vendor Specific is 0xFF (255)
-            // Samsung modems usually expose an ACM interface.
-            let is_modem = setting.class_code() == 0x0A || setting.class_code() == 0xFF;
-            if !is_modem {
-                continue;
-            }
-            for endpoint in setting.endpoint_descriptors() {
-                if endpoint.transfer_type() == TransferType::Bulk
-                    && endpoint.direction() == Direction::Out
-                {
-                    target_interface = Some(interface.number());
-                    target_endpoint = Some(endpoint.address());
-                    break;
-                }
-            }
-            if target_endpoint.is_some() {
-                break;
-            }
-        }
-        if target_endpoint.is_some() {
-            break;
-        }
-    }
-
-    let iface = target_interface.ok_or_else(|| {
-        OdinError::SerialError("No suitable modem USB interface found".to_string())
-    })?;
-    let ep = target_endpoint.unwrap();
-
-    let _ = handle.set_auto_detach_kernel_driver(true);
-    handle
-        .claim_interface(iface)
-        .map_err(|e| OdinError::SerialError(format!("Failed to claim interface: {}", e)))?;
-
-    let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
-    let timeout = Duration::from_secs(1);
-
-    handle
-        .write_bulk(ep, cmd, timeout)
-        .map_err(|e| OdinError::SerialError(format!("Failed to send data: {}", e)))?;
-
-    let _ = handle.release_interface(iface);
-
-    Ok(())
-}
-
 pub fn reboot_download(usb_backend: &str) -> Result<(), OdinError> {
-    if usb_backend == "vcom" {
-        reboot_download_serial()
+    use crate::usb::{RusbBackend, SerialBackend, UsbBackend, UsbTransfer, VID_SAMSUNG};
+
+    let mut backend: Box<dyn UsbTransfer> = if usb_backend == "vcom" {
+        let device = SerialBackend::find_device(false, |vid, _| vid == VID_SAMSUNG)?;
+        Box::new(SerialBackend::new(device, false)?)
     } else {
-        reboot_download_rusb()
+        let device = RusbBackend::find_device(false, |vid, _| vid == VID_SAMSUNG)?;
+        Box::new(RusbBackend::new(device, false)?)
+    };
+
+    let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
+
+    if !backend.send_data(cmd, 1000, false) {
+        return Err(OdinError::SerialError("Failed to send data".to_string()));
     }
+
+    Ok(())
 }

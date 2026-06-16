@@ -39,6 +39,7 @@ const SUPPORTED_DEVICES: &[(u16, u16)] = &[
 const USB_CLASS_CDC_DATA: u8 = 0x0A;
 
 pub trait UsbTransfer {
+    fn reset(&mut self);
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool;
     fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32;
 }
@@ -46,8 +47,14 @@ pub trait UsbTransfer {
 pub trait UsbBackend: Sized + UsbTransfer {
     type UsbDevice;
 
-    fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError>;
-    fn find_device(wait: bool) -> Result<Self::UsbDevice, OdinError>;
+    fn new(device: Self::UsbDevice, verbose: bool) -> Result<Self, OdinError>;
+    fn find_device<F>(wait: bool, predicate: F) -> Result<Self::UsbDevice, OdinError>
+    where
+        F: FnMut(u16, u16) -> bool;
+
+    fn find_download_device(wait: bool) -> Result<Self::UsbDevice, OdinError> {
+        Self::find_device(wait, |vid, pid| SUPPORTED_DEVICES.contains(&(vid, pid)))
+    }
 }
 
 pub struct RusbBackend {
@@ -106,9 +113,7 @@ impl RusbBackend {
 impl UsbBackend for RusbBackend {
     type UsbDevice = rusb::Device<Context>;
 
-    fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError> {
-        let device = Self::find_device(wait_for_device)?;
-
+    fn new(device: Self::UsbDevice, verbose: bool) -> Result<Self, OdinError> {
         let handle = match device.open() {
             Ok(h) => h,
             Err(e) => return Err(OdinError::DeviceAccess(e)),
@@ -190,11 +195,6 @@ impl UsbBackend for RusbBackend {
                 .map_err(|_| OdinError::InterfaceSetupFailed)?;
         }
 
-        println!("Resetting device...");
-        if let Err(e) = handle.reset() {
-            print_warning!("Failed to reset device! Result: {}", e);
-        }
-
         Ok(Self {
             verbose,
             handle,
@@ -205,7 +205,10 @@ impl UsbBackend for RusbBackend {
         })
     }
 
-    fn find_device(wait: bool) -> Result<Self::UsbDevice, OdinError> {
+    fn find_device<F>(wait: bool, mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+    where
+        F: FnMut(u16, u16) -> bool,
+    {
         let context = Context::new().map_err(|e| {
             OdinError::SerialError(format!("Failed to create libusb context: {}", e))
         })?;
@@ -219,12 +222,10 @@ impl UsbBackend for RusbBackend {
         loop {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
-                    if let Ok(descriptor) = device.device_descriptor() {
-                        for &(vid, pid) in SUPPORTED_DEVICES {
-                            if descriptor.vendor_id() == vid && descriptor.product_id() == pid {
-                                return Ok(device);
-                            }
-                        }
+                    if let Ok(descriptor) = device.device_descriptor()
+                        && predicate(descriptor.vendor_id(), descriptor.product_id())
+                    {
+                        return Ok(device);
                     }
                 }
             }
@@ -241,6 +242,12 @@ impl UsbBackend for RusbBackend {
 }
 
 impl UsbTransfer for RusbBackend {
+    fn reset(&mut self) {
+        if let Err(e) = self.handle.reset() {
+            print_warning!("Failed to reset device! Result: {}", e);
+        }
+    }
+
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool {
         let max_attempts = if retry { 6 } else { 1 };
         for attempt in 0..max_attempts {
@@ -339,9 +346,7 @@ impl SerialBackend {
 impl UsbBackend for SerialBackend {
     type UsbDevice = serialport::SerialPortInfo;
 
-    fn new(verbose: bool, wait_for_device: bool) -> Result<Self, OdinError> {
-        let device = Self::find_device(wait_for_device)?;
-
+    fn new(device: Self::UsbDevice, verbose: bool) -> Result<Self, OdinError> {
         let info = match &device.port_type {
             serialport::SerialPortType::UsbPort(info) => info,
             _ => return Err(OdinError::DeviceNotFound),
@@ -361,7 +366,10 @@ impl UsbBackend for SerialBackend {
         Ok(Self { verbose, port })
     }
 
-    fn find_device(wait: bool) -> Result<Self::UsbDevice, OdinError> {
+    fn find_device<F>(wait: bool, mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+    where
+        F: FnMut(u16, u16) -> bool,
+    {
         if wait {
             println!("Waiting for device...");
         } else {
@@ -371,12 +379,10 @@ impl UsbBackend for SerialBackend {
         loop {
             if let Ok(ports) = serialport::available_ports() {
                 for port in ports {
-                    if let serialport::SerialPortType::UsbPort(ref info) = port.port_type {
-                        for &(vid, pid) in SUPPORTED_DEVICES {
-                            if info.vid == vid && info.pid == pid {
-                                return Ok(port);
-                            }
-                        }
+                    if let serialport::SerialPortType::UsbPort(ref info) = port.port_type
+                        && predicate(info.vid, info.pid)
+                    {
+                        return Ok(port);
                     }
                 }
             }
@@ -393,6 +399,12 @@ impl UsbBackend for SerialBackend {
 }
 
 impl UsbTransfer for SerialBackend {
+    fn reset(&mut self) {
+        if let Err(e) = self.port.clear(serialport::ClearBuffer::All) {
+            print_warning!("Failed to reset device! Result: {}", e);
+        }
+    }
+
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool {
         let max_attempts = if retry { 6 } else { 1 };
         for attempt in 0..max_attempts {
@@ -469,11 +481,13 @@ pub fn create_backend(
 ) -> Result<Box<dyn UsbTransfer>, OdinError> {
     match usb_backend {
         "vcom" => {
-            let backend = SerialBackend::new(verbose, wait)?;
+            let device = SerialBackend::find_download_device(wait)?;
+            let backend = SerialBackend::new(device, verbose)?;
             Ok(Box::new(backend))
         }
         _ => {
-            let backend = RusbBackend::new(verbose, wait)?;
+            let device = RusbBackend::find_download_device(wait)?;
+            let backend = RusbBackend::new(device, verbose)?;
             Ok(Box::new(backend))
         }
     }

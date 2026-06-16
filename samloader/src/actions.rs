@@ -23,8 +23,8 @@ use std::io::{Read, Write};
 
 pub(crate) fn action_detect(usb_backend: &str, _verbose: bool, wait: bool) -> i32 {
     let detected = match usb_backend {
-        "vcom" => SerialBackend::find_device(wait).is_ok(),
-        _ => RusbBackend::find_device(wait).is_ok(),
+        "vcom" => SerialBackend::find_download_device(wait).is_ok(),
+        _ => RusbBackend::find_download_device(wait).is_ok(),
     };
     if detected {
         println!("Device detected");
@@ -182,12 +182,8 @@ pub(crate) fn action_print_pit(usb_backend: &str, file: &str, verbose: bool, wai
 }
 
 pub(crate) fn action_reboot_download(usb_backend: &str, _verbose: bool) -> i32 {
-    println!("Sending serial command...");
     match samloader_odin::reboot_download(usb_backend) {
-        Ok(()) => {
-            println!("Done");
-            0
-        }
+        Ok(()) => 0,
         Err(e) => {
             print_error!("{}", e);
             1
