@@ -13,3 +13,9 @@ aes = { workspace = true }
 ecb = { workspace = true }
 fast-md5 = { workspace = true }
 roxmltree = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+reqwest = { workspace = true, features = ["native-tls"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+reqwest = { workspace = true, features = ["default-tls"] }
