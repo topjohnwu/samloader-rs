@@ -12,6 +12,7 @@ version = "2.0.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/topjohnwu/samloader-rs"
+readme = "README.md"
 
 [workspace.dependencies]
 samloader-fus = { version = "2.0.0", path = "fus" }
