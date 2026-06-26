@@ -18,8 +18,8 @@ use crate::PartitionArg;
 use crate::print_error;
 use memmap2::{Mmap, MmapOptions};
 use samloader_odin::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, OdinManager, create_backend,
-    verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, OdinManager, UsbBackendOption,
+    create_backend, verify_md5_footer,
 };
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -333,7 +333,7 @@ fn create_firmware_info<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn action_flash(
-    usb_backend: &str,
+    usb_backend: UsbBackendOption,
     repartition: bool,
     verbose: bool,
     reboot_device: bool,

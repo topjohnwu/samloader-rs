@@ -27,8 +27,18 @@ pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
 pub use odin::{OdinManager, reboot_download};
-pub use usb::{NusbBackend, RusbBackend, SerialBackend, UsbBackend, UsbTransfer, create_backend};
+pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
+
+#[cfg(feature = "nusb")]
+pub use usb::NusbBackend;
+
+#[cfg(feature = "rusb")]
+pub use usb::RusbBackend;
+
+#[cfg(feature = "serialport")]
+pub use usb::SerialBackend;
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
+#[cfg(feature = "rusb")]
 pub use rusb;
 pub use samloader_pit;

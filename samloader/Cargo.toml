@@ -17,3 +17,10 @@ indicatif = { workspace = true }
 memmap2 = { workspace = true }
 tar = { workspace = true }
 libc = { workspace = true }
+cfg-if = { workspace = true }
+
+[features]
+default = ["nusb", "serialport"]
+rusb = ["samloader-odin/rusb"]
+nusb = ["samloader-odin/nusb"]
+serialport = ["samloader-odin/serialport"]

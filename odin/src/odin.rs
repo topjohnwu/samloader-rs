@@ -519,25 +519,32 @@ impl OdinManager {
 
 /// Triggers a reboot of the connected Samsung device into Download Mode via the
 /// specified backend protocol.
-pub fn reboot_download(usb_backend: &str) -> Result<(), OdinError> {
-    use crate::usb::{
-        NusbBackend, RusbBackend, SerialBackend, UsbBackend, UsbTransfer, VID_SAMSUNG,
-    };
+pub fn reboot_download(usb_backend: crate::usb::UsbBackendOption) -> Result<(), OdinError> {
+    #[allow(unused_imports)]
+    use crate::usb::{UsbTransfer, VID_SAMSUNG};
 
     let mut backend: Box<dyn UsbTransfer> = match usb_backend {
-        "vcom" => {
+        #[cfg(feature = "serialport")]
+        crate::usb::UsbBackendOption::Vcom => {
+            use crate::usb::{SerialBackend, UsbBackend};
             let device = SerialBackend::find_device(false, |vid, _| vid == VID_SAMSUNG)?;
-            Box::new(SerialBackend::new(device, false)?)
+            Ok::<Box<dyn UsbTransfer>, OdinError>(Box::new(SerialBackend::new(device, false)?))
         }
-        "nusb" => {
+        #[cfg(feature = "nusb")]
+        crate::usb::UsbBackendOption::Nusb => {
+            use crate::usb::{NusbBackend, UsbBackend};
             let device = NusbBackend::find_device(false, |vid, _| vid == VID_SAMSUNG)?;
-            Box::new(NusbBackend::new(device, false)?)
+            Ok::<Box<dyn UsbTransfer>, OdinError>(Box::new(NusbBackend::new(device, false)?))
         }
-        _ => {
+        #[cfg(feature = "rusb")]
+        crate::usb::UsbBackendOption::Libusb => {
+            use crate::usb::{RusbBackend, UsbBackend};
             let device = RusbBackend::find_device(false, |vid, _| vid == VID_SAMSUNG)?;
-            Box::new(RusbBackend::new(device, false)?)
+            Ok::<Box<dyn UsbTransfer>, OdinError>(Box::new(RusbBackend::new(device, false)?))
         }
-    };
+        #[allow(unreachable_patterns)]
+        _ => Err(OdinError::DeviceNotFound),
+    }?;
 
     let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
 

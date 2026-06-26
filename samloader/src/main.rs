@@ -14,12 +14,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(not(any(feature = "rusb", feature = "nusb", feature = "serialport")))]
+compile_error!("At least one USB backend must be enabled!");
+
 mod actions;
 mod download;
 mod flash;
 
 use clap::{Arg, ArgAction, Command};
 use samloader_fus::{FusClient, fetch_version_xml};
+use samloader_odin::UsbBackendOption;
 
 pub(crate) struct PartitionArg {
     pub(crate) name: Option<String>,
@@ -106,6 +110,23 @@ const VERIFY_MD5_ABOUT: &str = "Verifies the MD5 checksum of one or more .tar.md
 const VERIFY_MD5_FILE_HELP: &str = "The .tar.md5 files to verify";
 
 fn main() {
+    let enabled_backends: &[&'static str] = &[
+        #[cfg(feature = "nusb")]
+        From::from(UsbBackendOption::Nusb),
+        #[cfg(feature = "rusb")]
+        From::from(UsbBackendOption::Libusb),
+        #[cfg(feature = "serialport")]
+        From::from(UsbBackendOption::Vcom),
+    ];
+
+    cfg_if::cfg_if! {
+        if #[cfg(all(target_os = "windows", feature = "serialport"))] {
+            let default_backend: &str = From::from(UsbBackendOption::Vcom);
+        } else {
+            let default_backend: &str = enabled_backends.first().unwrap();
+        }
+    }
+
     #[allow(unused_mut)]
     let mut cmd = Command::new("samloader")
         .about("Download and flash firmware for Samsung devices")
@@ -131,12 +152,8 @@ fn main() {
             Arg::new("usb_backend")
                 .long("usb-backend")
                 .global(true)
-                .default_value(if cfg!(target_os = "windows") {
-                    "vcom"
-                } else {
-                    "libusb"
-                })
-                .value_parser(["libusb", "vcom", "nusb"])
+                .default_value(default_backend)
+                .value_parser(enabled_backends.to_vec())
                 .help(USB_BACKEND_HELP),
         )
         .subcommand(
@@ -367,10 +384,11 @@ fn main() {
     let matches = cmd.get_matches();
 
     let verbose = matches.get_flag("verbose");
-    let usb_backend = matches
+    let usb_backend_str = matches
         .get_one::<String>("usb_backend")
         .map(|s| s.as_str())
-        .unwrap_or("libusb");
+        .unwrap_or(default_backend);
+    let usb_backend = UsbBackendOption::try_from(usb_backend_str).expect("Invalid USB backend");
 
     let result = match matches.subcommand() {
         Some(("download", sub_m)) => {

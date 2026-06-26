@@ -15,19 +15,14 @@
 
 use crate::print_error;
 use samloader_odin::{
-    NusbBackend, OdinManager, RusbBackend, SerialBackend, UsbBackend, create_backend,
-    verify_md5_footer,
+    OdinManager, UsbBackendOption, create_backend, detect_device, verify_md5_footer,
 };
 use samloader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
-pub(crate) fn action_detect(usb_backend: &str, _verbose: bool, wait: bool) -> i32 {
-    let detected = match usb_backend {
-        "vcom" => SerialBackend::find_download_device(wait).is_ok(),
-        "nusb" => NusbBackend::find_download_device(wait).is_ok(),
-        _ => RusbBackend::find_download_device(wait).is_ok(),
-    };
+pub(crate) fn action_detect(usb_backend: UsbBackendOption, _verbose: bool, wait: bool) -> i32 {
+    let detected = detect_device(usb_backend, wait);
     if detected {
         println!("Device detected");
         0
@@ -37,7 +32,12 @@ pub(crate) fn action_detect(usb_backend: &str, _verbose: bool, wait: bool) -> i3
     }
 }
 
-pub(crate) fn action_dump_pit(usb_backend: &str, output: &str, verbose: bool, wait: bool) -> i32 {
+pub(crate) fn action_dump_pit(
+    usb_backend: UsbBackendOption,
+    output: &str,
+    verbose: bool,
+    wait: bool,
+) -> i32 {
     if output.is_empty() {
         println!("Output file was not specified.\n");
         return 0;
@@ -100,7 +100,12 @@ pub(crate) fn action_dump_pit(usb_backend: &str, output: &str, verbose: bool, wa
     if success { 0 } else { 1 }
 }
 
-pub(crate) fn action_print_pit(usb_backend: &str, file: &str, verbose: bool, wait: bool) -> i32 {
+pub(crate) fn action_print_pit(
+    usb_backend: UsbBackendOption,
+    file: &str,
+    verbose: bool,
+    wait: bool,
+) -> i32 {
     if !file.is_empty() {
         let mut f = match File::open(file) {
             Ok(f) => f,
@@ -183,7 +188,7 @@ pub(crate) fn action_print_pit(usb_backend: &str, file: &str, verbose: bool, wai
     }
 }
 
-pub(crate) fn action_reboot_download(usb_backend: &str, _verbose: bool) -> i32 {
+pub(crate) fn action_reboot_download(usb_backend: UsbBackendOption, _verbose: bool) -> i32 {
     match samloader_odin::reboot_download(usb_backend) {
         Ok(()) => 0,
         Err(e) => {

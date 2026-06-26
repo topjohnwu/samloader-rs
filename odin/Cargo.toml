@@ -11,10 +11,16 @@ keywords = ["samsung", "firmware"]
 [dependencies]
 samloader-pit = { workspace = true }
 memmap2 = { workspace = true }
-rusb = { workspace = true }
-nusb = { workspace = true }
+rusb = { workspace = true, optional = true }
+nusb = { workspace = true, optional = true }
 binrw = { workspace = true }
 fast-md5 = { workspace = true }
-serialport = { workspace = true }
+serialport = { workspace = true, optional = true }
 thiserror = { workspace = true }
 lz4_flex = { workspace = true }
+
+[features]
+default = ["nusb", "serialport"]
+rusb = ["dep:rusb"]
+nusb = ["dep:nusb"]
+serialport = ["dep:serialport"]
