@@ -39,13 +39,13 @@ jobs:
           # Build samloader
           cargo build -p samloader --target ${{ matrix.arch }}-unknown-linux-musl --release
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "samloader") | .version')
-          tar c -C target/${{ matrix.arch }}-unknown-linux-musl/release samloader | \
-            xz --x86 --lzma2 > samloader-v$VERSION-linux-${{ matrix.arch }}.tar.xz
+          zip -j samloader-v$VERSION-linux-${{ matrix.arch }}.zip \
+            target/${{ matrix.arch }}-unknown-linux-musl/release/samloader
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          path: samloader-*.tar.xz
+          path: samloader-*.zip
           archive: false
 
   windows:
@@ -72,13 +72,14 @@ jobs:
           rustup update
           cargo build -p samloader --release
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "samloader") | .version')
-          tar c -C target/release samloader.exe | \
-            xz --x86 --lzma2 > samloader-v$VERSION-windows-${{ matrix.arch }}.tar.xz
+          cd target/release
+          7z a ../../samloader-v$VERSION-windows-${{ matrix.arch }}.zip \
+            samloader.exe
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          path: samloader-*.tar.xz
+          path: samloader-*.zip
           archive: false
 
   macos:
@@ -102,10 +103,11 @@ jobs:
             target/x86_64-apple-darwin/release/samloader
           codesign -s - target/samloader
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "samloader") | .version')
-          tar c -C target samloader | xz --x86 --lzma2 > samloader-v$VERSION-macos-universal.tar.xz
+          zip -j samloader-v$VERSION-macos-universal.zip \
+            target/samloader
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          path: samloader-*.tar.xz
+          path: samloader-*.zip
           archive: false
