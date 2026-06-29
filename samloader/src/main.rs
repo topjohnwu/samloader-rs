@@ -109,6 +109,50 @@ const FILE_HELP: &str = "Automatic partition name matching file to flash";
 const VERIFY_MD5_ABOUT: &str = "Verifies the MD5 checksum of one or more .tar.md5 files";
 const VERIFY_MD5_FILE_HELP: &str = "The .tar.md5 files to verify";
 
+trait FusOptionExt {
+    fn fus_options(self) -> Self;
+}
+
+impl FusOptionExt for Command {
+    fn fus_options(self) -> Self {
+        self.arg(
+            Arg::new("model")
+                .short('m')
+                .long("model")
+                .required(true)
+                .help(MODEL_HELP),
+        )
+        .arg(
+            Arg::new("region")
+                .short('r')
+                .long("region")
+                .required(true)
+                .help(REGION_HELP),
+        )
+    }
+}
+
+trait OdinOptionExt {
+    fn odin_options(self) -> Self;
+}
+
+impl OdinOptionExt for Command {
+    fn odin_options(self) -> Self {
+        self.arg(
+            Arg::new("wait")
+                .long("wait")
+                .action(ArgAction::SetTrue)
+                .help(WAIT_HELP),
+        )
+        .arg(
+            Arg::new("no-reboot")
+                .long("no-reboot")
+                .action(ArgAction::SetTrue)
+                .help(NO_REBOOT_HELP),
+        )
+    }
+}
+
 fn main() {
     let enabled_backends: &[&'static str] = &[
         #[cfg(feature = "nusb")]
@@ -159,20 +203,7 @@ fn main() {
         .subcommand(
             Command::new("download")
                 .about("Download firmware")
-                .arg(
-                    Arg::new("model")
-                        .short('m')
-                        .long("model")
-                        .required(true)
-                        .help(MODEL_HELP),
-                )
-                .arg(
-                    Arg::new("region")
-                        .short('r')
-                        .long("region")
-                        .required(true)
-                        .help(REGION_HELP),
-                )
+                .fus_options()
                 .arg(
                     Arg::new("version")
                         .short('v')
@@ -203,20 +234,7 @@ fn main() {
         .subcommand(
             Command::new("check-update")
                 .about("Check available versions")
-                .arg(
-                    Arg::new("model")
-                        .short('m')
-                        .long("model")
-                        .required(true)
-                        .help(MODEL_HELP),
-                )
-                .arg(
-                    Arg::new("region")
-                        .short('r')
-                        .long("region")
-                        .required(true)
-                        .help(REGION_HELP),
-                )
+                .fus_options()
                 .arg(
                     Arg::new("all")
                         .short('a')
@@ -240,58 +258,38 @@ fn main() {
             Command::new("dump-pit")
                 .about(DUMP_PIT_ABOUT)
                 .long_about(DUMP_PIT_HELP)
+                .odin_options()
                 .arg(
                     Arg::new("output")
                         .long("output")
                         .required(true)
                         .num_args(1)
                         .help(DUMP_PIT_OUTPUT_HELP),
-                )
-                .arg(
-                    Arg::new("wait")
-                        .long("wait")
-                        .action(ArgAction::SetTrue)
-                        .help(WAIT_HELP),
                 ),
         )
         .subcommand(
             Command::new("print-pit")
                 .about(PRINT_PIT_ABOUT)
                 .long_about(PRINT_PIT_HELP)
+                .odin_options()
                 .arg(
                     Arg::new("file")
+                        .short('f')
                         .long("file")
                         .num_args(1)
                         .help(PRINT_PIT_FILE_HELP),
-                )
-                .arg(
-                    Arg::new("wait")
-                        .long("wait")
-                        .action(ArgAction::SetTrue)
-                        .help(WAIT_HELP),
                 ),
         )
         .subcommand(
             Command::new("flash")
                 .about(FLASH_ABOUT)
                 .long_about(FLASH_HELP)
-                .arg(
-                    Arg::new("no-reboot")
-                        .long("no-reboot")
-                        .action(ArgAction::SetTrue)
-                        .help(NO_REBOOT_HELP),
-                )
+                .odin_options()
                 .arg(
                     Arg::new("repartition")
                         .long("repartition")
                         .action(ArgAction::SetTrue)
                         .help(REPARTITION_HELP),
-                )
-                .arg(
-                    Arg::new("wait")
-                        .long("wait")
-                        .action(ArgAction::SetTrue)
-                        .help(WAIT_HELP),
                 )
                 .arg(
                     Arg::new("skip-size-check")
@@ -384,10 +382,7 @@ fn main() {
     let matches = cmd.get_matches();
 
     let verbose = matches.get_flag("verbose");
-    let usb_backend_str = matches
-        .get_one::<String>("usb_backend")
-        .map(|s| s.as_str())
-        .unwrap_or(default_backend);
+    let usb_backend_str = matches.get_one::<String>("usb_backend").unwrap().as_str();
     let usb_backend = UsbBackendOption::try_from(usb_backend_str).expect("Invalid USB backend");
 
     let result = match matches.subcommand() {
@@ -413,7 +408,7 @@ fn main() {
         Some(("check-update", sub_m)) => {
             let model = sub_m.get_one::<String>("model").cloned().unwrap();
             let region = sub_m.get_one::<String>("region").cloned().unwrap();
-            let show_all = sub_m.get_one::<bool>("all").copied().unwrap_or(false);
+            let show_all = sub_m.get_flag("all");
 
             let info = FusClient::new()
                 .and_then(|client| client.fetch_history(&model, &region))
@@ -445,12 +440,13 @@ fn main() {
             0
         }
         Some(("detect", sub_matches)) => {
-            actions::action_detect(usb_backend, verbose, sub_matches.get_flag("wait"))
+            actions::action_detect(usb_backend, sub_matches.get_flag("wait"))
         }
         Some(("dump-pit", sub_matches)) => actions::action_dump_pit(
             usb_backend,
             sub_matches.get_one::<String>("output").unwrap(),
             verbose,
+            !sub_matches.get_flag("no-reboot"),
             sub_matches.get_flag("wait"),
         ),
         Some(("print-pit", sub_matches)) => actions::action_print_pit(
@@ -460,6 +456,7 @@ fn main() {
                 .map(|s| s.as_str())
                 .unwrap_or(""),
             verbose,
+            !sub_matches.get_flag("no-reboot"),
             sub_matches.get_flag("wait"),
         ),
         Some(("flash", sub_matches)) => {

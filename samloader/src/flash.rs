@@ -216,58 +216,6 @@ fn scan_tar_packages(
     Ok((resolved_entries, local_pit_file))
 }
 
-fn execute_flash_pipeline(
-    mut odin_manager: OdinManager,
-    mut partition_infos: Vec<FirmwareInfo>,
-    reboot_device: bool,
-) -> i32 {
-    let total_bytes: u64 = partition_infos
-        .iter()
-        .map(|part| match part {
-            FirmwareInfo::Normal(f) => f.file.len() as u64,
-            FirmwareInfo::Lz4(f) => f.header.content_size,
-        })
-        .sum();
-
-    if let Err(e) = odin_manager.set_total_bytes(total_bytes) {
-        print_error!("{}", e);
-        return 1;
-    }
-
-    for info in &mut partition_infos {
-        match info {
-            FirmwareInfo::Normal(f) => {
-                println!("Uploading {}", f.pit_entry.partition_name);
-                if let Err(e) = odin_manager.send_file(f) {
-                    print_error!("{}", e);
-                    return 1;
-                }
-                println!("{} upload successful\n", f.pit_entry.partition_name);
-            }
-            FirmwareInfo::Lz4(f) => {
-                println!("Uploading {}", f.pit_entry.partition_name);
-                if let Err(e) = odin_manager.send_lz4_file(f) {
-                    print_error!("{}", e);
-                    return 1;
-                }
-                println!("{} upload successful\n", f.pit_entry.partition_name);
-            }
-        }
-    }
-
-    if let Err(e) = odin_manager.end_session() {
-        print_error!("{}", e);
-        return 1;
-    }
-
-    if reboot_device && let Err(e) = odin_manager.reboot_device() {
-        print_error!("{}", e);
-        return 1;
-    }
-
-    0
-}
-
 fn find_pit_entry_by_filename<'a>(pit_data: &'a PitData, filename: &str) -> Option<&'a PitEntry> {
     pit_data.entries.iter().find(|e| {
         let flash_fn = e.flash_filename.to_string_lossy();
@@ -525,5 +473,49 @@ pub(crate) fn action_flash(
     let partition_infos = unique_partition_infos;
 
     // 7. Execute flash pipeline
-    execute_flash_pipeline(odin_manager, partition_infos, reboot_device)
+    let total_bytes: u64 = partition_infos
+        .iter()
+        .map(|part| match part {
+            FirmwareInfo::Normal(f) => f.file.len() as u64,
+            FirmwareInfo::Lz4(f) => f.header.content_size,
+        })
+        .sum();
+
+    if let Err(e) = odin_manager.set_total_bytes(total_bytes) {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    for info in partition_infos {
+        match info {
+            FirmwareInfo::Normal(f) => {
+                println!("Uploading {}", f.pit_entry.partition_name);
+                if let Err(e) = odin_manager.send_file(&f) {
+                    print_error!("{}", e);
+                    return 1;
+                }
+                println!("{} upload successful\n", f.pit_entry.partition_name);
+            }
+            FirmwareInfo::Lz4(f) => {
+                println!("Uploading {}", f.pit_entry.partition_name);
+                if let Err(e) = odin_manager.send_lz4_file(&f) {
+                    print_error!("{}", e);
+                    return 1;
+                }
+                println!("{} upload successful\n", f.pit_entry.partition_name);
+            }
+        }
+    }
+
+    if let Err(e) = odin_manager.end_session() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    if reboot_device && let Err(e) = odin_manager.reboot_device() {
+        print_error!("{}", e);
+        return 1;
+    }
+
+    0
 }

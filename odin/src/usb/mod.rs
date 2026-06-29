@@ -56,7 +56,6 @@ const SUPPORTED_DEVICES: &[(u16, u16)] = &[
     (VID_SAMSUNG, PID_DROID_CHARGE),
 ];
 
-#[allow(dead_code)]
 const USB_CLASS_CDC_DATA: u8 = 0x0A;
 
 /// Trait representing a duplex data transport layer for USB or serial communication.

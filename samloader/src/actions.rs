@@ -21,7 +21,7 @@ use samloader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
-pub(crate) fn action_detect(usb_backend: UsbBackendOption, _verbose: bool, wait: bool) -> i32 {
+pub(crate) fn action_detect(usb_backend: UsbBackendOption, wait: bool) -> i32 {
     let detected = detect_device(usb_backend, wait);
     if detected {
         println!("Device detected");
@@ -36,6 +36,7 @@ pub(crate) fn action_dump_pit(
     usb_backend: UsbBackendOption,
     output: &str,
     verbose: bool,
+    reboot_device: bool,
     wait: bool,
 ) -> i32 {
     if output.is_empty() {
@@ -92,7 +93,7 @@ pub(crate) fn action_dump_pit(
         success = false;
     }
 
-    if let Err(e) = odin_manager.reboot_device() {
+    if reboot_device && let Err(e) = odin_manager.reboot_device() {
         print_error!("{}", e);
         success = false;
     }
@@ -104,6 +105,7 @@ pub(crate) fn action_print_pit(
     usb_backend: UsbBackendOption,
     file: &str,
     verbose: bool,
+    reboot_device: bool,
     wait: bool,
 ) -> i32 {
     if !file.is_empty() {
@@ -179,7 +181,7 @@ pub(crate) fn action_print_pit(
             success = false;
         }
 
-        if let Err(e) = odin_manager.reboot_device() {
+        if reboot_device && let Err(e) = odin_manager.reboot_device() {
             print_error!("{}", e);
             success = false;
         }
