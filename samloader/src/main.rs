@@ -38,6 +38,31 @@ macro_rules! print_error {
     };
 }
 
+const ENABLED_BACKENDS: &[&str] = &[
+    #[cfg(feature = "nusb")]
+    UsbBackendOption::Nusb.to_str(),
+    #[cfg(feature = "rusb")]
+    UsbBackendOption::Libusb.to_str(),
+    #[cfg(feature = "serialport")]
+    UsbBackendOption::Vcom.to_str(),
+];
+
+// On Windows, the default USB backend is set to VCOM rather than libusb/nusb.
+// This is because libusb/nusb requires replacing the standard device driver
+// with a WinUSB/generic driver (e.g., using a utility like Zadig).
+// This manual driver swap breaks compatibility with the official
+// Samsung USB drivers, creating a poor user experience.
+// In contrast, the VCOM (Virtual COM Port/usbser.sys) implementation
+// on Windows works out-of-the-box, requires no special driver
+// modifications, and performs extremely fast.
+cfg_if::cfg_if! {
+    if #[cfg(all(target_os = "windows", feature = "serialport"))] {
+        const DEFAULT_BACKEND: &str = UsbBackendOption::Vcom.to_str();
+    } else {
+        const DEFAULT_BACKEND: &str = ENABLED_BACKENDS.first().unwrap();
+    }
+}
+
 // =============================================================================
 // CLI String Constants
 // =============================================================================
@@ -154,31 +179,6 @@ impl OdinOptionExt for Command {
 }
 
 fn main() {
-    let enabled_backends: &[&'static str] = &[
-        #[cfg(feature = "nusb")]
-        From::from(UsbBackendOption::Nusb),
-        #[cfg(feature = "rusb")]
-        From::from(UsbBackendOption::Libusb),
-        #[cfg(feature = "serialport")]
-        From::from(UsbBackendOption::Vcom),
-    ];
-
-    // On Windows, the default USB backend is set to VCOM rather than libusb/nusb.
-    // This is because libusb/nusb requires replacing the standard device driver
-    // with a WinUSB/generic driver (e.g., using a utility like Zadig).
-    // This manual driver swap breaks compatibility with the official
-    // Samsung USB drivers, creating a poor user experience.
-    // In contrast, the VCOM (Virtual COM Port/usbser.sys) implementation
-    // on Windows works out-of-the-box, requires no special driver
-    // modifications, and performs extremely fast.
-    cfg_if::cfg_if! {
-        if #[cfg(all(target_os = "windows", feature = "serialport"))] {
-            let default_backend: &str = From::from(UsbBackendOption::Vcom);
-        } else {
-            let default_backend: &str = enabled_backends.first().unwrap();
-        }
-    }
-
     #[allow(unused_mut)]
     let mut cmd = Command::new("samloader")
         .about("Download and flash firmware for Samsung devices")
@@ -196,8 +196,8 @@ fn main() {
             Arg::new("usb_backend")
                 .long("usb-backend")
                 .global(true)
-                .default_value(default_backend)
-                .value_parser(enabled_backends.to_vec())
+                .default_value(DEFAULT_BACKEND)
+                .value_parser(ENABLED_BACKENDS.to_vec())
                 .help(USB_BACKEND_HELP),
         )
         .subcommand(

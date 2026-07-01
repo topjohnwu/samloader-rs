@@ -142,9 +142,10 @@ impl std::str::FromStr for UsbBackendOption {
     }
 }
 
-impl From<UsbBackendOption> for &'static str {
-    fn from(opt: UsbBackendOption) -> Self {
-        match opt {
+impl UsbBackendOption {
+    /// Returns the string representation of the backend option.
+    pub const fn to_str(self) -> &'static str {
+        match self {
             #[cfg(feature = "rusb")]
             UsbBackendOption::Libusb => "libusb",
             #[cfg(feature = "serialport")]
@@ -157,7 +158,7 @@ impl From<UsbBackendOption> for &'static str {
 
 impl std::fmt::Display for UsbBackendOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", <&'static str>::from(*self))
+        write!(f, "{}", self.to_str())
     }
 }
 
