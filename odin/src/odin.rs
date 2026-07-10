@@ -161,6 +161,9 @@ impl OdinManager {
         // We do a fire-and-forget send with no retries and a short timeout.
         let _ = self.usb.send_data(&packet.pack(), 500, false);
 
+        // This is required for some devices e.g. A55.
+        self.receive_empty(100);
+
         Ok(())
     }
 
