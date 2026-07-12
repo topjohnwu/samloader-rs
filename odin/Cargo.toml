@@ -11,6 +11,7 @@ keywords = ["samsung", "firmware"]
 [dependencies]
 samloader-pit = { workspace = true }
 memmap2 = { workspace = true }
+tar = { workspace = true }
 rusb = { workspace = true, optional = true }
 nusb = { workspace = true, optional = true }
 binrw = { workspace = true }

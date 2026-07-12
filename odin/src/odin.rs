@@ -27,6 +27,26 @@ pub trait FlashProgress: Send + Sync {
 
     /// Increments the progress by the specified number of bytes.
     fn inc(&self, bytes: u64);
+
+    /// Gets the current absolute byte position of the progress.
+    fn position(&self) -> u64 {
+        0
+    }
+
+    /// Prints a standard log or status message.
+    fn println(&self, _msg: &str) {}
+
+    /// Prints a verbose log or status message (implementation decides if it is shown).
+    fn println_verbose(&self, _msg: &str) {}
+
+    /// Notify that partition flashing has started.
+    fn start_partition(&self, _name: &str, _size: u64) {}
+
+    /// Notify that partition flashing completed successfully.
+    fn end_partition(&self, _name: &str) {}
+
+    /// Notify that partition flashing failed.
+    fn fail_partition(&self, _name: &str) {}
 }
 
 impl FlashProgress for () {
@@ -371,7 +391,7 @@ impl OdinManager {
         &mut self,
         sequences: Iter,
         pit_entry: &PitEntry,
-        progress: &impl FlashProgress,
+        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError>
     where
         Bytes: AsRef<[u8]>,
@@ -410,7 +430,7 @@ impl OdinManager {
     pub fn send_file(
         &mut self,
         info: &crate::firmware::FirmwareFile,
-        progress: &impl FlashProgress,
+        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError> {
         progress.set_length(info.file.len() as u64);
         let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
@@ -422,7 +442,7 @@ impl OdinManager {
     pub fn send_lz4_file(
         &mut self,
         info: &crate::firmware::FirmwareLz4File,
-        progress: &impl FlashProgress,
+        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError> {
         if !self.lz4_supported || info.header.block_max_size != 1024 * 1024 {
             progress.set_length(info.header.content_size);
@@ -468,7 +488,7 @@ impl OdinManager {
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
         sequence_data: &[u8],
-        progress: &impl FlashProgress,
+        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError> {
         self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;

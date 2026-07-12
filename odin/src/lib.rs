@@ -18,14 +18,16 @@
 
 mod error;
 mod firmware;
+mod flash;
 mod odin;
 mod packets;
 mod usb;
 
-pub use error::OdinError;
+pub use error::{FlashError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
+pub use flash::FlashManager;
 pub use odin::{FlashProgress, OdinManager, reboot_download};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 

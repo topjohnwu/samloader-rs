@@ -180,3 +180,67 @@ pub enum OdinError {
     #[error("{0}")]
     ParseError(String),
 }
+
+/// Represents errors that can occur during the high-level flashing process.
+#[derive(Error, Debug)]
+pub enum FlashError {
+    /// An error originating from the low-level Odin protocol client.
+    #[error("Odin error: {0}")]
+    Odin(#[from] OdinError),
+
+    /// Failed to open a file.
+    #[error("Failed to open file \"{0}\": {1}")]
+    FileOpenFailed(String, #[source] std::io::Error),
+
+    /// Failed to read from a file.
+    #[error("Failed to read file \"{0}\": {1}")]
+    FileReadFailed(String, #[source] std::io::Error),
+
+    /// Failed to seek within a file.
+    #[error("Failed to seek file \"{0}\": {1}")]
+    FileSeekFailed(String, #[source] std::io::Error),
+
+    /// Failed to memory-map a file.
+    #[error("Failed to memory map file \"{0}\": {1}")]
+    MmapFailed(String, #[source] std::io::Error),
+
+    /// Failed to parse an LZ4 frame header.
+    #[error("Failed to parse LZ4 header for \"{0}\": {1}")]
+    Lz4Header(String, #[source] std::io::Error),
+
+    /// Failed to read entries from a TAR archive.
+    #[error("Failed to read archive entries for \"{0}\": {1}")]
+    ArchiveReadFailed(String, #[source] std::io::Error),
+
+    /// The TAR archive contains a corrupted entry.
+    #[error("Corrupted archive entry in \"{0}\": {1}")]
+    ArchiveCorrupted(String, #[source] std::io::Error),
+
+    /// MD5 verification failed for a TAR archive.
+    #[error("MD5 verification failed for \"{0}\": {1}")]
+    Md5VerificationFailed(String, #[source] std::io::Error),
+
+    /// The files within the packages do not agree on the download allowlist manifest.
+    #[error("Cross-archive consistency check failed! download-list.txt does not match.")]
+    CrossArchiveInconsistency,
+
+    /// Partition re-allocation requires an explicit PIT file.
+    #[error("If you wish to repartition then a PIT file must be specified.")]
+    RepartitionPitRequired,
+
+    /// Failed to unpack the device-specific PIT file.
+    #[error("Failed to unpack device's PIT file: {0}")]
+    PitUnpackFailed(#[source] binrw::Error),
+
+    /// The file does not map to any partition in the active PIT table.
+    #[error("File \"{0}\" does not match any partition in the specified PIT.")]
+    PartitionNotFound(String),
+
+    /// The requested partition ID does not exist in the active PIT table.
+    #[error("Partition identifier {0} does not exist in the specified PIT.")]
+    PartitionIdNotFound(u32),
+
+    /// The file payload is larger than the partition size defined in PIT.
+    #[error("{0} partition is too small for given file. Use --skip-size-check to flash anyways.")]
+    PartitionTooSmall(String),
+}
