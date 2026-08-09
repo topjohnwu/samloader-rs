@@ -301,7 +301,9 @@ impl OdinManager {
 
         let response = self.receive_packet::<packets::Response>(3000)?;
 
-        if response.response_type != packets::RESPONSE_TYPE_PIT_FILE {
+        if response.response_type != packets::RESPONSE_TYPE_SEND_FILE_PART
+            && response.response_type != packets::RESPONSE_TYPE_PIT_FILE
+        {
             return Err(OdinError::ResponseTypeMismatch {
                 expected: packets::RESPONSE_TYPE_PIT_FILE,
                 received: response.response_type,
