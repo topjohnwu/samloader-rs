@@ -55,7 +55,10 @@ impl MockBackend {
             outgoing_queue: VecDeque::new(),
             current_part_index: 0,
             packet_size: 0x20000, // default Loke part size
-            pit_data: include_bytes!("../../../test-data/Q7MQ_EUR_OPENX.pit"),
+            pit_data: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/test-data/Q7MQ_EUR_OPENX.pit"
+            )),
         }
     }
 

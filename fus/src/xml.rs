@@ -327,7 +327,10 @@ mod tests {
 
     #[test]
     fn test_parse_version_xml() {
-        let xml_content = include_str!("../../test-data/version.xml");
+        let xml_content = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-data/version.xml"
+        ));
 
         let info = parse_version_xml(xml_content).unwrap();
         assert_eq!(
@@ -352,7 +355,10 @@ mod tests {
 
     #[test]
     fn test_parse_history_xml() {
-        let xml_content = include_str!("../../test-data/history.xml");
+        let xml_content = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-data/history.xml"
+        ));
 
         let info = parse_history_xml(xml_content).unwrap();
         assert_eq!(
