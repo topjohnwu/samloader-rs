@@ -29,10 +29,10 @@ binrw = "0.15"
 cfg-if = "1.0"
 modular-bitfield = "0.13.1"
 rusb = { version = "0.9", features = ["vendored"] }
-nusb = "0.2.4"
-serialport = { version = "4.9", default-features = false }
+nusb = "0.2.7"
+serialport = { version = "4.10", default-features = false }
 tar = "0.4"
 fast-md5 = "1.0.0"
 thiserror = "2"
-lz4_flex = "0.13.1"
+lz4_flex = "0.14.0"
 libc = "0.2"
