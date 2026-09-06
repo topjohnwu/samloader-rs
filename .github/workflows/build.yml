@@ -1,7 +1,12 @@
 name: samloader build
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   linux:
@@ -42,7 +47,15 @@ jobs:
           zip -j samloader-v$VERSION-linux-${{ matrix.arch }}.zip \
             target/${{ matrix.arch }}-unknown-linux-musl/release/samloader
 
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" samloader-*.zip --clobber
+
       - name: Upload build artifact
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           path: samloader-*.zip
@@ -76,7 +89,15 @@ jobs:
           7z a ../../samloader-v$VERSION-windows-${{ matrix.arch }}.zip \
             samloader.exe
 
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" samloader-*.zip --clobber
+
       - name: Upload build artifact
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           path: samloader-*.zip
@@ -106,7 +127,15 @@ jobs:
           zip -j samloader-v$VERSION-macos-universal.zip \
             target/samloader
 
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" samloader-*.zip --clobber
+
       - name: Upload build artifact
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           path: samloader-*.zip
