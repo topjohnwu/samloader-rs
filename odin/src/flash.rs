@@ -18,7 +18,8 @@ use crate::FlashError;
 use crate::firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer_with_progress,
 };
-use crate::odin::{FlashProgress, OdinManager};
+use crate::odin::OdinManager;
+use crate::progress::{FlashEvent, FlashProgress};
 use memmap2::{Mmap, MmapOptions};
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -534,7 +535,10 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                 FirmwareInfo::Lz4(f) => f.header.content_size,
             };
 
-            self.progress.start_partition(&name, partition_size);
+            self.progress.on_event(FlashEvent::PartitionStart {
+                name: &name,
+                size: partition_size,
+            });
 
             let res = match info {
                 FirmwareInfo::Normal(f) => self.odin_manager.send_file(&f, self.progress),
@@ -542,11 +546,11 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             };
 
             if let Err(e) = res {
-                self.progress.fail_partition(&name);
+                self.progress.on_event(FlashEvent::PartitionFail(&name));
                 return Err(FlashError::Odin(e));
             }
 
-            self.progress.end_partition(&name);
+            self.progress.on_event(FlashEvent::PartitionEnd(&name));
         }
 
         self.odin_manager.end_session()?;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::odin::FlashProgress;
+use crate::progress::{FlashEvent, FlashProgress};
 use fast_md5::Md5;
 use lz4_flex::frame::FrameDecoder;
 use memmap2::Mmap;
@@ -84,7 +84,10 @@ pub fn verify_md5_footer_with_progress<R: Read + Seek>(
     // The payload size is the exact position up to the MD5 footer text
     let payload_size = file_size - footer_line.len() as u64 - 1;
 
-    progress.start_md5(name, payload_size);
+    progress.on_event(FlashEvent::Md5Start {
+        name,
+        size: payload_size,
+    });
 
     let res = (|| -> io::Result<()> {
         // Reset file pointer and compute MD5 over the payload only
@@ -113,9 +116,9 @@ pub fn verify_md5_footer_with_progress<R: Read + Seek>(
     })();
 
     if res.is_err() {
-        progress.fail_md5(name);
+        progress.on_event(FlashEvent::Md5Fail(name));
     } else {
-        progress.end_md5(name);
+        progress.on_event(FlashEvent::Md5End(name));
     }
 
     res
@@ -403,16 +406,21 @@ mod tests {
             self.inc_bytes.fetch_add(bytes, Ordering::Relaxed);
         }
 
-        fn start_md5(&self, _name: &str, total_bytes: u64) {
-            self.started_total.store(total_bytes, Ordering::Relaxed);
-        }
-
-        fn end_md5(&self, _name: &str) {
-            self.ended.store(true, Ordering::Relaxed);
-        }
-
-        fn fail_md5(&self, _name: &str) {
-            self.failed.store(true, Ordering::Relaxed);
+        fn on_event(&self, event: FlashEvent<'_>) {
+            match event {
+                FlashEvent::Md5Start {
+                    size: total_bytes, ..
+                } => {
+                    self.started_total.store(total_bytes, Ordering::Relaxed);
+                }
+                FlashEvent::Md5End(_) => {
+                    self.ended.store(true, Ordering::Relaxed);
+                }
+                FlashEvent::Md5Fail(_) => {
+                    self.failed.store(true, Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
     }
 

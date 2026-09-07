@@ -16,52 +16,10 @@
 use crate::error::OdinError;
 use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
+use crate::progress::FlashProgress;
 use crate::usb::UsbTransfer;
 use samloader_pit::{BinaryType, PitEntry};
 use std::time::Duration;
-
-/// A trait for reporting partition flash/upload progress.
-pub trait FlashProgress: Send + Sync {
-    /// Sets the total length of the progress (in bytes).
-    fn set_length(&self, len: u64);
-
-    /// Increments the progress by the specified number of bytes.
-    fn inc(&self, bytes: u64);
-
-    /// Gets the current absolute byte position of the progress.
-    fn position(&self) -> u64 {
-        0
-    }
-
-    /// Prints a standard log or status message.
-    fn println(&self, _msg: &str) {}
-
-    /// Prints a verbose log or status message (implementation decides if it is shown).
-    fn println_verbose(&self, _msg: &str) {}
-
-    /// Notify that partition flashing has started.
-    fn start_partition(&self, _name: &str, _size: u64) {}
-
-    /// Notify that partition flashing completed successfully.
-    fn end_partition(&self, _name: &str) {}
-
-    /// Notify that partition flashing failed.
-    fn fail_partition(&self, _name: &str) {}
-
-    /// Notify that MD5 verification has started.
-    fn start_md5(&self, _name: &str, _total_bytes: u64) {}
-
-    /// Notify that MD5 verification completed successfully.
-    fn end_md5(&self, _name: &str) {}
-
-    /// Notify that MD5 verification failed.
-    fn fail_md5(&self, _name: &str) {}
-}
-
-impl FlashProgress for () {
-    fn set_length(&self, _len: u64) {}
-    fn inc(&self, _bytes: u64) {}
-}
 
 /// Driver and session manager coordinating the Samsung Odin/Loke flashing protocol.
 pub struct OdinManager {

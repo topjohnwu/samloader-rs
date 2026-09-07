@@ -21,6 +21,7 @@ mod firmware;
 mod flash;
 mod odin;
 mod packets;
+mod progress;
 mod usb;
 
 pub use error::{FlashError, OdinError};
@@ -29,7 +30,8 @@ pub use firmware::{
     verify_md5_footer_with_progress,
 };
 pub use flash::FlashManager;
-pub use odin::{FlashProgress, OdinManager, reboot_download};
+pub use odin::{OdinManager, reboot_download};
+pub use progress::{FlashEvent, FlashProgress};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 
 #[cfg(feature = "nusb")]

@@ -17,7 +17,9 @@
 use crate::PartitionArg;
 use crate::print_error;
 use indicatif::{ProgressBar, ProgressStyle};
-use samloader_odin::{FlashManager, FlashProgress, OdinManager, UsbBackendOption, create_backend};
+use samloader_odin::{
+    FlashEvent, FlashManager, FlashProgress, OdinManager, UsbBackendOption, create_backend,
+};
 use std::time::Duration;
 
 const PROGRESS_TEMPLATE: &str =
@@ -25,7 +27,6 @@ const PROGRESS_TEMPLATE: &str =
 
 pub(crate) struct CliProgress {
     progress_bar: std::sync::Mutex<Option<ProgressBar>>,
-    position: std::sync::atomic::AtomicU64,
     verbose: bool,
 }
 
@@ -33,7 +34,6 @@ impl CliProgress {
     pub(crate) fn new(verbose: bool) -> Self {
         Self {
             progress_bar: std::sync::Mutex::new(None),
-            position: std::sync::atomic::AtomicU64::new(0),
             verbose,
         }
     }
@@ -47,15 +47,9 @@ impl FlashProgress for CliProgress {
     }
 
     fn inc(&self, bytes: u64) {
-        self.position
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         if let Some(pb) = &*self.progress_bar.lock().unwrap() {
             pb.inc(bytes);
         }
-    }
-
-    fn position(&self) -> u64 {
-        self.position.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn println(&self, msg: &str) {
@@ -72,53 +66,55 @@ impl FlashProgress for CliProgress {
         }
     }
 
-    fn start_partition(&self, name: &str, size: u64) {
-        let pb = ProgressBar::no_length()
-            .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
-        pb.enable_steady_tick(Duration::from_secs(1));
-        pb.set_message(format!("Flashing {}", name));
-        if size > 0 {
-            pb.set_length(size);
-        }
-        *self.progress_bar.lock().unwrap() = Some(pb);
-    }
-
-    fn end_partition(&self, name: &str) {
-        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
-            pb.set_message(format!("{} flash successful", name));
-            pb.finish();
-            println!();
-        }
-    }
-
-    fn fail_partition(&self, name: &str) {
-        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
-            pb.abandon_with_message(format!("{} flash failed", name));
-        }
-    }
-
-    fn start_md5(&self, name: &str, total_bytes: u64) {
-        let pb = ProgressBar::no_length()
-            .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
-        pb.enable_steady_tick(Duration::from_secs(1));
-        pb.set_message(format!("Verifying MD5 checksum for {}", name));
-        if total_bytes > 0 {
-            pb.set_length(total_bytes);
-        }
-        *self.progress_bar.lock().unwrap() = Some(pb);
-    }
-
-    fn end_md5(&self, name: &str) {
-        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
-            pb.set_message(format!("{} MD5 verification successful", name));
-            pb.finish();
-            println!();
-        }
-    }
-
-    fn fail_md5(&self, name: &str) {
-        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
-            pb.abandon_with_message(format!("{} MD5 verification failed", name));
+    fn on_event(&self, event: FlashEvent<'_>) {
+        match event {
+            FlashEvent::PartitionStart { name, size } => {
+                let pb = ProgressBar::no_length()
+                    .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
+                pb.enable_steady_tick(Duration::from_secs(1));
+                pb.set_message(format!("Flashing {}", name));
+                if size > 0 {
+                    pb.set_length(size);
+                }
+                *self.progress_bar.lock().unwrap() = Some(pb);
+            }
+            FlashEvent::PartitionEnd(name) => {
+                if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+                    pb.set_message(format!("{} flash successful", name));
+                    pb.finish();
+                    println!();
+                }
+            }
+            FlashEvent::PartitionFail(name) => {
+                if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+                    pb.abandon_with_message(format!("{} flash failed", name));
+                }
+            }
+            FlashEvent::Md5Start {
+                name,
+                size: total_bytes,
+            } => {
+                let pb = ProgressBar::no_length()
+                    .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
+                pb.enable_steady_tick(Duration::from_secs(1));
+                pb.set_message(format!("Verifying MD5 checksum for {}", name));
+                if total_bytes > 0 {
+                    pb.set_length(total_bytes);
+                }
+                *self.progress_bar.lock().unwrap() = Some(pb);
+            }
+            FlashEvent::Md5End(name) => {
+                if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+                    pb.set_message(format!("{} MD5 verification successful", name));
+                    pb.finish();
+                    println!();
+                }
+            }
+            FlashEvent::Md5Fail(name) => {
+                if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+                    pb.abandon_with_message(format!("{} MD5 verification failed", name));
+                }
+            }
         }
     }
 }
