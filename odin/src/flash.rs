@@ -27,11 +27,28 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use tar::Archive;
 
-struct IndexedEntry {
+struct IndexedEntry<'a> {
     original_name: String,
     normalized_name: String,
-    mmap: Mmap,
+    file: &'a File,
+    offset: u64,
+    size: u64,
     is_lz4: bool,
+}
+
+impl<'a> IndexedEntry<'a> {
+    fn map(&self) -> Result<Mmap, FlashError> {
+        // SAFETY: The archive file is opened read-only and is assumed not to be
+        // concurrently modified or truncated during the flashing operation.
+        let mmap = unsafe {
+            MmapOptions::new()
+                .offset(self.offset)
+                .len(self.size as usize)
+                .map(self.file)
+        }
+        .map_err(|e| FlashError::MmapFailed(self.original_name.clone(), e))?;
+        Ok(mmap)
+    }
 }
 
 fn normalize_basename(path_str: &str) -> (String, bool) {
@@ -191,8 +208,9 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             self.pit_file_bytes = Some(buffer);
         }
 
-        // Step 2: Scan package files to find resolved entries and pull package PIT if needed
-        let resolved_entries = self.scan_tar_packages()?;
+        // Step 2: Open packages and scan TAR containers to index entries
+        let opened_packages = self.open_and_verify_packages()?;
+        let resolved_entries = self.scan_tar_packages(&opened_packages)?;
 
         // Step 3: Handle repartitioning and download active PIT data from the device
         let pit_data = self.download_and_parse_pit(self.repartition)?;
@@ -211,49 +229,58 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         Ok(())
     }
 
-    // Helper 2: Scan TAR packages to find resolved entries and pull package PIT if needed
-    fn scan_tar_packages(&mut self) -> Result<Vec<IndexedEntry>, FlashError> {
+    // Helper 1: Open TAR packages and optionally verify MD5 footers
+    fn open_and_verify_packages(&self) -> Result<Vec<(String, File)>, FlashError> {
         if self.packages.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Open all packages into a File first
         let mut opened_packages = Vec::new();
         for pkg in &self.packages {
             let file = File::open(pkg).map_err(|e| FlashError::FileOpenFailed(pkg.clone(), e))?;
-            opened_packages.push((pkg, file));
+            opened_packages.push((pkg.clone(), file));
         }
 
-        // MD5 verification of .tar.md5 packages
         if !self.skip_md5 {
             for (pkg, file) in &mut opened_packages {
                 if pkg.to_lowercase().ends_with(".md5") {
                     self.progress
                         .println(&format!("Verifying MD5 checksum for {}...", pkg));
                     verify_md5_footer(&*file)
-                        .map_err(|e| FlashError::Md5VerificationFailed((*pkg).clone(), e))?;
+                        .map_err(|e| FlashError::Md5VerificationFailed(pkg.clone(), e))?;
                     file.seek(SeekFrom::Start(0))
-                        .map_err(|e| FlashError::FileSeekFailed((*pkg).clone(), e))?;
+                        .map_err(|e| FlashError::FileSeekFailed(pkg.clone(), e))?;
                     self.progress.println("MD5 verification successful!\n");
                 }
             }
         }
 
+        Ok(opened_packages)
+    }
+
+    // Helper 2: Scan TAR packages to find resolved entries and pull package PIT if needed
+    fn scan_tar_packages<'p>(
+        &mut self,
+        opened_packages: &'p [(String, File)],
+    ) -> Result<Vec<IndexedEntry<'p>>, FlashError> {
+        if opened_packages.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Scan and index TAR containers
         let mut archives_download_lists: Vec<HashSet<String>> = Vec::new();
-        let mut all_packages_entries: Vec<Vec<IndexedEntry>> = Vec::new();
+        let mut all_packages_entries: Vec<Vec<IndexedEntry<'p>>> = Vec::new();
 
-        for (pkg, file) in &opened_packages {
+        for (pkg, file) in opened_packages {
             let mut archive = Archive::new(file);
             let entries = archive
                 .entries()
-                .map_err(|e| FlashError::ArchiveReadFailed((*pkg).clone(), e))?;
+                .map_err(|e| FlashError::ArchiveReadFailed(pkg.clone(), e))?;
 
             let mut package_entries = Vec::new();
 
             for entry_res in entries {
-                let entry =
-                    entry_res.map_err(|e| FlashError::ArchiveCorrupted((*pkg).clone(), e))?;
+                let entry = entry_res.map_err(|e| FlashError::ArchiveCorrupted(pkg.clone(), e))?;
 
                 let entry_path = match entry.path() {
                     Ok(p) => p.to_string_lossy().to_string(),
@@ -284,20 +311,12 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                         archives_download_lists.push(download_list);
                     }
                 } else {
-                    // SAFETY: The archive file is opened read-only and is assumed not to be
-                    // concurrently modified or truncated during the flashing operation.
-                    let mmap = unsafe {
-                        MmapOptions::new()
-                            .offset(offset)
-                            .len(size as usize)
-                            .map(file)
-                    }
-                    .map_err(|e| FlashError::MmapFailed(entry_path.clone(), e))?;
-
                     package_entries.push(IndexedEntry {
                         original_name: entry_path,
                         normalized_name,
-                        mmap,
+                        file,
+                        offset,
+                        size,
                         is_lz4,
                     });
                 }
@@ -318,8 +337,8 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             None
         };
 
-        let mut resolved_entries: Vec<IndexedEntry> = Vec::new();
-        let mut pit_entry: Option<IndexedEntry> = None;
+        let mut resolved_entries: Vec<IndexedEntry<'p>> = Vec::new();
+        let mut pit_entry: Option<IndexedEntry<'p>> = None;
 
         // Apply manifest filtering and positional precedence (last-writer-wins)
         for package_entries in all_packages_entries {
@@ -342,8 +361,11 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         }
 
         // Extract PIT local bytes if any from TAR archives and set internal field if still None
-        if self.pit_file_bytes.is_none() {
-            self.pit_file_bytes = pit_entry.map(|entry| entry.mmap.to_vec());
+        if self.pit_file_bytes.is_none()
+            && let Some(entry) = pit_entry
+        {
+            let mmap = entry.map()?;
+            self.pit_file_bytes = Some(mmap.to_vec());
         }
 
         Ok(resolved_entries)
@@ -373,13 +395,23 @@ impl<'a, 'b> FlashManager<'a, 'b> {
     fn build_partition_infos<'c>(
         &self,
         pit_data: &'c PitData,
-        resolved_entries: Vec<IndexedEntry>,
+        resolved_entries: Vec<IndexedEntry<'_>>,
         partitions: &[(Option<String>, String)],
         skip_size_check: bool,
     ) -> Result<Vec<FirmwareInfo<'c>>, FlashError> {
-        let mut partition_infos = Vec::new();
+        enum PartitionSource<'p> {
+            Archive(IndexedEntry<'p>),
+            File { path: String, is_lz4: bool },
+        }
 
-        // Build firmware partition infos from TAR packages (keeping package order)
+        struct PlannedPartition<'p, 'pit> {
+            pit_entry: &'pit PitEntry,
+            source: PartitionSource<'p>,
+        }
+
+        let mut planned_partitions = Vec::new();
+
+        // 1. Collect candidate entries from TAR packages
         for entry in resolved_entries {
             let Some(pit_entry) = find_pit_entry_by_filename(pit_data, &entry.normalized_name)
             else {
@@ -390,19 +422,13 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                 continue;
             };
 
-            let size = entry.mmap.len() as u64;
-            let info = create_firmware_info(
-                entry.mmap,
-                size,
-                entry.is_lz4,
+            planned_partitions.push(PlannedPartition {
                 pit_entry,
-                skip_size_check,
-                &entry.original_name,
-            )?;
-            partition_infos.push(info);
+                source: PartitionSource::Archive(entry),
+            });
         }
 
-        // Build firmware partition infos from individual files
+        // 2. Collect candidate individual files
         for (part_name, part_filename) in partitions {
             let (filename, is_lz4_suffix) = normalize_basename(part_filename);
             let entry = match part_name {
@@ -427,40 +453,59 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                 }
             };
 
-            let (mmap, file_size) = File::open(part_filename)
-                .and_then(|f| {
-                    let file_size = f.metadata()?.len();
-                    // SAFETY: The partition file is opened read-only and is assumed not to be
-                    // concurrently modified or truncated during the flashing operation.
-                    let mmap = unsafe { MmapOptions::new().len(file_size as usize).map(&f)? };
-                    Ok((mmap, file_size))
-                })
-                .map_err(|e| FlashError::MmapFailed(part_filename.clone(), e))?;
+            planned_partitions.push(PlannedPartition {
+                pit_entry: entry,
+                source: PartitionSource::File {
+                    path: part_filename.clone(),
+                    is_lz4: is_lz4_suffix,
+                },
+            });
+        }
+
+        // 3. Partition deduplication: last writer wins
+        let mut mapped_partition_ids = HashSet::new();
+        let mut unique_planned = Vec::new();
+        for planned in planned_partitions.into_iter().rev() {
+            if mapped_partition_ids.insert(planned.pit_entry.identifier) {
+                unique_planned.push(planned);
+            }
+        }
+        unique_planned.reverse();
+
+        // 4. Lazily map and build FirmwareInfo only for unique planned partitions
+        let mut unique_partition_infos = Vec::with_capacity(unique_planned.len());
+        for planned in unique_planned {
+            let (mmap, file_size, is_lz4, display_name) = match planned.source {
+                PartitionSource::Archive(entry) => {
+                    let mmap = entry.map()?;
+                    (mmap, entry.size, entry.is_lz4, entry.original_name)
+                }
+                PartitionSource::File { path, is_lz4 } => {
+                    let (mmap, file_size) = File::open(&path)
+                        .and_then(|f| {
+                            let file_size = f.metadata()?.len();
+                            // SAFETY: The partition file is opened read-only and is assumed not to be
+                            // concurrently modified or truncated during the flashing operation.
+                            let mmap =
+                                unsafe { MmapOptions::new().len(file_size as usize).map(&f)? };
+                            Ok((mmap, file_size))
+                        })
+                        .map_err(|e| FlashError::MmapFailed(path.clone(), e))?;
+                    (mmap, file_size, is_lz4, path)
+                }
+            };
 
             let info = create_firmware_info(
                 mmap,
                 file_size,
-                is_lz4_suffix,
-                entry,
+                is_lz4,
+                planned.pit_entry,
                 skip_size_check,
-                part_filename,
+                &display_name,
             )?;
-            partition_infos.push(info);
+            unique_partition_infos.push(info);
         }
 
-        // Partition deduplication: last writer wins
-        let mut mapped_partition_ids = HashSet::new();
-        let mut unique_partition_infos = Vec::new();
-        for info in partition_infos.into_iter().rev() {
-            let id = match &info {
-                FirmwareInfo::Normal(f) => f.pit_entry.identifier,
-                FirmwareInfo::Lz4(f) => f.pit_entry.identifier,
-            };
-            if mapped_partition_ids.insert(id) {
-                unique_partition_infos.push(info);
-            }
-        }
-        unique_partition_infos.reverse();
         Ok(unique_partition_infos)
     }
 
