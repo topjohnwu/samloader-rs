@@ -18,6 +18,7 @@ use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
 use crate::usb::UsbTransfer;
 use samloader_pit::{BinaryType, PitEntry};
+use std::io;
 use std::time::Duration;
 
 /// A trait for reporting partition flash/upload progress.
@@ -375,14 +376,16 @@ impl OdinManager {
     ) -> Result<(), OdinError>
     where
         Bytes: AsRef<[u8]>,
-        Iter: Iterator<Item = Bytes>,
+        Iter: Iterator<Item = io::Result<Bytes>>,
     {
         let packet = RequestPacket::file_transfer_flash();
         self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let mut sequences = sequences.peekable();
-        while let Some(sequence_data) = sequences.next() {
+        while let Some(sequence) = sequences.next() {
+            let sequence_data =
+                sequence.map_err(|error| OdinError::FirmwareDataError(error.to_string()))?;
             let sequence_data = sequence_data.as_ref();
             let start_packet = RequestPacket::flash_part_file_transfer(sequence_data.len() as u32);
 
@@ -413,7 +416,9 @@ impl OdinManager {
         progress: &impl FlashProgress,
     ) -> Result<(), OdinError> {
         progress.set_length(info.file.len() as u64);
-        let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
+        let sequences = info
+            .sequences(self.file_transfer_sequence_max_bytes())
+            .map(Ok);
         self.send_raw_sequences(sequences, info.pit_entry, progress)
     }
 
@@ -439,7 +444,9 @@ impl OdinManager {
         let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
 
         let mut sequences = sequences.peekable();
-        while let Some((decompressed_size, sequence_data)) = sequences.next() {
+        while let Some(sequence) = sequences.next() {
+            let (decompressed_size, sequence_data) =
+                sequence.map_err(|error| OdinError::FirmwareDataError(error.to_string()))?;
             let start_packet =
                 RequestPacket::flash_lz4_part_file_transfer(sequence_data.len() as u32);
 
@@ -478,6 +485,7 @@ impl OdinManager {
             .enumerate()
         {
             let mut success = false;
+            let mut last_mismatch = None;
             for retry in 0..5 {
                 if retry > 0 {
                     println!("\nRetrying...");
@@ -507,11 +515,8 @@ impl OdinManager {
                         if response.value as usize == file_part_index {
                             success = true;
                             break;
-                        } else if retry == 0 {
-                            return Err(OdinError::FilePartIndexMismatch {
-                                expected: file_part_index,
-                                received: response.value,
-                            });
+                        } else {
+                            last_mismatch = Some(response.value);
                         }
                     }
                     _ => {}
@@ -519,6 +524,12 @@ impl OdinManager {
             }
 
             if !success {
+                if let Some(received) = last_mismatch {
+                    return Err(OdinError::FilePartIndexMismatch {
+                        expected: file_part_index,
+                        received,
+                    });
+                }
                 return Err(OdinError::FilePartResponseReceiveFailed);
             }
 
