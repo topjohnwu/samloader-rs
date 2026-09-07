@@ -344,7 +344,12 @@ fn download_chunk(
 
         let stall = loop {
             match resp.read(&mut chunk[dl_pos..]) {
-                Ok(0) => return ChunkOutcome::Done, // chunk fully received and decrypted
+                Ok(0) => {
+                    break std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "download ended before the requested chunk was complete",
+                    );
+                }
                 Ok(n) => dl_pos += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => break e, // connection dropped: resume the outer loop

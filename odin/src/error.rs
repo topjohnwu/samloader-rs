@@ -179,4 +179,8 @@ pub enum OdinError {
     /// An error occurred while parsing structures or headers.
     #[error("{0}")]
     ParseError(String),
+
+    /// Firmware payload data was truncated or otherwise invalid.
+    #[error("Invalid firmware payload: {0}")]
+    FirmwareDataError(String),
 }

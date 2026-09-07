@@ -140,6 +140,10 @@ fn scan_tar_packages(
             let offset = entry.raw_file_position();
             let size = entry.size();
 
+            if !entry.header().entry_type().is_file() || size == 0 {
+                continue;
+            }
+
             let (normalized_name, is_lz4) = normalize_basename(&entry_path);
 
             if normalized_name == "download-list.txt" {
@@ -209,6 +213,10 @@ fn scan_tar_packages(
     for package_entries in all_packages_entries {
         for entry in package_entries {
             if entry.normalized_name.ends_with(".pit") {
+                if pit_entry.is_some() {
+                    print_error!("Multiple PIT files found; refusing to choose one silently.");
+                    return Err(1);
+                }
                 pit_entry = Some(entry);
             } else if let Some(allowlist) = download_allowlist {
                 if allowlist.contains(&entry.normalized_name) {

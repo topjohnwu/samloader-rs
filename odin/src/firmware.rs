@@ -58,26 +58,33 @@ pub fn verify_md5_footer<R: Read + Seek>(mut reader: R) -> io::Result<()> {
 
     let footer_start = null_idx + 1;
     let footer_bytes = &last_bytes[footer_start..];
-    let footer_str = String::from_utf8_lossy(footer_bytes);
-    let footer_line = footer_str.lines().last().unwrap_or_default();
+    let mut footer_line = footer_bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if footer_line.ends_with(b"\r") {
+        footer_line = &footer_line[..footer_line.len() - 1];
+    }
 
-    if footer_line.len() < 32 {
+    if footer_line.len() != 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Could not find a valid MD5 checksum at the end of the file",
         ));
     }
 
-    let expected_hex = &footer_line[..32];
+    let footer_line = std::str::from_utf8(footer_line)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "MD5 footer is not ASCII"))?;
+
     let mut expected_bytes = [0u8; 16];
     for i in 0..16 {
-        let hex_byte = &expected_hex[i * 2..i * 2 + 2];
+        let hex_byte = &footer_line[i * 2..i * 2 + 2];
         expected_bytes[i] = u8::from_str_radix(hex_byte, 16)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     }
 
-    // The payload size is the exact position up to the MD5 footer text
-    let payload_size = file_size - footer_line.len() as u64 - 1;
+    // The payload ends immediately before the footer, after the TAR null separator.
+    let payload_size = seek_pos + null_idx as u64 + 1;
 
     // Reset file pointer and compute MD5 over the payload only
     reader.seek(SeekFrom::Start(0))?;
@@ -141,6 +148,7 @@ impl Lz4FrameHeader {
 
         let block_independence = ((flg >> 5) & 0x01) == 1;
         let block_checksum = ((flg >> 4) & 0x01) == 1;
+        let content_checksum = ((flg >> 2) & 0x01) == 1;
         let content_size_flag = ((flg >> 3) & 0x01) == 1;
         let dict_id_flag = (flg & 0x01) == 1;
 
@@ -154,6 +162,12 @@ impl Lz4FrameHeader {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "LZ4 block checksum must be disabled",
+            ));
+        }
+        if content_checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LZ4 content checksum must be disabled",
             ));
         }
         if !block_independence {
@@ -243,6 +257,7 @@ impl<'a> FirmwareLz4File<'a> {
         Lz4DecompressedSequenceIterator {
             decoder: FrameDecoder::new(&self.file[..]),
             sequence_max_bytes,
+            remaining_decompressed: self.header.content_size,
         }
     }
 }
@@ -264,7 +279,7 @@ pub(crate) struct Lz4SequenceIterator<'a> {
 }
 
 impl<'a> Iterator for Lz4SequenceIterator<'a> {
-    type Item = (usize, &'a [u8]);
+    type Item = io::Result<(usize, &'a [u8])>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -278,7 +293,10 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
         while num_blocks < self.max_blocks {
             if self.bytes_read + 4 > self.file.len() {
                 self.finished = true;
-                break;
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "LZ4 stream is missing its end mark",
+                )));
             }
             let block_size = u32::from_le_bytes(
                 self.file[self.bytes_read..self.bytes_read + 4]
@@ -289,13 +307,22 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
             if block_size == 0 {
                 self.bytes_read += 4; // Advance past EndMark
                 self.finished = true;
+                if self.remaining_decompressed != 0 {
+                    return Some(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "LZ4 stream ended before the declared content size",
+                    )));
+                }
                 break;
             }
 
             let data_size = (block_size & 0x7FFF_FFFF) as usize;
             if self.bytes_read + 4 + data_size > self.file.len() {
                 self.finished = true;
-                break;
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "LZ4 block is truncated",
+                )));
             }
 
             self.bytes_read += 4 + data_size;
@@ -313,7 +340,7 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
         ) as usize;
         self.remaining_decompressed -= decompressed_size as u64;
 
-        Some((decompressed_size, &self.file[start_pos..end_pos]))
+        Some(Ok((decompressed_size, &self.file[start_pos..end_pos])))
     }
 }
 
@@ -321,28 +348,84 @@ impl<'a> Iterator for Lz4SequenceIterator<'a> {
 pub struct Lz4DecompressedSequenceIterator<'a> {
     decoder: FrameDecoder<&'a [u8]>,
     sequence_max_bytes: usize,
+    remaining_decompressed: u64,
 }
 
 impl<'a> Iterator for Lz4DecompressedSequenceIterator<'a> {
-    type Item = Vec<u8>;
+    type Item = io::Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut buffer = vec![0u8; self.sequence_max_bytes];
-        let mut total_read = 0;
-
-        while total_read < self.sequence_max_bytes {
-            match self.decoder.read(&mut buffer[total_read..]) {
-                Ok(0) => break,
-                Ok(n) => total_read += n,
-                Err(_) => break,
-            }
-        }
-
-        if total_read == 0 {
+        if self.remaining_decompressed == 0 {
             return None;
         }
 
+        let buffer_size =
+            std::cmp::min(self.sequence_max_bytes as u64, self.remaining_decompressed) as usize;
+        let mut buffer = vec![0u8; buffer_size];
+        let mut total_read = 0;
+
+        while total_read < buffer_size {
+            match self.decoder.read(&mut buffer[total_read..]) {
+                Ok(0) => {
+                    return Some(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "LZ4 stream ended before the declared content size",
+                    )));
+                }
+                Ok(n) => total_read += n,
+                Err(error) => return Some(Err(error)),
+            }
+        }
+
+        self.remaining_decompressed -= total_read as u64;
         buffer.truncate(total_read);
-        Some(buffer)
+        Some(Ok(buffer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn package_with_footer(line_ending: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0xA5; 99];
+        payload.push(0);
+        let mut md5 = Md5::new();
+        md5.update(&payload);
+        let digest = md5.finalize();
+        let checksum = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        payload.extend_from_slice(checksum.as_bytes());
+        payload.extend_from_slice(line_ending);
+        payload
+    }
+
+    #[test]
+    fn md5_footer_accepts_no_trailing_newline() {
+        assert!(verify_md5_footer(Cursor::new(package_with_footer(b""))).is_ok());
+    }
+
+    #[test]
+    fn md5_footer_accepts_crlf() {
+        assert!(verify_md5_footer(Cursor::new(package_with_footer(b"\r\n"))).is_ok());
+    }
+
+    #[test]
+    fn lz4_content_checksum_is_rejected() {
+        let header = [
+            0x04, 0x22, 0x4D, 0x18, // magic
+            0x6C, // version, independent blocks, content size, content checksum
+            0x60, // 1 MiB blocks
+            0, 0, 0, 0, 0, 0, 0, 0, // content size
+            0, // header checksum (not validated by this parser)
+        ];
+
+        let result = Lz4FrameHeader::parse(Cursor::new(header));
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(error.to_string().contains("content checksum"));
     }
 }
