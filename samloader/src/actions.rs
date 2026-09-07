@@ -16,7 +16,8 @@
 use crate::flash::CliProgress;
 use crate::print_error;
 use samloader_odin::{
-    OdinManager, UsbBackendOption, create_backend, detect_device, verify_md5_footer_with_progress,
+    OdinConnection, UsbBackendOption, create_backend, detect_device,
+    verify_md5_footer_with_progress,
 };
 use samloader_pit::PitData;
 use std::fs::File;
@@ -62,22 +63,25 @@ pub(crate) fn action_dump_pit(
             return 1;
         }
     };
-    let mut odin_manager = OdinManager::new(usb, verbose);
+    let mut connection = OdinConnection::new(usb, verbose);
 
-    if let Err(e) = odin_manager.init() {
+    if let Err(e) = connection.init() {
         print_error!("{}", e);
         return 1;
     }
 
-    if let Err(e) = odin_manager.begin_session() {
-        print_error!("{}", e);
-        return 1;
-    }
+    let mut session = match connection.begin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            print_error!("{}", e);
+            return 1;
+        }
+    };
 
     let mut success = true;
 
     println!("Downloading device's PIT file");
-    match odin_manager.download_pit_file() {
+    match session.download_pit_file() {
         Ok(pit_buffer) => {
             if let Err(e) = output_file.write_all(&pit_buffer) {
                 print_error!("Failed to write PIT data to output file: {}", e);
@@ -90,12 +94,12 @@ pub(crate) fn action_dump_pit(
         }
     }
 
-    if let Err(e) = odin_manager.end_session() {
+    if let Err(e) = session.end_session() {
         print_error!("{}", e);
         success = false;
     }
 
-    if reboot_device && let Err(e) = odin_manager.reboot_device() {
+    if reboot_device && let Err(e) = session.reboot_device() {
         print_error!("{}", e);
         success = false;
     }
@@ -143,23 +147,26 @@ pub(crate) fn action_print_pit(
                 return 1;
             }
         };
-        let mut odin_manager = OdinManager::new(usb, verbose);
+        let mut connection = OdinConnection::new(usb, verbose);
 
-        if let Err(e) = odin_manager.init() {
+        if let Err(e) = connection.init() {
             print_error!("{}", e);
             return 1;
         }
 
-        if let Err(e) = odin_manager.begin_session() {
-            print_error!("{}", e);
-            return 1;
-        }
+        let mut session = match connection.begin_session() {
+            Ok(s) => s,
+            Err(e) => {
+                print_error!("{}", e);
+                return 1;
+            }
+        };
 
         let mut success = true;
         let mut device_pit_data = None;
 
         println!("Downloading device's PIT file");
-        match odin_manager.download_pit_file() {
+        match session.download_pit_file() {
             Ok(device_pit) => match PitData::new(&device_pit) {
                 Ok(pit_data) => {
                     device_pit_data = Some(pit_data);
@@ -179,12 +186,12 @@ pub(crate) fn action_print_pit(
             println!("{}", pit_data);
         }
 
-        if let Err(e) = odin_manager.end_session() {
+        if let Err(e) = session.end_session() {
             print_error!("{}", e);
             success = false;
         }
 
-        if reboot_device && let Err(e) = odin_manager.reboot_device() {
+        if reboot_device && let Err(e) = session.reboot_device() {
             print_error!("{}", e);
             success = false;
         }

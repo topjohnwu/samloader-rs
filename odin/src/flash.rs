@@ -18,7 +18,7 @@ use crate::FlashError;
 use crate::firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer_with_progress,
 };
-use crate::odin::OdinManager;
+use crate::odin::OdinSession;
 use crate::progress::{FlashEvent, FlashProgress};
 use memmap2::{Mmap, MmapOptions};
 use samloader_pit::{PitData, PitEntry};
@@ -125,7 +125,7 @@ fn create_firmware_info<'a>(
 /// Orchestrates the flashing pipeline, processing package and partition sources
 /// and executing the Loke flash protocol.
 pub struct FlashManager<'a, 'b> {
-    odin_manager: &'b mut OdinManager,
+    session: &'b mut OdinSession,
     progress: &'a dyn FlashProgress,
     pit_file_bytes: Option<Vec<u8>>,
 
@@ -139,10 +139,10 @@ pub struct FlashManager<'a, 'b> {
 }
 
 impl<'a, 'b> FlashManager<'a, 'b> {
-    /// Creates a new `FlashManager` associated with an active `OdinManager` and a `FlashProgress` reporter.
-    pub fn new(odin_manager: &'b mut OdinManager, progress: &'a dyn FlashProgress) -> Self {
+    /// Creates a new `FlashManager` associated with an active `OdinSession` and a `FlashProgress` reporter.
+    pub fn new(session: &'b mut OdinSession, progress: &'a dyn FlashProgress) -> Self {
         Self {
-            odin_manager,
+            session,
             progress,
             pit_file_bytes: None,
             repartition: false,
@@ -378,13 +378,13 @@ impl<'a, 'b> FlashManager<'a, 'b> {
 
         if repartition {
             self.progress.println("Flashing PIT");
-            self.odin_manager
+            self.session
                 .send_pit_data(self.pit_file_bytes.as_ref().unwrap())?;
             self.progress.println("PIT flash successful\n");
         }
 
         self.progress.println("Downloading device's PIT file");
-        let pit_buffer = self.odin_manager.download_pit_file()?;
+        let pit_buffer = self.session.download_pit_file()?;
 
         let pit_data = PitData::new(&pit_buffer).map_err(FlashError::PitUnpackFailed)?;
         Ok(pit_data)
@@ -522,7 +522,7 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             })
             .sum();
 
-        self.odin_manager.set_total_bytes(total_bytes)?;
+        self.session.set_total_bytes(total_bytes)?;
 
         for info in partition_infos {
             let name = match &info {
@@ -541,8 +541,8 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             });
 
             let res = match info {
-                FirmwareInfo::Normal(f) => self.odin_manager.send_file(&f, self.progress),
-                FirmwareInfo::Lz4(f) => self.odin_manager.send_lz4_file(&f, self.progress),
+                FirmwareInfo::Normal(f) => self.session.send_file(&f, self.progress),
+                FirmwareInfo::Lz4(f) => self.session.send_lz4_file(&f, self.progress),
             };
 
             if let Err(e) = res {
@@ -553,10 +553,10 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             self.progress.on_event(FlashEvent::PartitionEnd(&name));
         }
 
-        self.odin_manager.end_session()?;
+        self.session.end_session()?;
 
         if reboot_device {
-            self.odin_manager.reboot_device()?;
+            self.session.reboot_device()?;
         }
 
         Ok(())

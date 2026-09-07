@@ -17,25 +17,25 @@ This crate manages communication with Samsung devices in Download Mode (Odin pro
 ### Establishing a Session with a Connected Device
 
 ```rust
-use samloader_odin::{OdinManager, UsbBackendOption, create_backend};
+use samloader_odin::{OdinConnection, UsbBackendOption, create_backend};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Establish the USB/VCOM backend connection
     let usb = create_backend(UsbBackendOption::Nusb, true, true)?;
-    let mut odin_manager = OdinManager::new(usb, true);
+    let mut connection = OdinConnection::new(usb, true);
 
-    // 2. Run the Loke protocol handshake
-    odin_manager.init()?;
+    // 2. Run the Loke protocol handshake (simple string in/out)
+    connection.init()?;
     
-    // 3. Negotiate features (packet size, LZ4 compression, etc.)
-    odin_manager.begin_session()?;
+    // 3. Negotiate features and initialize an active packet session
+    let mut session = connection.begin_session()?;
 
-    // 4. Download and print the device's PIT layout
-    let pit_bytes = odin_manager.download_pit_file()?;
+    // 4. Download and print the device's PIT layout (packet I/O)
+    let pit_bytes = session.download_pit_file()?;
     println!("PIT downloaded successfully ({} bytes).", pit_bytes.len());
 
     // 5. Safely end the session
-    odin_manager.end_session()?;
+    session.end_session()?;
 
     Ok(())
 }

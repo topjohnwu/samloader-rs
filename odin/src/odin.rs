@@ -21,16 +21,14 @@ use crate::usb::UsbTransfer;
 use samloader_pit::{BinaryType, PitEntry};
 use std::time::Duration;
 
-/// Driver and session manager coordinating the Samsung Odin/Loke flashing protocol.
-pub struct OdinManager {
+/// Manages the initial connection to a Samsung device in Download Mode.
+///
+/// At this stage, communication is restricted to raw string commands (e.g. handshake
+/// strings or AT commands). Complex packet I/O requires transitioning to an [`OdinSession`]
+/// via [`begin_session`](Self::begin_session).
+pub struct OdinConnection {
     verbose: bool,
     usb: Box<dyn UsbTransfer>,
-
-    file_transfer_sequence_max_length: usize,
-    file_transfer_packet_size: usize,
-    file_transfer_sequence_timeout: u32,
-    lz4_supported: bool,
-    bootloader_protocol_version: u32,
 }
 
 #[derive(PartialEq, Eq, Copy, Clone)]
@@ -45,19 +43,10 @@ const FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT: usize = 800;
 const FILE_TRANSFER_PACKET_SIZE_DEFAULT: usize = 0x20000;
 const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
 
-impl OdinManager {
-    /// Creates a new `OdinManager` instance with a given transport and verbosity.
+impl OdinConnection {
+    /// Creates a new `OdinConnection` instance with a given transport and verbosity.
     pub fn new(usb: Box<dyn UsbTransfer>, verbose: bool) -> Self {
-        Self {
-            verbose,
-            usb,
-
-            file_transfer_sequence_max_length: FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT,
-            file_transfer_packet_size: FILE_TRANSFER_PACKET_SIZE_DEFAULT,
-            file_transfer_sequence_timeout: FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT,
-            lz4_supported: false,
-            bootloader_protocol_version: 0,
-        }
+        Self { verbose, usb }
     }
 
     /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
@@ -84,81 +73,6 @@ impl OdinManager {
         }
     }
 
-    /// Begins an active flashing session, negotiating features such as packet size and LZ4 support.
-    pub fn begin_session(&mut self) -> Result<(), OdinError> {
-        println!("Beginning session...");
-
-        let packet = RequestPacket::begin_session();
-        let session_response = self
-            .request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::BeginSessionFailed)?;
-
-        self.bootloader_protocol_version = if session_response == 0 {
-            1
-        } else {
-            session_response >> 16
-        };
-
-        println!("\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n");
-        std::thread::sleep(Duration::from_millis(3000));
-
-        if self.bootloader_protocol_version >= 2 {
-            self.lz4_supported = (session_response & 0x8000) != 0;
-            self.file_transfer_sequence_timeout = 120000;
-            self.file_transfer_packet_size = 0x100000;
-            self.file_transfer_sequence_max_length = 30;
-
-            let packet = RequestPacket::file_part_size(self.file_transfer_packet_size as u32);
-            let value = self
-                .request_and_response(&packet, EmptySendKind::After, 3000)
-                .map_err(|_| OdinError::FilePartSizeSendFailed)?;
-
-            if value != 0 {
-                return Err(OdinError::UnexpectedFilePartSizeResponse(value));
-            }
-        }
-
-        println!("Session begun.\n");
-        Ok(())
-    }
-
-    /// Ends the active flashing session on the device.
-    pub fn end_session(&mut self) -> Result<(), OdinError> {
-        println!("Ending session...");
-
-        let packet = RequestPacket::end_session();
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::EndSessionSendFailed)?;
-
-        Ok(())
-    }
-
-    /// Reboots the device normally out of Download Mode.
-    pub fn reboot_device(&mut self) -> Result<(), OdinError> {
-        println!("Rebooting device...");
-
-        let packet = RequestPacket::reboot_device();
-        use crate::packets::OutboundPacket;
-        if self.verbose {
-            eprintln!("Sending packet: {:#04X?}", packet);
-        }
-
-        // The device immediately reboots and drops the USB connection,
-        // so the write may partially fail and a response will never arrive.
-        // We do a fire-and-forget send with no retries and a short timeout.
-        let _ = self.usb.send_data(&packet.pack(), 500, false);
-
-        // This is required for some devices e.g. A55.
-        self.send_empty(100);
-        self.receive_empty(100);
-
-        Ok(())
-    }
-
-    fn send_empty(&mut self, timeout: i32) {
-        self.usb.send_data(&[], timeout, false);
-    }
-
     /// Sends a raw string message over the transport connection.
     pub fn send_string(&mut self, s: &str, timeout: i32) -> Result<(), OdinError> {
         if self.verbose {
@@ -168,11 +82,6 @@ impl OdinManager {
             return Err(OdinError::SendPacketFailed);
         }
         Ok(())
-    }
-
-    fn receive_empty(&mut self, timeout: i32) {
-        let mut buffer = vec![0u8; 1];
-        self.usb.receive_data(&mut buffer, timeout, false);
     }
 
     /// Receives a raw string message from the transport connection.
@@ -192,13 +101,133 @@ impl OdinManager {
         Ok(String::from_utf8_lossy(&data).into_owned())
     }
 
+    /// Begins an active flashing session, negotiating features such as packet size and LZ4 support,
+    /// transitioning the connection into an [`OdinSession`].
+    pub fn begin_session(self) -> Result<OdinSession, OdinError> {
+        OdinSession::begin(self)
+    }
+}
+
+/// An active flashing session coordinating Samsung Odin/Loke packet transfers.
+pub struct OdinSession {
+    connection: OdinConnection,
+
+    file_transfer_sequence_max_length: usize,
+    file_transfer_packet_size: usize,
+    file_transfer_sequence_timeout: u32,
+    lz4_supported: bool,
+    bootloader_protocol_version: u32,
+}
+
+impl OdinSession {
+    fn begin(connection: OdinConnection) -> Result<Self, OdinError> {
+        println!("Beginning session...");
+
+        let mut session = Self {
+            connection,
+            file_transfer_sequence_max_length: FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT,
+            file_transfer_packet_size: FILE_TRANSFER_PACKET_SIZE_DEFAULT,
+            file_transfer_sequence_timeout: FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT,
+            lz4_supported: false,
+            bootloader_protocol_version: 0,
+        };
+
+        let packet = RequestPacket::begin_session();
+        let session_response = session
+            .request_and_response(&packet, EmptySendKind::After, 3000)
+            .map_err(|_| OdinError::BeginSessionFailed)?;
+
+        session.bootloader_protocol_version = if session_response == 0 {
+            1
+        } else {
+            session_response >> 16
+        };
+
+        println!("\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n");
+        std::thread::sleep(Duration::from_millis(3000));
+
+        if session.bootloader_protocol_version >= 2 {
+            session.lz4_supported = (session_response & 0x8000) != 0;
+            session.file_transfer_sequence_timeout = 120000;
+            session.file_transfer_packet_size = 0x100000;
+            session.file_transfer_sequence_max_length = 30;
+
+            let packet = RequestPacket::file_part_size(session.file_transfer_packet_size as u32);
+            let value = session
+                .request_and_response(&packet, EmptySendKind::After, 3000)
+                .map_err(|_| OdinError::FilePartSizeSendFailed)?;
+
+            if value != 0 {
+                return Err(OdinError::UnexpectedFilePartSizeResponse(value));
+            }
+        }
+
+        println!("Session begun.\n");
+        Ok(session)
+    }
+
+    /// Ends the active flashing session on the device.
+    pub fn end_session(&mut self) -> Result<(), OdinError> {
+        println!("Ending session...");
+
+        let packet = RequestPacket::end_session();
+        self.request_and_response(&packet, EmptySendKind::After, 3000)
+            .map_err(|_| OdinError::EndSessionSendFailed)?;
+
+        Ok(())
+    }
+
+    /// Reboots the device normally out of Download Mode.
+    pub fn reboot_device(&mut self) -> Result<(), OdinError> {
+        println!("Rebooting device...");
+
+        let packet = RequestPacket::reboot_device();
+        use crate::packets::OutboundPacket;
+        if self.connection.verbose {
+            eprintln!("Sending packet: {:#04X?}", packet);
+        }
+
+        // The device immediately reboots and drops the USB connection,
+        // so the write may partially fail and a response will never arrive.
+        // We do a fire-and-forget send with no retries and a short timeout.
+        let _ = self.connection.usb.send_data(&packet.pack(), 500, false);
+
+        // This is required for some devices e.g. A55.
+        self.send_empty(100);
+        self.receive_empty(100);
+
+        Ok(())
+    }
+
+    /// Ends the session and returns the underlying connection.
+    pub fn close(mut self) -> Result<OdinConnection, OdinError> {
+        self.end_session()?;
+        Ok(self.connection)
+    }
+
+    /// Consumes the session and returns the underlying connection without sending an end-session packet.
+    pub fn into_connection(self) -> OdinConnection {
+        self.connection
+    }
+
+    fn send_empty(&mut self, timeout: i32) {
+        self.connection.usb.send_data(&[], timeout, false);
+    }
+
+    fn receive_empty(&mut self, timeout: i32) {
+        let mut buffer = vec![0u8; 1];
+        self.connection
+            .usb
+            .receive_data(&mut buffer, timeout, false);
+    }
+
     fn send_packet(
         &mut self,
         packet: &(impl packets::OutboundPacket + std::fmt::Debug),
         empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<(), ()> {
-        if self.verbose {
+        if self.connection.verbose {
             eprintln!("Sending packet: {:#04X?}", packet);
         }
         let packet_bytes = packet.pack();
@@ -207,7 +236,7 @@ impl OdinManager {
         {
             self.send_empty(100);
         }
-        if !self.usb.send_data(&packet_bytes, timeout, true) {
+        if !self.connection.usb.send_data(&packet_bytes, timeout, true) {
             return Err(());
         }
         if empty_send_kind == EmptySendKind::After
@@ -224,7 +253,7 @@ impl OdinManager {
         timeout: i32,
     ) -> Result<T, OdinError> {
         let mut buffer = vec![0u8; size];
-        let received_size = self.usb.receive_data(&mut buffer, timeout, true);
+        let received_size = self.connection.usb.receive_data(&mut buffer, timeout, true);
 
         if received_size < 0 {
             return Err(OdinError::ReceivePacketFailed);
@@ -232,7 +261,7 @@ impl OdinManager {
 
         buffer.truncate(received_size as usize);
         let parsed = T::unpack(&buffer).map_err(OdinError::ParseError)?;
-        if self.verbose {
+        if self.connection.verbose {
             eprintln!("Received packet: {:#04X?}", parsed);
         }
         Ok(parsed)
@@ -586,22 +615,38 @@ mod tests {
     #[test]
     fn test_odin_mock_session_and_pit_download() {
         let backend = Box::new(MockBackend::new(true));
-        let mut manager = OdinManager::new(backend, true);
+        let mut connection = OdinConnection::new(backend, true);
 
-        // handshake
-        assert!(manager.init().is_ok());
+        // handshake with simple string in/out
+        assert!(connection.init().is_ok());
 
-        // session begin
-        assert!(manager.begin_session().is_ok());
-        assert_eq!(manager.bootloader_protocol_version(), 2);
-        assert!(manager.is_lz4_supported());
+        // transition connection into active packet session
+        let mut session = connection.begin_session().unwrap();
+        assert_eq!(session.bootloader_protocol_version(), 2);
+        assert!(session.is_lz4_supported());
 
-        // PIT dump
-        let pit_bytes = manager.download_pit_file().unwrap();
+        // PIT dump (packet I/O)
+        let pit_bytes = session.download_pit_file().unwrap();
         // Q7MQ_EUR_OPENX.pit is exactly 18492 bytes including cryptographic signature
         assert_eq!(pit_bytes.len(), 18492);
 
-        // end session
-        assert!(manager.end_session().is_ok());
+        // end session and retrieve connection
+        let mut connection = session.close().unwrap();
+
+        // connection is usable again
+        assert!(connection.send_string("ODIN", 1000).is_ok());
+    }
+
+    #[test]
+    fn test_odin_connection_raw_string_io() {
+        let backend = Box::new(MockBackend::new(true));
+        let mut connection = OdinConnection::new(backend, true);
+
+        // Send raw string
+        assert!(connection.send_string("ODIN", 1000).is_ok());
+
+        // Receive raw string response
+        let resp = connection.receive_string(1000).unwrap();
+        assert_eq!(resp, "LOKE");
     }
 }
