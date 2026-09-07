@@ -26,6 +26,7 @@ mod usb;
 pub use error::{FlashError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
+    verify_md5_footer_with_progress,
 };
 pub use flash::FlashManager;
 pub use odin::{FlashProgress, OdinManager, reboot_download};

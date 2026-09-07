@@ -23,10 +23,20 @@ use std::time::Duration;
 const PROGRESS_TEMPLATE: &str =
     "{msg}\n[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
-struct CliProgress {
+pub(crate) struct CliProgress {
     progress_bar: std::sync::Mutex<Option<ProgressBar>>,
     position: std::sync::atomic::AtomicU64,
     verbose: bool,
+}
+
+impl CliProgress {
+    pub(crate) fn new(verbose: bool) -> Self {
+        Self {
+            progress_bar: std::sync::Mutex::new(None),
+            position: std::sync::atomic::AtomicU64::new(0),
+            verbose,
+        }
+    }
 }
 
 impl FlashProgress for CliProgress {
@@ -86,6 +96,31 @@ impl FlashProgress for CliProgress {
             pb.abandon_with_message(format!("{} flash failed", name));
         }
     }
+
+    fn start_md5(&self, name: &str, total_bytes: u64) {
+        let pb = ProgressBar::no_length()
+            .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
+        pb.enable_steady_tick(Duration::from_secs(1));
+        pb.set_message(format!("Verifying MD5 checksum for {}", name));
+        if total_bytes > 0 {
+            pb.set_length(total_bytes);
+        }
+        *self.progress_bar.lock().unwrap() = Some(pb);
+    }
+
+    fn end_md5(&self, name: &str) {
+        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+            pb.set_message(format!("{} MD5 verification successful", name));
+            pb.finish();
+            println!();
+        }
+    }
+
+    fn fail_md5(&self, name: &str) {
+        if let Some(pb) = self.progress_bar.lock().unwrap().take() {
+            pb.abandon_with_message(format!("{} MD5 verification failed", name));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -101,11 +136,7 @@ pub(crate) fn action_flash(
     packages: &[String],
     partitions: &[PartitionArg],
 ) -> i32 {
-    let progress = CliProgress {
-        progress_bar: std::sync::Mutex::new(None),
-        position: std::sync::atomic::AtomicU64::new(0),
-        verbose,
-    };
+    let progress = CliProgress::new(verbose);
 
     let usb = match create_backend(usb_backend, verbose, wait) {
         Ok(u) => u,

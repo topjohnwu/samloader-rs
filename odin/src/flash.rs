@@ -16,7 +16,7 @@
 
 use crate::FlashError;
 use crate::firmware::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer_with_progress,
 };
 use crate::odin::{FlashProgress, OdinManager};
 use memmap2::{Mmap, MmapOptions};
@@ -244,13 +244,11 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         if !self.skip_md5 {
             for (pkg, file) in &mut opened_packages {
                 if pkg.to_lowercase().ends_with(".md5") {
-                    self.progress
-                        .println(&format!("Verifying MD5 checksum for {}...", pkg));
-                    verify_md5_footer(&*file)
+                    verify_md5_footer_with_progress(&*file, pkg, self.progress)
                         .map_err(|e| FlashError::Md5VerificationFailed(pkg.clone(), e))?;
+
                     file.seek(SeekFrom::Start(0))
                         .map_err(|e| FlashError::FileSeekFailed(pkg.clone(), e))?;
-                    self.progress.println("MD5 verification successful!\n");
                 }
             }
         }

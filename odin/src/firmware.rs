@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::odin::FlashProgress;
 use fast_md5::Md5;
 use lz4_flex::frame::FrameDecoder;
 use memmap2::Mmap;
@@ -21,8 +22,12 @@ use std::io::{self, Read, Seek, SeekFrom};
 // This is asserted by Lz4FrameHeader so the header size is always 15
 const LZ4_HEADER_SIZE: usize = 15;
 
-/// Verifies the trailing MD5 checksum appended to `.tar.md5` package files.
-pub fn verify_md5_footer<R: Read + Seek>(mut reader: R) -> io::Result<()> {
+/// Verifies the trailing MD5 checksum appended to `.tar.md5` package files with progress callbacks.
+pub fn verify_md5_footer_with_progress<R: Read + Seek>(
+    mut reader: R,
+    name: &str,
+    progress: &dyn FlashProgress,
+) -> io::Result<()> {
     let file_size = reader.seek(SeekFrom::End(0))?;
 
     if file_size < 34 {
@@ -79,28 +84,46 @@ pub fn verify_md5_footer<R: Read + Seek>(mut reader: R) -> io::Result<()> {
     // The payload size is the exact position up to the MD5 footer text
     let payload_size = file_size - footer_line.len() as u64 - 1;
 
-    // Reset file pointer and compute MD5 over the payload only
-    reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = Md5::new();
-    let mut buffer = [0u8; 128 * 1024];
-    let mut remaining = payload_size;
+    progress.start_md5(name, payload_size);
 
-    while remaining > 0 {
-        let to_read = std::cmp::min(remaining, buffer.len() as u64) as usize;
-        reader.read_exact(&mut buffer[..to_read])?;
-        hasher.update(&buffer[..to_read]);
-        remaining -= to_read as u64;
+    let res = (|| -> io::Result<()> {
+        // Reset file pointer and compute MD5 over the payload only
+        reader.seek(SeekFrom::Start(0))?;
+        let mut hasher = Md5::new();
+        let mut buffer = [0u8; 128 * 1024];
+        let mut remaining = payload_size;
+
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining, buffer.len() as u64) as usize;
+            reader.read_exact(&mut buffer[..to_read])?;
+            hasher.update(&buffer[..to_read]);
+            progress.inc(to_read as u64);
+            remaining -= to_read as u64;
+        }
+
+        let calculated_digest = hasher.finalize();
+        if calculated_digest != expected_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MD5 verification failed! File is corrupted or modified.",
+            ));
+        }
+
+        Ok(())
+    })();
+
+    if res.is_err() {
+        progress.fail_md5(name);
+    } else {
+        progress.end_md5(name);
     }
 
-    let calculated_digest = hasher.finalize();
-    if calculated_digest != expected_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "MD5 verification failed! File is corrupted or modified.",
-        ));
-    }
+    res
+}
 
-    Ok(())
+/// Verifies the trailing MD5 checksum appended to `.tar.md5` package files.
+pub fn verify_md5_footer<R: Read + Seek>(reader: R) -> io::Result<()> {
+    verify_md5_footer_with_progress(reader, "", &())
 }
 
 /// Header containing metadata parsed from an LZ4 frame.
@@ -344,5 +367,109 @@ impl<'a> Iterator for Lz4DecompressedSequenceIterator<'a> {
 
         buffer.truncate(total_read);
         Some(buffer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fast_md5::Md5;
+    use std::fmt::Write;
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    struct TestProgress {
+        started_total: AtomicU64,
+        inc_bytes: AtomicU64,
+        ended: AtomicBool,
+        failed: AtomicBool,
+    }
+
+    impl TestProgress {
+        fn new() -> Self {
+            Self {
+                started_total: AtomicU64::new(0),
+                inc_bytes: AtomicU64::new(0),
+                ended: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl FlashProgress for TestProgress {
+        fn set_length(&self, _len: u64) {}
+
+        fn inc(&self, bytes: u64) {
+            self.inc_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        fn start_md5(&self, _name: &str, total_bytes: u64) {
+            self.started_total.store(total_bytes, Ordering::Relaxed);
+        }
+
+        fn end_md5(&self, _name: &str) {
+            self.ended.store(true, Ordering::Relaxed);
+        }
+
+        fn fail_md5(&self, _name: &str) {
+            self.failed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_verify_md5_footer_success() {
+        // Construct a synthetic TAR payload with zeroes padding and MD5 footer
+        let payload = b"Hello, Odin TAR payload with some content!";
+        let mut data = Vec::new();
+        data.extend_from_slice(payload);
+        // Null byte separating payload from MD5 footer text
+        data.push(0);
+
+        let mut hasher = Md5::new();
+        hasher.update(&data);
+        let digest = hasher.finalize();
+
+        let hex_str = digest.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{:02x}", b);
+            s
+        });
+        let footer = format!("{}  test.tar\n", hex_str);
+        data.extend_from_slice(footer.as_bytes());
+
+        let progress = TestProgress::new();
+        let res = verify_md5_footer_with_progress(Cursor::new(&data), "test.tar", &progress);
+
+        assert!(res.is_ok());
+        let expected_total = (payload.len() + 1) as u64;
+        assert_eq!(
+            progress.started_total.load(Ordering::Relaxed),
+            expected_total
+        );
+        assert_eq!(progress.inc_bytes.load(Ordering::Relaxed), expected_total);
+        assert!(progress.ended.load(Ordering::Relaxed));
+        assert!(!progress.failed.load(Ordering::Relaxed));
+
+        // Also test the convenience wrapper
+        assert!(verify_md5_footer(Cursor::new(&data)).is_ok());
+    }
+
+    #[test]
+    fn test_verify_md5_footer_corruption() {
+        let payload = b"Hello, Odin TAR payload with some content!";
+        let mut data = Vec::new();
+        data.extend_from_slice(payload);
+        data.push(0);
+
+        // Intentionally wrong hash
+        let footer = "0123456789abcdef0123456789abcdef  test.tar\n";
+        data.extend_from_slice(footer.as_bytes());
+
+        let progress = TestProgress::new();
+        let res = verify_md5_footer_with_progress(Cursor::new(&data), "test.tar", &progress);
+        assert!(res.is_err());
+        assert!(progress.failed.load(Ordering::Relaxed));
+        assert!(!progress.ended.load(Ordering::Relaxed));
+
+        assert!(verify_md5_footer(Cursor::new(&data)).is_err());
     }
 }

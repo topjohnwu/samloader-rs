@@ -13,9 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::flash::CliProgress;
 use crate::print_error;
 use samloader_odin::{
-    OdinManager, UsbBackendOption, create_backend, detect_device, verify_md5_footer,
+    OdinManager, UsbBackendOption, create_backend, detect_device, verify_md5_footer_with_progress,
 };
 use samloader_pit::PitData;
 use std::fs::File;
@@ -204,8 +205,8 @@ pub(crate) fn action_reboot_download(usb_backend: UsbBackendOption, _verbose: bo
 
 pub(crate) fn action_verify_md5(files: &[String]) -> i32 {
     let mut success = true;
+    let progress = CliProgress::new(false);
     for file_path in files {
-        println!("Verifying MD5 checksum for {}...", file_path);
         let file = match File::open(file_path) {
             Ok(f) => f,
             Err(e) => {
@@ -214,14 +215,10 @@ pub(crate) fn action_verify_md5(files: &[String]) -> i32 {
                 continue;
             }
         };
-        match verify_md5_footer(&file) {
-            Ok(()) => {
-                println!("MD5 verification successful!\n");
-            }
-            Err(e) => {
-                print_error!("MD5 verification failed for \"{}\": {}", file_path, e);
-                success = false;
-            }
+
+        if let Err(e) = verify_md5_footer_with_progress(&file, file_path, &progress) {
+            print_error!("MD5 verification failed for \"{}\": {}", file_path, e);
+            success = false;
         }
     }
     if success { 0 } else { 1 }

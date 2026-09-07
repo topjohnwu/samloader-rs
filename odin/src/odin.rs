@@ -47,6 +47,15 @@ pub trait FlashProgress: Send + Sync {
 
     /// Notify that partition flashing failed.
     fn fail_partition(&self, _name: &str) {}
+
+    /// Notify that MD5 verification has started.
+    fn start_md5(&self, _name: &str, _total_bytes: u64) {}
+
+    /// Notify that MD5 verification completed successfully.
+    fn end_md5(&self, _name: &str) {}
+
+    /// Notify that MD5 verification failed.
+    fn fail_md5(&self, _name: &str) {}
 }
 
 impl FlashProgress for () {
