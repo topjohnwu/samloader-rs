@@ -274,7 +274,7 @@ pub(crate) struct FilePartPacket<'a> {
 impl<'a> Debug for FilePartPacket<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilePartPacket")
-            .field("data", &format_args!("[u8; {}]", &self.size))
+            .field("data", &format_args!("[u8; {}]", self.size))
             .finish()
     }
 }
@@ -301,7 +301,7 @@ pub(crate) struct PitDataPacket {
 impl Debug for PitDataPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PitDataPacket")
-            .field("data", &format_args!("[u8; {}]", &self.data.len()))
+            .field("data", &format_args!("[u8; {}]", self.data.len()))
             .finish()
     }
 }
