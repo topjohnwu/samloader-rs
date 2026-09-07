@@ -110,6 +110,14 @@ pub struct FlashManager<'a, 'b> {
     odin_manager: &'b mut OdinManager,
     progress: &'a dyn FlashProgress,
     pit_file_bytes: Option<Vec<u8>>,
+
+    repartition: bool,
+    auto_reboot: bool,
+    skip_size_check: bool,
+    skip_md5: bool,
+    pit_path: Option<&'a str>,
+    packages: Vec<String>,
+    partitions: Vec<(Option<String>, String)>,
 }
 
 impl<'a, 'b> FlashManager<'a, 'b> {
@@ -119,23 +127,62 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             odin_manager,
             progress,
             pit_file_bytes: None,
+            repartition: false,
+            auto_reboot: false,
+            skip_size_check: false,
+            skip_md5: false,
+            pit_path: None,
+            packages: Vec::new(),
+            partitions: Vec::new(),
         }
     }
 
-    /// Drives the flashing actions using the underlying `OdinManager`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn flash(
-        &mut self,
-        repartition: bool,
-        reboot_device: bool,
-        skip_size_check: bool,
-        skip_md5: bool,
-        pit: Option<&str>,
-        packages: &[impl AsRef<str>],
-        partitions: &[(Option<String>, String)],
-    ) -> Result<(), FlashError> {
+    /// Sets whether to perform repartitioning.
+    pub fn repartition(mut self, enabled: bool) -> Self {
+        self.repartition = enabled;
+        self
+    }
+
+    /// Sets whether to automatically reboot after flashing.
+    pub fn auto_reboot(mut self, enabled: bool) -> Self {
+        self.auto_reboot = enabled;
+        self
+    }
+
+    /// Sets whether to skip partition size checks.
+    pub fn skip_size_check(mut self, enabled: bool) -> Self {
+        self.skip_size_check = enabled;
+        self
+    }
+
+    /// Sets whether to skip MD5 package verification.
+    pub fn skip_md5(mut self, enabled: bool) -> Self {
+        self.skip_md5 = enabled;
+        self
+    }
+
+    /// Sets an explicit PIT file path.
+    pub fn pit(mut self, pit_path: &'a str) -> Self {
+        self.pit_path = Some(pit_path);
+        self
+    }
+
+    /// Sets the list of TAR packages to flash.
+    pub fn packages(mut self, packages: &[impl AsRef<str>]) -> Self {
+        self.packages = packages.iter().map(|p| p.as_ref().to_string()).collect();
+        self
+    }
+
+    /// Sets the list of individual partition files to flash.
+    pub fn partitions(mut self, partitions: &[(Option<String>, String)]) -> Self {
+        self.partitions = partitions.to_vec();
+        self
+    }
+
+    /// Executes the flashing pipeline sequence.
+    pub fn execute(&mut self) -> Result<(), FlashError> {
         // Step 1: Resolve explicit PIT file if provided
-        if let Some(pit_path) = pit {
+        if let Some(pit_path) = self.pit_path {
             let mut f = File::open(pit_path)
                 .map_err(|e| FlashError::FileOpenFailed(pit_path.to_string(), e))?;
             let mut buffer = Vec::new();
@@ -145,50 +192,48 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         }
 
         // Step 2: Scan package files to find resolved entries and pull package PIT if needed
-        let resolved_entries = self.scan_tar_packages(packages, skip_md5)?;
+        let resolved_entries = self.scan_tar_packages()?;
 
         // Step 3: Handle repartitioning and download active PIT data from the device
-        let pit_data = self.download_and_parse_pit(repartition)?;
+        let pit_data = self.download_and_parse_pit(self.repartition)?;
 
         // Step 4: Map entries and individual files to FirmwareInfo payloads
-        let partition_infos =
-            self.build_partition_infos(&pit_data, resolved_entries, partitions, skip_size_check)?;
+        let partition_infos = self.build_partition_infos(
+            &pit_data,
+            resolved_entries,
+            &self.partitions,
+            self.skip_size_check,
+        )?;
 
         // Step 5: Flash payloads to the device
-        self.flash_partitions(partition_infos, reboot_device)?;
+        self.flash_partitions(partition_infos, self.auto_reboot)?;
 
         Ok(())
     }
 
     // Helper 2: Scan TAR packages to find resolved entries and pull package PIT if needed
-    fn scan_tar_packages(
-        &mut self,
-        packages: &[impl AsRef<str>],
-        skip_md5: bool,
-    ) -> Result<Vec<IndexedEntry>, FlashError> {
-        if packages.is_empty() {
+    fn scan_tar_packages(&mut self) -> Result<Vec<IndexedEntry>, FlashError> {
+        if self.packages.is_empty() {
             return Ok(Vec::new());
         }
 
         // Open all packages into a File first
         let mut opened_packages = Vec::new();
-        for pkg in packages {
-            let pkg_str = pkg.as_ref();
-            let file = File::open(pkg_str)
-                .map_err(|e| FlashError::FileOpenFailed(pkg_str.to_string(), e))?;
-            opened_packages.push((pkg_str, file));
+        for pkg in &self.packages {
+            let file = File::open(pkg).map_err(|e| FlashError::FileOpenFailed(pkg.clone(), e))?;
+            opened_packages.push((pkg, file));
         }
 
         // MD5 verification of .tar.md5 packages
-        if !skip_md5 {
+        if !self.skip_md5 {
             for (pkg, file) in &mut opened_packages {
                 if pkg.to_lowercase().ends_with(".md5") {
                     self.progress
                         .println(&format!("Verifying MD5 checksum for {}...", pkg));
                     verify_md5_footer(&*file)
-                        .map_err(|e| FlashError::Md5VerificationFailed(pkg.to_string(), e))?;
+                        .map_err(|e| FlashError::Md5VerificationFailed((*pkg).clone(), e))?;
                     file.seek(SeekFrom::Start(0))
-                        .map_err(|e| FlashError::FileSeekFailed(pkg.to_string(), e))?;
+                        .map_err(|e| FlashError::FileSeekFailed((*pkg).clone(), e))?;
                     self.progress.println("MD5 verification successful!\n");
                 }
             }
@@ -202,13 +247,13 @@ impl<'a, 'b> FlashManager<'a, 'b> {
             let mut archive = Archive::new(file);
             let entries = archive
                 .entries()
-                .map_err(|e| FlashError::ArchiveReadFailed(pkg.to_string(), e))?;
+                .map_err(|e| FlashError::ArchiveReadFailed((*pkg).clone(), e))?;
 
             let mut package_entries = Vec::new();
 
             for entry_res in entries {
                 let entry =
-                    entry_res.map_err(|e| FlashError::ArchiveCorrupted(pkg.to_string(), e))?;
+                    entry_res.map_err(|e| FlashError::ArchiveCorrupted((*pkg).clone(), e))?;
 
                 let entry_path = match entry.path() {
                     Ok(p) => p.to_string_lossy().to_string(),

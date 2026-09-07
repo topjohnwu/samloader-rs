@@ -126,22 +126,24 @@ pub(crate) fn action_flash(
         return 1;
     }
 
-    let mut flash_manager = FlashManager::new(&mut odin_manager, &progress);
-
     let mapped_partitions: Vec<(Option<String>, String)> = partitions
         .iter()
         .map(|p| (p.name.clone(), p.filename.clone()))
         .collect();
 
-    if let Err(e) = flash_manager.flash(
-        repartition,
-        reboot_device,
-        skip_size_check,
-        skip_md5,
-        pit,
-        packages,
-        &mapped_partitions,
-    ) {
+    let mut flash_manager = FlashManager::new(&mut odin_manager, &progress)
+        .repartition(repartition)
+        .auto_reboot(reboot_device)
+        .skip_size_check(skip_size_check)
+        .skip_md5(skip_md5)
+        .packages(packages)
+        .partitions(&mapped_partitions);
+
+    if let Some(pit_path) = pit {
+        flash_manager = flash_manager.pit(pit_path);
+    }
+
+    if let Err(e) = flash_manager.execute() {
         print_error!("{}", e);
         return 1;
     }
