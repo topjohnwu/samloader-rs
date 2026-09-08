@@ -16,7 +16,7 @@
 use crate::error::OdinError;
 use crate::packets;
 use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
-use crate::progress::FlashProgress;
+use crate::progress;
 use crate::usb::UsbTransfer;
 use samloader_pit::{BinaryType, PitEntry};
 use std::time::Duration;
@@ -27,7 +27,6 @@ use std::time::Duration;
 /// strings or AT commands). Complex packet I/O requires transitioning to an [`OdinSession`]
 /// via [`begin_session`](Self::begin_session).
 pub struct OdinConnection {
-    verbose: bool,
     usb: Box<dyn UsbTransfer>,
 }
 
@@ -44,14 +43,14 @@ const FILE_TRANSFER_PACKET_SIZE_DEFAULT: usize = 0x20000;
 const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
 
 impl OdinConnection {
-    /// Creates a new `OdinConnection` instance with a given transport and verbosity.
-    pub fn new(usb: Box<dyn UsbTransfer>, verbose: bool) -> Self {
-        Self { verbose, usb }
+    /// Creates a new `OdinConnection` instance with a given transport.
+    pub fn new(usb: Box<dyn UsbTransfer>) -> Self {
+        Self { usb }
     }
 
     /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
     pub fn init(&mut self) -> Result<(), OdinError> {
-        println!("Initializing protocol...");
+        progress::println("Initializing protocol...");
 
         self.usb.reset();
 
@@ -63,7 +62,7 @@ impl OdinConnection {
             .map_err(|_| OdinError::HandshakeReceiveFailed)?;
 
         if response == "LOKE" {
-            println!("Protocol initialization successful.\n");
+            progress::println("Protocol initialization successful.\n");
             Ok(())
         } else {
             Err(OdinError::HandshakeMismatch {
@@ -75,9 +74,7 @@ impl OdinConnection {
 
     /// Sends a raw string message over the transport connection.
     pub fn send_string(&mut self, s: &str, timeout: i32) -> Result<(), OdinError> {
-        if self.verbose {
-            eprintln!("Sending string: {:?}", s);
-        }
+        progress::println_verbose(&format!("Sending string: {:?}", s));
         if !self.usb.send_data(s.as_bytes(), timeout, true) {
             return Err(OdinError::SendPacketFailed);
         }
@@ -95,9 +92,10 @@ impl OdinConnection {
 
         let mut data = buffer.to_vec();
         data.truncate(received_size as usize);
-        if self.verbose {
-            eprintln!("Received string data ({} bytes): {:?}", received_size, data);
-        }
+        progress::println_verbose(&format!(
+            "Received string data ({} bytes): {:?}",
+            received_size, data
+        ));
         Ok(String::from_utf8_lossy(&data).into_owned())
     }
 
@@ -121,7 +119,7 @@ pub struct OdinSession {
 
 impl OdinSession {
     fn begin(connection: OdinConnection) -> Result<Self, OdinError> {
-        println!("Beginning session...");
+        progress::println("Beginning session...");
 
         let mut session = Self {
             connection,
@@ -143,7 +141,9 @@ impl OdinSession {
             session_response >> 16
         };
 
-        println!("\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n");
+        progress::println(
+            "\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n",
+        );
         std::thread::sleep(Duration::from_millis(3000));
 
         if session.bootloader_protocol_version >= 2 {
@@ -162,13 +162,13 @@ impl OdinSession {
             }
         }
 
-        println!("Session begun.\n");
+        progress::println("Session begun.\n");
         Ok(session)
     }
 
     /// Ends the active flashing session on the device.
     pub fn end_session(&mut self) -> Result<(), OdinError> {
-        println!("Ending session...");
+        progress::println("Ending session...");
 
         let packet = RequestPacket::end_session();
         self.request_and_response(&packet, EmptySendKind::After, 3000)
@@ -179,13 +179,11 @@ impl OdinSession {
 
     /// Reboots the device normally out of Download Mode.
     pub fn reboot_device(&mut self) -> Result<(), OdinError> {
-        println!("Rebooting device...");
+        progress::println("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();
         use crate::packets::OutboundPacket;
-        if self.connection.verbose {
-            eprintln!("Sending packet: {:#04X?}", packet);
-        }
+        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
 
         // The device immediately reboots and drops the USB connection,
         // so the write may partially fail and a response will never arrive.
@@ -227,9 +225,7 @@ impl OdinSession {
         empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<(), ()> {
-        if self.connection.verbose {
-            eprintln!("Sending packet: {:#04X?}", packet);
-        }
+        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
         let packet_bytes = packet.pack();
         if empty_send_kind == EmptySendKind::Before
             || empty_send_kind == EmptySendKind::BeforeAndAfter
@@ -261,9 +257,7 @@ impl OdinSession {
 
         buffer.truncate(received_size as usize);
         let parsed = T::unpack(&buffer).map_err(OdinError::ParseError)?;
-        if self.connection.verbose {
-            eprintln!("Received packet: {:#04X?}", parsed);
-        }
+        progress::println_verbose(&format!("Received packet: {:#04X?}", parsed));
         Ok(parsed)
     }
 
@@ -387,7 +381,6 @@ impl OdinSession {
         &mut self,
         sequences: Iter,
         pit_entry: &PitEntry,
-        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError>
     where
         Bytes: AsRef<[u8]>,
@@ -416,21 +409,17 @@ impl OdinSession {
                 ),
             };
 
-            self.send_one_sequence(&start_packet, &end_packet, sequence_data, progress)?;
+            self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
         }
 
         Ok(())
     }
 
     /// Flashes an uncompressed partition firmware file payload to the device.
-    pub fn send_file(
-        &mut self,
-        info: &crate::firmware::FirmwareFile,
-        progress: &(impl FlashProgress + ?Sized),
-    ) -> Result<(), OdinError> {
-        progress.set_length(info.file.len() as u64);
+    pub fn send_file(&mut self, info: &crate::firmware::FirmwareFile) -> Result<(), OdinError> {
+        progress::set_length(info.file.len() as u64);
         let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
-        self.send_raw_sequences(sequences, info.pit_entry, progress)
+        self.send_raw_sequences(sequences, info.pit_entry)
     }
 
     /// Flashes an LZ4-compressed partition firmware file payload to the device,
@@ -438,15 +427,14 @@ impl OdinSession {
     pub fn send_lz4_file(
         &mut self,
         info: &crate::firmware::FirmwareLz4File,
-        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError> {
         if !self.lz4_supported || info.header.block_max_size != 1024 * 1024 {
-            progress.set_length(info.header.content_size);
+            progress::set_length(info.header.content_size);
             let sequences = info.decompressed_sequences(self.file_transfer_sequence_max_bytes());
-            return self.send_raw_sequences(sequences, info.pit_entry, progress);
+            return self.send_raw_sequences(sequences, info.pit_entry);
         }
 
-        progress.set_length(info.file.len() as u64);
+        progress::set_length(info.file.len() as u64);
 
         let packet = RequestPacket::lz4_file_transfer_flash();
         self.request_and_response(&packet, EmptySendKind::After, 3000)
@@ -473,7 +461,7 @@ impl OdinSession {
                 ),
             };
 
-            self.send_one_sequence(&start_packet, &end_packet, sequence_data, progress)?;
+            self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
         }
 
         Ok(())
@@ -484,7 +472,6 @@ impl OdinSession {
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
         sequence_data: &[u8],
-        progress: &(impl FlashProgress + ?Sized),
     ) -> Result<(), OdinError> {
         self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
@@ -496,7 +483,7 @@ impl OdinSession {
             let mut success = false;
             for retry in 0..5 {
                 if retry > 0 {
-                    println!("\nRetrying...");
+                    progress::println("\nRetrying...");
                 }
 
                 let packet = packets::FilePartPacket::new(
@@ -538,7 +525,7 @@ impl OdinSession {
                 return Err(OdinError::FilePartResponseReceiveFailed);
             }
 
-            progress.inc(file_buffer.len() as u64);
+            progress::inc(file_buffer.len() as u64);
         }
 
         self.request_and_response(
@@ -615,7 +602,7 @@ mod tests {
     #[test]
     fn test_odin_mock_session_and_pit_download() {
         let backend = Box::new(MockBackend::new(true));
-        let mut connection = OdinConnection::new(backend, true);
+        let mut connection = OdinConnection::new(backend);
 
         // handshake with simple string in/out
         assert!(connection.init().is_ok());
@@ -640,7 +627,7 @@ mod tests {
     #[test]
     fn test_odin_connection_raw_string_io() {
         let backend = Box::new(MockBackend::new(true));
-        let mut connection = OdinConnection::new(backend, true);
+        let mut connection = OdinConnection::new(backend);
 
         // Send raw string
         assert!(connection.send_string("ODIN", 1000).is_ok());

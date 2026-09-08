@@ -19,6 +19,7 @@ use crate::print_error;
 use indicatif::{ProgressBar, ProgressStyle};
 use samloader_odin::{
     FlashEvent, FlashManager, FlashProgress, OdinConnection, UsbBackendOption, create_backend,
+    set_progress,
 };
 use std::time::Duration;
 
@@ -132,7 +133,7 @@ pub(crate) fn action_flash(
     packages: &[String],
     partitions: &[PartitionArg],
 ) -> i32 {
-    let progress = CliProgress::new(verbose);
+    set_progress(CliProgress::new(verbose));
 
     let usb = match create_backend(usb_backend, verbose, wait) {
         Ok(u) => u,
@@ -141,7 +142,7 @@ pub(crate) fn action_flash(
             return 1;
         }
     };
-    let mut connection = OdinConnection::new(usb, verbose);
+    let mut connection = OdinConnection::new(usb);
 
     if let Err(e) = connection.init() {
         print_error!("{}", e);
@@ -161,7 +162,7 @@ pub(crate) fn action_flash(
         .map(|p| (p.name.clone(), p.filename.clone()))
         .collect();
 
-    let mut flash_manager = FlashManager::new(&mut session, &progress)
+    let mut flash_manager = FlashManager::new(&mut session)
         .repartition(repartition)
         .auto_reboot(reboot_device)
         .skip_size_check(skip_size_check)

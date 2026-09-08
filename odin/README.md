@@ -22,7 +22,7 @@ use samloader_odin::{OdinConnection, UsbBackendOption, create_backend};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Establish the USB/VCOM backend connection
     let usb = create_backend(UsbBackendOption::Nusb, true, true)?;
-    let mut connection = OdinConnection::new(usb, true);
+    let mut connection = OdinConnection::new(usb);
 
     // 2. Run the Loke protocol handshake (simple string in/out)
     connection.init()?;

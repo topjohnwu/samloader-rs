@@ -58,3 +58,104 @@ pub trait FlashProgress: Send + Sync {
 }
 
 impl FlashProgress for () {}
+
+static GLOBAL_PROGRESS: std::sync::RwLock<Option<Box<dyn FlashProgress>>> =
+    std::sync::RwLock::new(None);
+
+/// Sets the global progress reporter.
+pub fn set_progress(progress: impl FlashProgress + 'static) {
+    let mut lock = GLOBAL_PROGRESS.write().unwrap();
+    *lock = Some(Box::new(progress));
+}
+
+/// Clears the global progress reporter, reverting to no-op.
+pub fn clear_progress() {
+    let mut lock = GLOBAL_PROGRESS.write().unwrap();
+    *lock = None;
+}
+
+/// Invokes a closure with a reference to the active global progress reporter,
+/// falling back to a no-op reporter if none is configured.
+pub(crate) fn with_progress<R>(f: impl FnOnce(&dyn FlashProgress) -> R) -> R {
+    if let Ok(guard) = GLOBAL_PROGRESS.read()
+        && let Some(p) = guard.as_deref()
+    {
+        return f(p);
+    }
+    f(&())
+}
+
+/// Sets the total length of the active progress (in bytes).
+pub(crate) fn set_length(len: u64) {
+    with_progress(|p| p.set_length(len));
+}
+
+/// Increments the active progress by the specified number of bytes.
+pub(crate) fn inc(bytes: u64) {
+    with_progress(|p| p.inc(bytes));
+}
+
+/// Prints a standard message through the active progress reporter.
+pub(crate) fn println(msg: &str) {
+    with_progress(|p| p.println(msg));
+}
+
+/// Prints a verbose message through the active progress reporter.
+pub(crate) fn println_verbose(msg: &str) {
+    with_progress(|p| p.println_verbose(msg));
+}
+
+/// Dispatches a flashing lifecycle event through the active progress reporter.
+pub(crate) fn on_event(event: FlashEvent<'_>) {
+    with_progress(|p| p.on_event(event));
+}
+
+#[cfg(test)]
+pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct MockProgress {
+        count: Arc<AtomicU64>,
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FlashProgress for MockProgress {
+        fn inc(&self, bytes: u64) {
+            self.count.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        fn println_verbose(&self, msg: &str) {
+            self.messages.lock().unwrap().push(msg.to_string());
+        }
+    }
+
+    #[test]
+    fn test_global_progress_delegation() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_progress();
+        inc(100);
+        println_verbose("no-op message");
+
+        let count = Arc::new(AtomicU64::new(0));
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        set_progress(MockProgress {
+            count: count.clone(),
+            messages: messages.clone(),
+        });
+
+        inc(42);
+        println_verbose("test verbose message");
+        assert_eq!(count.load(Ordering::Relaxed), 42);
+        assert_eq!(
+            messages.lock().unwrap().as_slice(),
+            &["test verbose message".to_string()]
+        );
+
+        clear_progress();
+    }
+}

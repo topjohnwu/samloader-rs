@@ -27,11 +27,10 @@ mod usb;
 pub use error::{FlashError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
-    verify_md5_footer_with_progress,
 };
 pub use flash::FlashManager;
 pub use odin::{OdinConnection, OdinSession, reboot_download};
-pub use progress::{FlashEvent, FlashProgress};
+pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 
 #[cfg(feature = "nusb")]

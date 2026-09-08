@@ -16,8 +16,8 @@
 use crate::flash::CliProgress;
 use crate::print_error;
 use samloader_odin::{
-    OdinConnection, UsbBackendOption, create_backend, detect_device,
-    verify_md5_footer_with_progress,
+    OdinConnection, UsbBackendOption, create_backend, detect_device, set_progress,
+    verify_md5_footer,
 };
 use samloader_pit::PitData;
 use std::fs::File;
@@ -55,6 +55,8 @@ pub(crate) fn action_dump_pit(
         }
     };
 
+    set_progress(CliProgress::new(verbose));
+
     // Download PIT file from device.
     let usb = match create_backend(usb_backend, verbose, wait) {
         Ok(u) => u,
@@ -63,7 +65,7 @@ pub(crate) fn action_dump_pit(
             return 1;
         }
     };
-    let mut connection = OdinConnection::new(usb, verbose);
+    let mut connection = OdinConnection::new(usb);
 
     if let Err(e) = connection.init() {
         print_error!("{}", e);
@@ -140,6 +142,8 @@ pub(crate) fn action_print_pit(
             }
         }
     } else {
+        set_progress(CliProgress::new(verbose));
+
         let usb = match create_backend(usb_backend, verbose, wait) {
             Ok(u) => u,
             Err(e) => {
@@ -147,7 +151,7 @@ pub(crate) fn action_print_pit(
                 return 1;
             }
         };
-        let mut connection = OdinConnection::new(usb, verbose);
+        let mut connection = OdinConnection::new(usb);
 
         if let Err(e) = connection.init() {
             print_error!("{}", e);
@@ -212,7 +216,7 @@ pub(crate) fn action_reboot_download(usb_backend: UsbBackendOption, _verbose: bo
 
 pub(crate) fn action_verify_md5(files: &[String]) -> i32 {
     let mut success = true;
-    let progress = CliProgress::new(false);
+    set_progress(CliProgress::new(false));
     for file_path in files {
         let file = match File::open(file_path) {
             Ok(f) => f,
@@ -223,7 +227,7 @@ pub(crate) fn action_verify_md5(files: &[String]) -> i32 {
             }
         };
 
-        if let Err(e) = verify_md5_footer_with_progress(&file, file_path, &progress) {
+        if let Err(e) = verify_md5_footer(&file, file_path) {
             print_error!("MD5 verification failed for \"{}\": {}", file_path, e);
             success = false;
         }

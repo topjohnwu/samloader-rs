@@ -16,10 +16,10 @@
 
 use crate::FlashError;
 use crate::firmware::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer_with_progress,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
 use crate::odin::OdinSession;
-use crate::progress::{FlashEvent, FlashProgress};
+use crate::progress::{self, FlashEvent};
 use memmap2::{Mmap, MmapOptions};
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -124,9 +124,8 @@ fn create_firmware_info<'a>(
 
 /// Orchestrates the flashing pipeline, processing package and partition sources
 /// and executing the Loke flash protocol.
-pub struct FlashManager<'a, 'b> {
-    session: &'b mut OdinSession,
-    progress: &'a dyn FlashProgress,
+pub struct FlashManager<'a> {
+    session: &'a mut OdinSession,
     pit_file_bytes: Option<Vec<u8>>,
 
     repartition: bool,
@@ -138,12 +137,11 @@ pub struct FlashManager<'a, 'b> {
     partitions: Vec<(Option<String>, String)>,
 }
 
-impl<'a, 'b> FlashManager<'a, 'b> {
-    /// Creates a new `FlashManager` associated with an active `OdinSession` and a `FlashProgress` reporter.
-    pub fn new(session: &'b mut OdinSession, progress: &'a dyn FlashProgress) -> Self {
+impl<'a> FlashManager<'a> {
+    /// Creates a new `FlashManager` associated with an active `OdinSession`.
+    pub fn new(session: &'a mut OdinSession) -> Self {
         Self {
             session,
-            progress,
             pit_file_bytes: None,
             repartition: false,
             auto_reboot: false,
@@ -245,7 +243,7 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         if !self.skip_md5 {
             for (pkg, file) in &mut opened_packages {
                 if pkg.to_lowercase().ends_with(".md5") {
-                    verify_md5_footer_with_progress(&*file, pkg, self.progress)
+                    verify_md5_footer(&*file, pkg)
                         .map_err(|e| FlashError::Md5VerificationFailed(pkg.clone(), e))?;
 
                     file.seek(SeekFrom::Start(0))
@@ -348,7 +346,7 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                     if allowlist.contains(&entry.normalized_name) {
                         resolved_entries.push(entry);
                     } else {
-                        self.progress.println(&format!(
+                        progress::println(&format!(
                             "Skipping {} (not in download-list.txt)",
                             entry.original_name
                         ));
@@ -377,13 +375,13 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         }
 
         if repartition {
-            self.progress.println("Flashing PIT");
+            progress::println("Flashing PIT");
             self.session
                 .send_pit_data(self.pit_file_bytes.as_ref().unwrap())?;
-            self.progress.println("PIT flash successful\n");
+            progress::println("PIT flash successful\n");
         }
 
-        self.progress.println("Downloading device's PIT file");
+        progress::println("Downloading device's PIT file");
         let pit_buffer = self.session.download_pit_file()?;
 
         let pit_data = PitData::new(&pit_buffer).map_err(FlashError::PitUnpackFailed)?;
@@ -414,7 +412,7 @@ impl<'a, 'b> FlashManager<'a, 'b> {
         for entry in resolved_entries {
             let Some(pit_entry) = find_pit_entry_by_filename(pit_data, &entry.normalized_name)
             else {
-                self.progress.println(&format!(
+                progress::println(&format!(
                     "Skipping orphan file \"{}\" (no matching partition in PIT)",
                     entry.original_name
                 ));
@@ -535,22 +533,22 @@ impl<'a, 'b> FlashManager<'a, 'b> {
                 FirmwareInfo::Lz4(f) => f.header.content_size,
             };
 
-            self.progress.on_event(FlashEvent::PartitionStart {
+            progress::on_event(FlashEvent::PartitionStart {
                 name: &name,
                 size: partition_size,
             });
 
             let res = match info {
-                FirmwareInfo::Normal(f) => self.session.send_file(&f, self.progress),
-                FirmwareInfo::Lz4(f) => self.session.send_lz4_file(&f, self.progress),
+                FirmwareInfo::Normal(f) => self.session.send_file(&f),
+                FirmwareInfo::Lz4(f) => self.session.send_lz4_file(&f),
             };
 
             if let Err(e) = res {
-                self.progress.on_event(FlashEvent::PartitionFail(&name));
+                progress::on_event(FlashEvent::PartitionFail(&name));
                 return Err(FlashError::Odin(e));
             }
 
-            self.progress.on_event(FlashEvent::PartitionEnd(&name));
+            progress::on_event(FlashEvent::PartitionEnd(&name));
         }
 
         self.session.end_session()?;
