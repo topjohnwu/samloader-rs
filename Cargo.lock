@@ -1500,12 +1500,9 @@ dependencies = [
  "cfg-if",
  "clap",
  "indicatif",
- "libc",
- "memmap2",
  "samloader-fus",
  "samloader-odin",
  "samloader-pit",
- "tar",
 ]
 
 [[package]]
