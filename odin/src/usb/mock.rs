@@ -157,11 +157,7 @@ impl UsbTransfer for MockBackend {
                                         self.pit_data.len() as u32,
                                     );
                                 }
-                                crate::packets::PitFileRequest::Part(pit_part) => {
-                                    let part = match pit_part {
-                                        crate::packets::PitFilePart::Flash { size } => size,
-                                        crate::packets::PitFilePart::Dump { part } => part,
-                                    };
+                                crate::packets::PitFileRequest::Part { part } => {
                                     let offset = part as usize * 500;
                                     let end = (offset + 500).min(self.pit_data.len());
                                     if offset < self.pit_data.len() {

@@ -14,11 +14,10 @@
 // limitations under the License.
 
 use crate::error::OdinError;
-use crate::packets;
-use crate::packets::{InboundPacket, PitDataPacket, RequestPacket};
+use crate::packets::{self, RequestPacket};
 use crate::progress;
 use crate::usb::UsbTransfer;
-use samloader_pit::{BinaryType, PitEntry};
+use samloader_pit::PitEntry;
 use std::time::Duration;
 
 /// Manages the initial connection to a Samsung device in Download Mode.
@@ -182,7 +181,6 @@ impl OdinSession {
         progress::println("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();
-        use crate::packets::OutboundPacket;
         progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
 
         // The device immediately reboots and drops the USB connection,
@@ -213,26 +211,24 @@ impl OdinSession {
     }
 
     fn receive_empty(&mut self, timeout: i32) {
-        let mut buffer = vec![0u8; 1];
+        let mut buffer = [0u8; 1];
         self.connection
             .usb
             .receive_data(&mut buffer, timeout, false);
     }
 
-    fn send_packet(
+    fn send_bytes(
         &mut self,
-        packet: &(impl packets::OutboundPacket + std::fmt::Debug),
+        bytes: &[u8],
         empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<(), ()> {
-        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
-        let packet_bytes = packet.pack();
         if empty_send_kind == EmptySendKind::Before
             || empty_send_kind == EmptySendKind::BeforeAndAfter
         {
             self.send_empty(100);
         }
-        if !self.connection.usb.send_data(&packet_bytes, timeout, true) {
+        if !self.connection.usb.send_data(bytes, timeout, true) {
             return Err(());
         }
         if empty_send_kind == EmptySendKind::After
@@ -243,29 +239,40 @@ impl OdinSession {
         Ok(())
     }
 
-    fn receive_packet_with_size<T: InboundPacket + std::fmt::Debug>(
+    fn send_packet(
         &mut self,
-        size: usize,
+        packet: &RequestPacket,
+        empty_send_kind: EmptySendKind,
         timeout: i32,
-    ) -> Result<T, OdinError> {
-        let mut buffer = vec![0u8; size];
+    ) -> Result<(), ()> {
+        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
+        let packet_bytes = packet.pack();
+        self.send_bytes(&packet_bytes, empty_send_kind, timeout)
+    }
+
+    fn send_file_part(
+        &mut self,
+        packet: &packets::FilePartPacket<'_>,
+        empty_send_kind: EmptySendKind,
+        timeout: i32,
+    ) -> Result<(), ()> {
+        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
+        let packet_bytes = packet.as_bytes();
+        self.send_bytes(&packet_bytes, empty_send_kind, timeout)
+    }
+
+    fn receive_response(&mut self, timeout: i32) -> Result<packets::Response, OdinError> {
+        let mut buffer = [0u8; packets::Response::SIZE];
         let received_size = self.connection.usb.receive_data(&mut buffer, timeout, true);
 
         if received_size < 0 {
             return Err(OdinError::ReceivePacketFailed);
         }
 
-        buffer.truncate(received_size as usize);
-        let parsed = T::unpack(&buffer).map_err(OdinError::ParseError)?;
+        let parsed = packets::Response::parse(&buffer[..received_size as usize])
+            .map_err(OdinError::ParseError)?;
         progress::println_verbose(&format!("Received packet: {:#04X?}", parsed));
         Ok(parsed)
-    }
-
-    fn receive_packet<T: InboundPacket + std::fmt::Debug>(
-        &mut self,
-        timeout: i32,
-    ) -> Result<T, OdinError> {
-        self.receive_packet_with_size::<T>(T::SIZE, timeout)
     }
 
     fn request_and_response(
@@ -277,7 +284,7 @@ impl OdinSession {
         self.send_packet(packet, empty_send_kind, timeout)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
-        let response = self.receive_packet::<packets::Response>(timeout)?;
+        let response = self.receive_response(timeout)?;
         let expected_type = packet.expected_response_type();
 
         if response.response_type != expected_type {
@@ -305,11 +312,11 @@ impl OdinSession {
             .map_err(|_| OdinError::PitFilePartInfoSendFailed)?;
 
         // Flash pit file
-        let packet = packets::FilePartPacket::new(pit_buffer, pit_buffer_size);
-        self.send_packet(&packet, EmptySendKind::After, 3000)
+        let packet = packets::FilePartPacket::new(pit_buffer, pit_buffer_size as usize);
+        self.send_file_part(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
-        let response = self.receive_packet::<packets::Response>(3000)?;
+        let response = self.receive_response(3000)?;
 
         if response.response_type != packets::RESPONSE_TYPE_SEND_FILE_PART
             && response.response_type != packets::RESPONSE_TYPE_PIT_FILE
@@ -335,20 +342,26 @@ impl OdinSession {
             .request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::PitFileSizeReceiveFailed)? as usize;
 
-        let transfer_count = file_size.div_ceil(PitDataPacket::SIZE);
+        const PIT_CHUNK_SIZE: usize = 500;
+        let transfer_count = file_size.div_ceil(PIT_CHUNK_SIZE);
         let mut buffer = Vec::with_capacity(file_size);
+        let mut chunk = [0u8; PIT_CHUNK_SIZE];
 
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_pit_file(i as u32);
             self.send_packet(&packet, EmptySendKind::After, 3000)
                 .map_err(|_| OdinError::PitFilePartRequestFailed(i as u32))?;
 
-            let expected_size = std::cmp::min(file_size - buffer.len(), PitDataPacket::SIZE);
+            let expected_size = std::cmp::min(file_size - buffer.len(), PIT_CHUNK_SIZE);
 
-            let part = self
-                .receive_packet_with_size::<PitDataPacket>(expected_size, 3000)
-                .map_err(|_| OdinError::PitFilePartReceiveFailed(i as u32))?;
-            buffer.extend_from_slice(&part.data);
+            let received =
+                self.connection
+                    .usb
+                    .receive_data(&mut chunk[..expected_size], 3000, true);
+            if received < 0 {
+                return Err(OdinError::PitFilePartReceiveFailed(i as u32));
+            }
+            buffer.extend_from_slice(&chunk[..received as usize]);
         }
 
         // Receive empty packet after the last PIT transfer,
@@ -386,28 +399,23 @@ impl OdinSession {
         Bytes: AsRef<[u8]>,
         Iter: Iterator<Item = Bytes>,
     {
-        let packet = RequestPacket::file_transfer_flash();
+        let packet = RequestPacket::file_transfer_flash(false);
         self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
         let mut sequences = sequences.peekable();
         while let Some(sequence_data) = sequences.next() {
             let sequence_data = sequence_data.as_ref();
-            let start_packet = RequestPacket::flash_part_file_transfer(sequence_data.len() as u32);
+            let start_packet =
+                RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, false);
 
             let is_last_sequence = sequences.peek().is_none();
-            let end_packet = match pit_entry.binary_type {
-                BinaryType::ApplicationProcessor => RequestPacket::end_phone_file_transfer(
-                    sequence_data.len() as u32,
-                    pit_entry,
-                    is_last_sequence,
-                ),
-                BinaryType::CommunicationProcessor => RequestPacket::end_modem_file_transfer(
-                    sequence_data.len() as u32,
-                    pit_entry,
-                    is_last_sequence,
-                ),
-            };
+            let end_packet = RequestPacket::end_file_transfer(
+                sequence_data.len() as u32,
+                pit_entry,
+                is_last_sequence,
+                false,
+            );
 
             self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
         }
@@ -436,7 +444,7 @@ impl OdinSession {
 
         progress::set_length(info.file.len() as u64);
 
-        let packet = RequestPacket::lz4_file_transfer_flash();
+        let packet = RequestPacket::file_transfer_flash(true);
         self.request_and_response(&packet, EmptySendKind::After, 3000)
             .map_err(|_| OdinError::FileTransferInitFailed)?;
 
@@ -445,21 +453,15 @@ impl OdinSession {
         let mut sequences = sequences.peekable();
         while let Some((decompressed_size, sequence_data)) = sequences.next() {
             let start_packet =
-                RequestPacket::flash_lz4_part_file_transfer(sequence_data.len() as u32);
+                RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, true);
 
             let is_last_sequence = sequences.peek().is_none();
-            let end_packet = match info.pit_entry.binary_type {
-                BinaryType::ApplicationProcessor => RequestPacket::end_lz4_phone_file_transfer(
-                    decompressed_size as u32,
-                    info.pit_entry,
-                    is_last_sequence,
-                ),
-                BinaryType::CommunicationProcessor => RequestPacket::end_lz4_modem_file_transfer(
-                    decompressed_size as u32,
-                    info.pit_entry,
-                    is_last_sequence,
-                ),
-            };
+            let end_packet = RequestPacket::end_file_transfer(
+                decompressed_size as u32,
+                info.pit_entry,
+                is_last_sequence,
+                true,
+            );
 
             self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
         }
@@ -486,10 +488,8 @@ impl OdinSession {
                     progress::println("\nRetrying...");
                 }
 
-                let packet = packets::FilePartPacket::new(
-                    file_buffer,
-                    self.file_transfer_packet_size as u32,
-                );
+                let packet =
+                    packets::FilePartPacket::new(file_buffer, self.file_transfer_packet_size);
 
                 let empty_send_kind = if file_part_index == 0 {
                     EmptySendKind::None
@@ -497,13 +497,11 @@ impl OdinSession {
                     EmptySendKind::Before
                 };
 
-                if self.send_packet(&packet, empty_send_kind, 3000).is_err() {
+                if self.send_file_part(&packet, empty_send_kind, 3000).is_err() {
                     continue;
                 }
 
-                match self
-                    .receive_packet::<packets::Response>(self.file_transfer_sequence_timeout as i32)
-                {
+                match self.receive_response(self.file_transfer_sequence_timeout as i32) {
                     Ok(response)
                         if response.response_type == packets::RESPONSE_TYPE_SEND_FILE_PART =>
                     {
