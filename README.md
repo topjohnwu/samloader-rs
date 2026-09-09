@@ -1,5 +1,7 @@
 # samloader
 
+[![samloader build](https://github.com/topjohnwu/samloader-rs/actions/workflows/build.yml/badge.svg)](https://github.com/topjohnwu/samloader-rs/actions/workflows/build.yml)
+
 An all-in-one Samsung firmware download and flash tool.
 
 ```
