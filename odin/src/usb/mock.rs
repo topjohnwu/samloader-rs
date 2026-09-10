@@ -16,9 +16,9 @@
 //! emulating a Samsung SM-F968B device.
 
 use crate::packets::{
-    RESPONSE_TYPE_END_SESSION, RESPONSE_TYPE_FAIL, RESPONSE_TYPE_FILE_TRANSFER,
-    RESPONSE_TYPE_PIT_FILE, RESPONSE_TYPE_SEND_FILE_PART, RESPONSE_TYPE_SESSION_SETUP,
-    RequestPacket,
+    RESPONSE_TYPE_DYNAMIC_PARTITION, RESPONSE_TYPE_END_SESSION, RESPONSE_TYPE_FAIL,
+    RESPONSE_TYPE_FILE_TRANSFER, RESPONSE_TYPE_PIT_FILE, RESPONSE_TYPE_SEND_FILE_PART,
+    RESPONSE_TYPE_SESSION_SETUP, RequestPacket,
 };
 use crate::usb::UsbTransfer;
 use binrw::BinRead;
@@ -48,6 +48,8 @@ pub struct MockBackend {
     fail_commit: Option<i32>,
     fail_file_part: Option<i32>,
     fail_end_session: Option<i32>,
+    fail_check_super_size: Option<i32>,
+    protocol_version: u32,
 }
 
 impl MockBackend {
@@ -68,7 +70,16 @@ impl MockBackend {
             fail_commit: None,
             fail_file_part: None,
             fail_end_session: None,
+            fail_check_super_size: None,
+            protocol_version: 2,
         }
+    }
+
+    /// Sets the bootloader protocol version reported by the mock device (default: 3).
+    #[allow(dead_code)]
+    pub fn with_protocol_version(mut self, version: u32) -> Self {
+        self.protocol_version = version;
+        self
     }
 
     /// Injects an error status on begin session handshake.
@@ -96,6 +107,13 @@ impl MockBackend {
     #[allow(dead_code)]
     pub fn with_fail_end_session(mut self, status: i32) -> Self {
         self.fail_end_session = Some(status);
+        self
+    }
+
+    /// Injects an error status on dynamic partition pre-flight check.
+    #[allow(dead_code)]
+    pub fn with_fail_check_super_size(mut self, status: i32) -> Self {
+        self.fail_check_super_size = Some(status);
         self
     }
 
@@ -180,8 +198,12 @@ impl UsbTransfer for MockBackend {
                                         self.push_response(RESPONSE_TYPE_FAIL, err as u32);
                                     } else {
                                         self.state = State::SessionBegun;
-                                        // Report version 2 + LZ4 compression support
-                                        self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0x00028000);
+                                        // Report protocol version + LZ4 compression support
+                                        let response_val = (self.protocol_version << 16) | 0x8000;
+                                        self.push_response(
+                                            RESPONSE_TYPE_SESSION_SETUP,
+                                            response_val,
+                                        );
                                     }
                                 }
                                 crate::packets::SessionRequest::FilePartSize { size } => {
@@ -248,6 +270,13 @@ impl UsbTransfer for MockBackend {
                                     self.state = State::Uninitialized;
                                 }
                             },
+                            RequestPacket::DynamicPartition(_) => {
+                                if let Some(err) = self.fail_check_super_size {
+                                    self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                                } else {
+                                    self.push_response(RESPONSE_TYPE_DYNAMIC_PARTITION, 0);
+                                }
+                            }
                         }
                     }
                     self.incoming_buffer.drain(..1024);

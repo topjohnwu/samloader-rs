@@ -23,6 +23,7 @@ pub(crate) const RESPONSE_TYPE_SESSION_SETUP: u32 = 0x64;
 pub(crate) const RESPONSE_TYPE_PIT_FILE: u32 = 0x65;
 pub(crate) const RESPONSE_TYPE_FILE_TRANSFER: u32 = 0x66;
 pub(crate) const RESPONSE_TYPE_END_SESSION: u32 = 0x67;
+pub(crate) const RESPONSE_TYPE_DYNAMIC_PARTITION: u32 = 0x6a;
 
 /// Special opcode returned by Samsung LOKE bootloader indicating an error condition.
 pub(crate) const RESPONSE_TYPE_FAIL: u32 = 0xFFFFFFFF;
@@ -41,6 +42,9 @@ pub(crate) enum RequestPacket {
 
     #[brw(magic = 0x67u32)]
     EndSession(EndSessionRequest),
+
+    #[brw(magic = 0x6au32)]
+    DynamicPartition(DynamicPartitionRequest),
 }
 
 #[derive(BinRead, BinWrite, Debug)]
@@ -151,6 +155,13 @@ pub(crate) enum EndSessionRequest {
     RebootDevice,
 }
 
+#[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
+#[brw(little)]
+pub(crate) enum DynamicPartitionRequest {
+    #[brw(magic = 0u32)]
+    CheckSuperSize { super_used_size: u32 },
+}
+
 impl RequestPacket {
     pub(crate) fn begin_session() -> Self {
         Self::Session(SessionRequest::Begin {
@@ -242,12 +253,17 @@ impl RequestPacket {
         })
     }
 
+    pub(crate) fn check_super_size(super_used_size: u32) -> Self {
+        Self::DynamicPartition(DynamicPartitionRequest::CheckSuperSize { super_used_size })
+    }
+
     pub(crate) fn expected_response_type(&self) -> u32 {
         match self {
             Self::Session(_) => RESPONSE_TYPE_SESSION_SETUP,
             Self::PitFile(_) => RESPONSE_TYPE_PIT_FILE,
             Self::FileTransfer(_) => RESPONSE_TYPE_FILE_TRANSFER,
             Self::EndSession(_) => RESPONSE_TYPE_END_SESSION,
+            Self::DynamicPartition(_) => RESPONSE_TYPE_DYNAMIC_PARTITION,
         }
     }
 
@@ -456,5 +472,25 @@ mod tests {
         assert_eq!(fail_resp.response_type, RESPONSE_TYPE_FAIL);
         assert!(fail_resp.is_fail());
         assert_eq!(fail_resp.signed_value(), -5);
+    }
+
+    #[test]
+    fn test_dynamic_partition_check_super_size_packet_layout() {
+        let packet = RequestPacket::check_super_size(27276104);
+        assert_eq!(
+            packet.expected_response_type(),
+            RESPONSE_TYPE_DYNAMIC_PARTITION
+        );
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let super_used_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+
+        assert_eq!(opcode, 0x6a);
+        assert_eq!(subcmd, 0);
+        assert_eq!(super_used_size, 27276104);
+        // Remainder of packet should be zero-padded
+        assert!(packed[12..].iter().all(|&b| b == 0));
     }
 }

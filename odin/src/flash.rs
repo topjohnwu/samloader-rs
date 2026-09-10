@@ -135,6 +135,8 @@ pub struct FlashManager<'a> {
     pit_path: Option<&'a str>,
     packages: Vec<String>,
     partitions: Vec<(Option<String>, String)>,
+    super_used_size: Option<u32>,
+    has_download_list: bool,
 }
 
 impl<'a> FlashManager<'a> {
@@ -150,6 +152,8 @@ impl<'a> FlashManager<'a> {
             pit_path: None,
             packages: Vec::new(),
             partitions: Vec::new(),
+            super_used_size: None,
+            has_download_list: false,
         }
     }
 
@@ -290,6 +294,7 @@ impl<'a> FlashManager<'a> {
                 let (normalized_name, is_lz4) = normalize_basename(&entry_path);
 
                 if normalized_name == "download-list.txt" {
+                    self.has_download_list = true;
                     // Read the allowlist manifest
                     let mut reader = entry;
                     let mut content = String::new();
@@ -306,6 +311,14 @@ impl<'a> FlashManager<'a> {
                             })
                             .collect();
                         archives_download_lists.push(download_list);
+                    }
+                } else if normalized_name == "super_used_size.txt" {
+                    let mut reader = entry;
+                    let mut content = String::new();
+                    if reader.read_to_string(&mut content).is_ok()
+                        && let Ok(val) = content.trim().parse::<u32>()
+                    {
+                        self.super_used_size = Some(val);
                     }
                 } else {
                     package_entries.push(IndexedEntry {
@@ -522,6 +535,21 @@ impl<'a> FlashManager<'a> {
 
         self.session.set_total_bytes(total_bytes)?;
 
+        if let Some(super_used_size) = self.super_used_size
+            && super_used_size > 0
+            && self.session.bootloader_protocol_version() >= 3
+        {
+            let check_size = if self.has_download_list {
+                super_used_size
+            } else {
+                0
+            };
+            progress::println("Checking available super partition size...");
+            self.session
+                .check_super_size(check_size)
+                .map_err(FlashError::SuperSizeCheckFailed)?;
+        }
+
         for info in partition_infos {
             let name = match &info {
                 FirmwareInfo::Normal(f) => f.pit_entry.partition_name.to_string_lossy(),
@@ -558,5 +586,135 @@ impl<'a> FlashManager<'a> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::odin::OdinConnection;
+    use crate::usb::MockBackend;
+
+    #[test]
+    fn test_scan_tar_packages_metadata_and_manifest() {
+        let temp_dir = std::env::temp_dir().join("samloader_test_tar");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let tar_path = temp_dir.join("test_package.tar");
+
+        {
+            let tar_file = File::create(&tar_path).unwrap();
+            let mut builder = tar::Builder::new(tar_file);
+
+            // 1. Add meta-data/super_used_size.txt
+            let mut header = tar::Header::new_gnu();
+            let size_content = b"27276104\n";
+            header.set_size(size_content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "meta-data/super_used_size.txt",
+                    &size_content[..],
+                )
+                .unwrap();
+
+            // 2. Add meta-data/download-list.txt
+            let mut header = tar::Header::new_gnu();
+            let list_content = b"boot.img\n";
+            header.set_size(list_content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "meta-data/download-list.txt",
+                    &list_content[..],
+                )
+                .unwrap();
+
+            // 3. Add boot.img
+            let mut header = tar::Header::new_gnu();
+            let boot_content = b"DUMMY BOOT IMAGE DATA";
+            header.set_size(boot_content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "boot.img", &boot_content[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let tar_file = File::open(&tar_path).unwrap();
+        let opened_packages = vec![(tar_path.to_string_lossy().to_string(), tar_file)];
+
+        let mut manager = FlashManager::new(&mut session);
+        let resolved = manager.scan_tar_packages(&opened_packages).unwrap();
+
+        assert_eq!(manager.super_used_size, Some(27276104));
+        assert!(manager.has_download_list);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].normalized_name, "boot.img");
+
+        let _ = std::fs::remove_file(tar_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_flash_partitions_super_size_preflight_success() {
+        let backend = Box::new(MockBackend::new(false).with_protocol_version(3));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session);
+        manager.super_used_size = Some(27276104);
+        manager.has_download_list = true;
+
+        assert!(manager.flash_partitions(Vec::new(), false).is_ok());
+    }
+
+    #[test]
+    fn test_flash_partitions_super_size_preflight_rejection() {
+        let backend = Box::new(
+            MockBackend::new(false)
+                .with_protocol_version(3)
+                .with_fail_check_super_size(-1),
+        );
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session);
+        manager.super_used_size = Some(27276104);
+        manager.has_download_list = true;
+
+        let res = manager.flash_partitions(Vec::new(), false);
+        assert!(matches!(res, Err(FlashError::SuperSizeCheckFailed(_))));
+    }
+
+    #[test]
+    fn test_flash_partitions_super_size_preflight_skipped_on_legacy_protocol() {
+        // Even if fail_check_super_size is set, legacy protocol version 2 must skip opcode 0x6a
+        let backend = Box::new(
+            MockBackend::new(false)
+                .with_protocol_version(2)
+                .with_fail_check_super_size(-1),
+        );
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session);
+        manager.super_used_size = Some(27276104);
+        manager.has_download_list = true;
+
+        assert!(manager.flash_partitions(Vec::new(), false).is_ok());
     }
 }

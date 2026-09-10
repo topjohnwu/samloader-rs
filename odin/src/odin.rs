@@ -593,6 +593,18 @@ impl OdinSession {
 
         Ok(())
     }
+
+    /// Performs a pre-flight dynamic partition size check on modern LOKE bootloaders.
+    pub fn check_super_size(&mut self, super_used_size: u32) -> Result<(), OdinError> {
+        let packet = RequestPacket::check_super_size(super_used_size);
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
+
+        Ok(())
+    }
 }
 
 /// Triggers a reboot of the connected Samsung device into Download Mode via the
@@ -793,5 +805,27 @@ mod tests {
             session.close(),
             Err(OdinError::Loke(LokeError::WriteProtection))
         ));
+    }
+
+    #[test]
+    fn test_odin_mock_check_super_size_success() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        assert!(session.check_super_size(27276104).is_ok());
+        assert!(session.check_super_size(0).is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_check_super_size_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_check_super_size(-1));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let res = session.check_super_size(27276104);
+        assert!(matches!(res, Err(OdinError::Loke(LokeError::General(-1)))));
     }
 }

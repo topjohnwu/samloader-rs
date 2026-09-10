@@ -256,4 +256,13 @@ pub enum FlashError {
     /// The file payload is larger than the partition size defined in PIT.
     #[error("{0} partition is too small for given file. Use --skip-size-check to flash anyways.")]
     PartitionTooSmall(String),
+
+    /// Dynamic partition pre-flight check failed due to insufficient space in Super partition or corrupt metadata.
+    #[error(
+        "Dynamic partition pre-flight check failed: insufficient free space in Super partition \
+         or metadata corrupted. When flashing HOME_CSC without wipe, the Super partition must \
+         have enough space for the target OS image. \
+         (Try flashing the CSC binary to perform a clean flash)"
+    )]
+    SuperSizeCheckFailed(#[source] OdinError),
 }
