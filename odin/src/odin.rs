@@ -403,8 +403,7 @@ impl OdinSession {
         while let Some(sequence_data) = sequences.next() {
             let sequence_data = sequence_data.as_ref();
             let init_packet = RequestPacket::file_transfer_flash(false);
-            let start_packet =
-                RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, false);
+            let start_packet = RequestPacket::flash_part_file_transfer(sequence_data.len() as u32);
 
             let is_last_sequence = sequences.peek().is_none();
             let end_packet = RequestPacket::end_file_transfer(
@@ -447,8 +446,10 @@ impl OdinSession {
         let mut sequences = sequences.peekable();
         while let Some((decompressed_size, sequence_data)) = sequences.next() {
             let init_packet = RequestPacket::file_transfer_flash(true);
-            let start_packet =
-                RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, true);
+            let start_packet = RequestPacket::flash_part_lz4_file_transfer(
+                sequence_data.len() as u32,
+                decompressed_size as u32,
+            );
 
             let is_last_sequence = sequences.peek().is_none();
             let end_packet = RequestPacket::end_file_transfer(

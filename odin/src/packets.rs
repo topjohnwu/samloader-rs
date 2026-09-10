@@ -76,7 +76,10 @@ pub(crate) enum FileTransferRequest {
     #[brw(magic = 5u32)]
     Lz4Flash,
     #[brw(magic = 6u32)]
-    Lz4Part { sequence_byte_count: u32 },
+    Lz4Part {
+        compressed_size: u32,
+        uncompressed_size: u32,
+    },
     #[brw(magic = 7u32)]
     Lz4End(FileTransferEnd),
 }
@@ -200,15 +203,19 @@ impl RequestPacket {
         })
     }
 
-    pub(crate) fn flash_part_file_transfer(sequence_byte_count: u32, lz4: bool) -> Self {
-        Self::FileTransfer(if lz4 {
-            FileTransferRequest::Lz4Part {
-                sequence_byte_count,
-            }
-        } else {
-            FileTransferRequest::Part {
-                sequence_byte_count,
-            }
+    pub(crate) fn flash_part_file_transfer(sequence_byte_count: u32) -> Self {
+        Self::FileTransfer(FileTransferRequest::Part {
+            sequence_byte_count,
+        })
+    }
+
+    pub(crate) fn flash_part_lz4_file_transfer(
+        compressed_size: u32,
+        uncompressed_size: u32,
+    ) -> Self {
+        Self::FileTransfer(FileTransferRequest::Lz4Part {
+            compressed_size,
+            uncompressed_size,
         })
     }
 
@@ -406,5 +413,21 @@ mod tests {
         assert_eq!(magic, 0, "AP partitions must always use magic = 0");
         assert_eq!(part_id, 20);
         assert_eq!(is_last, 0);
+    }
+
+    #[test]
+    fn test_file_transfer_lz4_part_packet_layout() {
+        let packet = RequestPacket::flash_part_lz4_file_transfer(0x1234, 0x5678);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let compressed_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+        let uncompressed_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
+
+        assert_eq!(opcode, 0x66);
+        assert_eq!(subcmd, 6);
+        assert_eq!(compressed_size, 0x1234);
+        assert_eq!(uncompressed_size, 0x5678);
     }
 }
