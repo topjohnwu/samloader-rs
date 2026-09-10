@@ -218,8 +218,11 @@ impl RequestPacket {
     }
 
     pub(crate) fn flash_part_file_transfer(sequence_byte_count: u32) -> Self {
+        // In Samsung LOKE protocol and odin4 (DownloadEngine::transmitData),
+        // the announced raw sequence slice size is rounded up to a 128 KB (0x20000) boundary.
+        let aligned_count = ((sequence_byte_count as u64 + 0x1FFFF) & !0x1FFFF) as u32;
         Self::FileTransfer(FileTransferRequest::Part {
-            sequence_byte_count,
+            sequence_byte_count: aligned_count,
         })
     }
 
@@ -492,5 +495,29 @@ mod tests {
         assert_eq!(super_used_size, 27276104);
         // Remainder of packet should be zero-padded
         assert!(packed[12..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_flash_part_file_transfer_128k_alignment() {
+        // Test size round-up behavior to 128 KB (0x20000)
+        let check_aligned = |raw_size: u32, expected_aligned: u32| {
+            let packet = RequestPacket::flash_part_file_transfer(raw_size);
+            assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_FILE_TRANSFER);
+            let packed = packet.pack();
+            let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+            let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+            let announced_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+            assert_eq!(opcode, 0x66);
+            assert_eq!(subcmd, 2);
+            assert_eq!(announced_size, expected_aligned);
+            assert!(packed[12..].iter().all(|&b| b == 0));
+        };
+
+        check_aligned(0, 0);
+        check_aligned(1, 0x20000);
+        check_aligned(50_000, 0x20000);
+        check_aligned(0x20000, 0x20000);
+        check_aligned(0x20001, 0x40000);
+        check_aligned(31_457_280, 31_457_280); // 30 MB (standard slice)
     }
 }
