@@ -399,13 +399,10 @@ impl OdinSession {
         Bytes: AsRef<[u8]>,
         Iter: Iterator<Item = Bytes>,
     {
-        let packet = RequestPacket::file_transfer_flash(false);
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::FileTransferInitFailed)?;
-
         let mut sequences = sequences.peekable();
         while let Some(sequence_data) = sequences.next() {
             let sequence_data = sequence_data.as_ref();
+            let init_packet = RequestPacket::file_transfer_flash(false);
             let start_packet =
                 RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, false);
 
@@ -418,7 +415,7 @@ impl OdinSession {
                 self.bootloader_protocol_version,
             );
 
-            self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
+            self.send_one_sequence(&init_packet, &start_packet, &end_packet, sequence_data)?;
         }
 
         Ok(())
@@ -445,14 +442,11 @@ impl OdinSession {
 
         progress::set_length(info.file.len() as u64);
 
-        let packet = RequestPacket::file_transfer_flash(true);
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::FileTransferInitFailed)?;
-
         let sequences = info.sequences(self.file_transfer_sequence_max_bytes());
 
         let mut sequences = sequences.peekable();
         while let Some((decompressed_size, sequence_data)) = sequences.next() {
+            let init_packet = RequestPacket::file_transfer_flash(true);
             let start_packet =
                 RequestPacket::flash_part_file_transfer(sequence_data.len() as u32, true);
 
@@ -465,7 +459,7 @@ impl OdinSession {
                 self.bootloader_protocol_version,
             );
 
-            self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
+            self.send_one_sequence(&init_packet, &start_packet, &end_packet, sequence_data)?;
         }
 
         Ok(())
@@ -473,10 +467,14 @@ impl OdinSession {
 
     fn send_one_sequence(
         &mut self,
+        init_packet: &RequestPacket,
         start_packet: &RequestPacket,
         end_packet: &RequestPacket,
         sequence_data: &[u8],
     ) -> Result<(), OdinError> {
+        self.request_and_response(init_packet, EmptySendKind::After, 3000)
+            .map_err(|_| OdinError::FileTransferInitFailed)?;
+
         self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)
             .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
 
@@ -635,5 +633,37 @@ mod tests {
         // Receive raw string response
         let resp = connection.receive_string(1000).unwrap();
         assert_eq!(resp, "LOKE");
+    }
+
+    #[test]
+    fn test_odin_mock_multi_sequence_transfer() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let pit_entry = PitEntry {
+            binary_type: samloader_pit::BinaryType::ApplicationProcessor,
+            device_type: samloader_pit::DeviceType::MMC,
+            identifier: 20,
+            attributes: Default::default(),
+            update_attributes: Default::default(),
+            block_size_or_offset: 0,
+            block_count: 0,
+            file_offset: 0,
+            file_size: 0,
+            partition_name: Default::default(),
+            flash_filename: Default::default(),
+            fota_filename: Default::default(),
+        };
+
+        // 2 sequences of 128 KB each (matching MockBackend packet_size)
+        let seq1 = vec![0xAAu8; 0x20000];
+        let seq2 = vec![0xBBu8; 0x20000];
+        let sequences = vec![seq1, seq2].into_iter();
+
+        assert!(session.send_raw_sequences(sequences, &pit_entry).is_ok());
+
+        assert!(session.close().is_ok());
     }
 }
