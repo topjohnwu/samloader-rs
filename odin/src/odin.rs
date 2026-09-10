@@ -415,6 +415,7 @@ impl OdinSession {
                 pit_entry,
                 is_last_sequence,
                 false,
+                self.bootloader_protocol_version,
             );
 
             self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;
@@ -461,6 +462,7 @@ impl OdinSession {
                 info.pit_entry,
                 is_last_sequence,
                 true,
+                self.bootloader_protocol_version,
             );
 
             self.send_one_sequence(&start_packet, &end_packet, sequence_data)?;

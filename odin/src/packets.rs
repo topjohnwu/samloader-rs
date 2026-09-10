@@ -81,23 +81,29 @@ pub(crate) enum FileTransferRequest {
     Lz4End(FileTransferEnd),
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
 #[brw(little)]
 pub(crate) enum FileTransferEnd {
+    /// Modern unified layout used by odin4 (bootloader_protocol_version >= 3).
+    /// Used for both AP and CP/Modem binaries with magic = 0.
     #[brw(magic = 0u32)]
-    Phone {
+    Unified {
         sequence_byte_count: u32,
         binary_type: BinaryType,
         device_type: DeviceType,
         partition_identifier: u32,
         is_last_sequence: u32,
     },
+    /// Legacy layout used by Odin 3 / Heimdall (bootloader_protocol_version < 3)
+    /// when flashing CP / Modem partitions.
     #[brw(magic = 1u32)]
-    Modem {
+    LegacyModem {
         sequence_byte_count: u32,
         binary_type: BinaryType,
         device_type: DeviceType,
         is_last_sequence: u32,
+        reserved: u32,
+        partition_identifier: u32,
     },
 }
 
@@ -106,22 +112,26 @@ impl FileTransferEnd {
         sequence_byte_count: u32,
         pit_entry: &PitEntry,
         is_last_sequence: bool,
+        protocol_version: u32,
     ) -> Self {
         let is_last_sequence = if is_last_sequence { 1 } else { 0 };
-        match pit_entry.binary_type {
-            BinaryType::ApplicationProcessor => Self::Phone {
+        if protocol_version >= 3 || pit_entry.binary_type == BinaryType::ApplicationProcessor {
+            Self::Unified {
                 sequence_byte_count,
                 binary_type: pit_entry.binary_type,
                 device_type: pit_entry.device_type,
                 partition_identifier: pit_entry.identifier,
                 is_last_sequence,
-            },
-            BinaryType::CommunicationProcessor => Self::Modem {
+            }
+        } else {
+            Self::LegacyModem {
                 sequence_byte_count,
                 binary_type: pit_entry.binary_type,
                 device_type: pit_entry.device_type,
                 is_last_sequence,
-            },
+                reserved: 0,
+                partition_identifier: pit_entry.identifier,
+            }
         }
     }
 }
@@ -207,8 +217,14 @@ impl RequestPacket {
         pit_entry: &PitEntry,
         is_last_sequence: bool,
         lz4: bool,
+        protocol_version: u32,
     ) -> Self {
-        let end = FileTransferEnd::new(sequence_byte_count, pit_entry, is_last_sequence);
+        let end = FileTransferEnd::new(
+            sequence_byte_count,
+            pit_entry,
+            is_last_sequence,
+            protocol_version,
+        );
         Self::FileTransfer(if lz4 {
             FileTransferRequest::Lz4End(end)
         } else {
@@ -285,5 +301,110 @@ impl Response {
             response_type,
             value,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use samloader_pit::Attribute;
+
+    fn mock_pit_entry(
+        binary_type: BinaryType,
+        device_type: DeviceType,
+        identifier: u32,
+    ) -> PitEntry {
+        PitEntry {
+            binary_type,
+            device_type,
+            identifier,
+            attributes: Attribute::default(),
+            update_attributes: Default::default(),
+            block_size_or_offset: 0,
+            block_count: 0,
+            file_offset: 0,
+            file_size: 0,
+            partition_name: Default::default(),
+            flash_filename: Default::default(),
+            fota_filename: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_file_transfer_end_modern_unified_layout() {
+        let modem_entry = mock_pit_entry(BinaryType::CommunicationProcessor, DeviceType::UFS, 80);
+        let packet = RequestPacket::end_file_transfer(0x1E00000, &modem_entry, true, false, 5);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+        let slice_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
+        let bin_type = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        let dev_type = u32::from_le_bytes(packed[20..24].try_into().unwrap());
+        let part_id = u32::from_le_bytes(packed[24..28].try_into().unwrap());
+        let is_last = u32::from_le_bytes(packed[28..32].try_into().unwrap());
+
+        assert_eq!(opcode, RESPONSE_TYPE_FILE_TRANSFER);
+        assert_eq!(subcmd, 3);
+        assert_eq!(magic, 0, "Modern protocol must use magic = 0 for CP/Modem");
+        assert_eq!(slice_size, 0x1E00000);
+        assert_eq!(bin_type, 1, "CommunicationProcessor must be 1");
+        assert_eq!(dev_type, 8, "UFS device type must be 8");
+        assert_eq!(
+            part_id, 80,
+            "Partition ID must be at offset +0x10 (packet[6])"
+        );
+        assert_eq!(is_last, 1, "is_last must be at offset +0x14 (packet[7])");
+        // Remaining buffer is zero-padded by RequestPacket::pack
+        assert_eq!(&packed[32..40], &[0u8; 8]);
+    }
+
+    #[test]
+    fn test_file_transfer_end_legacy_modem_layout() {
+        let modem_entry = mock_pit_entry(BinaryType::CommunicationProcessor, DeviceType::MMC, 75);
+        let packet = RequestPacket::end_file_transfer(0x100000, &modem_entry, true, false, 2);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+        let slice_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
+        let bin_type = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        let dev_type = u32::from_le_bytes(packed[20..24].try_into().unwrap());
+        let is_last = u32::from_le_bytes(packed[24..28].try_into().unwrap());
+        let reserved = u32::from_le_bytes(packed[28..32].try_into().unwrap());
+        let part_id = u32::from_le_bytes(packed[32..36].try_into().unwrap());
+
+        assert_eq!(opcode, RESPONSE_TYPE_FILE_TRANSFER);
+        assert_eq!(subcmd, 3);
+        assert_eq!(
+            magic, 1,
+            "Legacy protocol (< 3) for CP/Modem must use magic = 1"
+        );
+        assert_eq!(slice_size, 0x100000);
+        assert_eq!(bin_type, 1);
+        assert_eq!(dev_type, 2);
+        assert_eq!(is_last, 1, "Legacy layout must place is_last at packet[6]");
+        assert_eq!(
+            reserved, 0,
+            "Legacy layout must place reserved at packet[7]"
+        );
+        assert_eq!(part_id, 75, "Legacy layout must place part_id at packet[8]");
+    }
+
+    #[test]
+    fn test_file_transfer_end_legacy_ap_uses_unified() {
+        let ap_entry = mock_pit_entry(BinaryType::ApplicationProcessor, DeviceType::MMC, 20);
+        let packet = RequestPacket::end_file_transfer(0x100000, &ap_entry, false, false, 1);
+        let packed = packet.pack();
+
+        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+        let part_id = u32::from_le_bytes(packed[24..28].try_into().unwrap());
+        let is_last = u32::from_le_bytes(packed[28..32].try_into().unwrap());
+
+        assert_eq!(magic, 0, "AP partitions must always use magic = 0");
+        assert_eq!(part_id, 20);
+        assert_eq!(is_last, 0);
     }
 }
