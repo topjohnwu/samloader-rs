@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::OdinError;
+use crate::error::{LokeError, OdinError};
 use crate::packets::{self, RequestPacket};
 use crate::progress;
 use crate::usb::UsbTransfer;
@@ -130,9 +130,7 @@ impl OdinSession {
         };
 
         let packet = RequestPacket::begin_session();
-        let session_response = session
-            .request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::BeginSessionFailed)?;
+        let session_response = session.request_and_response(&packet, EmptySendKind::After, 3000)?;
 
         session.bootloader_protocol_version = if session_response == 0 {
             1
@@ -152,12 +150,10 @@ impl OdinSession {
             session.file_transfer_sequence_max_length = 30;
 
             let packet = RequestPacket::file_part_size(session.file_transfer_packet_size as u32);
-            let value = session
-                .request_and_response(&packet, EmptySendKind::After, 3000)
-                .map_err(|_| OdinError::FilePartSizeSendFailed)?;
+            let value = session.request_and_response(&packet, EmptySendKind::After, 3000)?;
 
             if value != 0 {
-                return Err(OdinError::UnexpectedFilePartSizeResponse(value));
+                return Err(OdinError::Loke(LokeError::from_status(value as i32)));
             }
         }
 
@@ -170,8 +166,10 @@ impl OdinSession {
         progress::println("Ending session...");
 
         let packet = RequestPacket::end_session();
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::EndSessionSendFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
 
         Ok(())
     }
@@ -287,11 +285,23 @@ impl OdinSession {
         let response = self.receive_response(timeout)?;
         let expected_type = packet.expected_response_type();
 
+        if response.is_fail() {
+            return Err(OdinError::Loke(LokeError::from_status(
+                response.signed_value(),
+            )));
+        }
+
         if response.response_type != expected_type {
             return Err(OdinError::ResponseTypeMismatch {
                 expected: expected_type,
                 received: response.response_type,
             });
+        }
+
+        if response.signed_value() < 0 {
+            return Err(OdinError::Loke(LokeError::from_status(
+                response.signed_value(),
+            )));
         }
 
         Ok(response.value)
@@ -303,13 +313,17 @@ impl OdinSession {
 
         // Start file transfer
         let packet = RequestPacket::pit_file_flash();
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::PitFileTransferInitFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
 
         // Transfer file size
         let packet = RequestPacket::flash_part_pit_file(pit_buffer_size);
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::PitFilePartInfoSendFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
 
         // Flash pit file
         let packet = packets::FilePartPacket::new(pit_buffer, pit_buffer_size as usize);
@@ -317,6 +331,12 @@ impl OdinSession {
             .map_err(|_| OdinError::SendPacketFailed)?;
 
         let response = self.receive_response(3000)?;
+
+        if response.is_fail() {
+            return Err(OdinError::Loke(LokeError::from_status(
+                response.signed_value(),
+            )));
+        }
 
         if response.response_type != packets::RESPONSE_TYPE_SEND_FILE_PART
             && response.response_type != packets::RESPONSE_TYPE_PIT_FILE
@@ -327,10 +347,18 @@ impl OdinSession {
             });
         }
 
+        if response.signed_value() < 0 {
+            return Err(OdinError::Loke(LokeError::from_status(
+                response.signed_value(),
+            )));
+        }
+
         // End pit file transfer
         let packet = RequestPacket::end_pit_file_transfer(pit_buffer_size);
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::PitFileTransferEndSendFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
 
         Ok(())
     }
@@ -338,9 +366,7 @@ impl OdinSession {
     /// Downloads/dumps the active Partition Information Table (PIT) file from the device.
     pub fn download_pit_file(&mut self) -> Result<Vec<u8>, OdinError> {
         let packet = RequestPacket::pit_file_dump();
-        let file_size = self
-            .request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::PitFileSizeReceiveFailed)? as usize;
+        let file_size = self.request_and_response(&packet, EmptySendKind::After, 3000)? as usize;
 
         const PIT_CHUNK_SIZE: usize = 500;
         let transfer_count = file_size.div_ceil(PIT_CHUNK_SIZE);
@@ -350,7 +376,7 @@ impl OdinSession {
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_pit_file(i as u32);
             self.send_packet(&packet, EmptySendKind::After, 3000)
-                .map_err(|_| OdinError::PitFilePartRequestFailed(i as u32))?;
+                .map_err(|_| OdinError::SendPacketFailed)?;
 
             let expected_size = std::cmp::min(file_size - buffer.len(), PIT_CHUNK_SIZE);
 
@@ -359,7 +385,7 @@ impl OdinSession {
                     .usb
                     .receive_data(&mut chunk[..expected_size], 3000, true);
             if received < 0 {
-                return Err(OdinError::PitFilePartReceiveFailed(i as u32));
+                return Err(OdinError::ReceivePacketFailed);
             }
             buffer.extend_from_slice(&chunk[..received as usize]);
         }
@@ -370,8 +396,10 @@ impl OdinSession {
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
-        self.request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::PitFileEndSendFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
 
         Ok(buffer)
     }
@@ -473,11 +501,16 @@ impl OdinSession {
         end_packet: &RequestPacket,
         sequence_data: &[u8],
     ) -> Result<(), OdinError> {
-        self.request_and_response(init_packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::FileTransferInitFailed)?;
+        let init_val = self.request_and_response(init_packet, EmptySendKind::After, 3000)?;
+        if init_val != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(init_val as i32)));
+        }
 
-        self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)
-            .map_err(|_| OdinError::FileTransferSequenceBeginFailed)?;
+        let start_val =
+            self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)?;
+        if start_val != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(start_val as i32)));
+        }
 
         for (file_part_index, file_buffer) in sequence_data
             .chunks(self.file_transfer_packet_size)
@@ -502,10 +535,20 @@ impl OdinSession {
                     continue;
                 }
 
-                match self.receive_response(self.file_transfer_sequence_timeout as i32) {
-                    Ok(response)
-                        if response.response_type == packets::RESPONSE_TYPE_SEND_FILE_PART =>
-                    {
+                if let Ok(response) =
+                    self.receive_response(self.file_transfer_sequence_timeout as i32)
+                {
+                    if response.is_fail() {
+                        return Err(OdinError::Loke(LokeError::from_status(
+                            response.signed_value(),
+                        )));
+                    }
+                    if response.response_type == packets::RESPONSE_TYPE_SEND_FILE_PART {
+                        if response.signed_value() < 0 {
+                            return Err(OdinError::Loke(LokeError::from_status(
+                                response.signed_value(),
+                            )));
+                        }
                         if response.value as usize == file_part_index {
                             success = true;
                             break;
@@ -516,7 +559,6 @@ impl OdinSession {
                             });
                         }
                     }
-                    _ => {}
                 }
             }
 
@@ -527,12 +569,14 @@ impl OdinSession {
             progress::inc(file_buffer.len() as u64);
         }
 
-        self.request_and_response(
+        let end_val = self.request_and_response(
             end_packet,
             EmptySendKind::BeforeAndAfter,
             self.file_transfer_sequence_timeout as i32,
-        )
-        .map_err(|_| OdinError::FileTransferSequenceEndFailed)?;
+        )?;
+        if end_val != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(end_val as i32)));
+        }
 
         Ok(())
     }
@@ -541,12 +585,10 @@ impl OdinSession {
     /// to update its progress indicator.
     pub fn set_total_bytes(&mut self, total_bytes: u64) -> Result<(), OdinError> {
         let packet = RequestPacket::total_bytes(total_bytes);
-        let value = self
-            .request_and_response(&packet, EmptySendKind::After, 3000)
-            .map_err(|_| OdinError::TotalBytesSendFailed)?;
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
 
         if value != 0 {
-            return Err(OdinError::UnexpectedTotalBytesResponse(value));
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
 
         Ok(())
@@ -666,5 +708,90 @@ mod tests {
         assert!(session.send_raw_sequences(sequences, &pit_entry).is_ok());
 
         assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_begin_session_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_begin_session(-5));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        assert!(matches!(
+            connection.begin_session(),
+            Err(OdinError::Loke(LokeError::AuthFailure))
+        ));
+    }
+
+    #[test]
+    fn test_odin_mock_slice_commit_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_commit(-5));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let pit_entry = PitEntry {
+            binary_type: samloader_pit::BinaryType::ApplicationProcessor,
+            device_type: samloader_pit::DeviceType::MMC,
+            identifier: 20,
+            attributes: Default::default(),
+            update_attributes: Default::default(),
+            block_size_or_offset: 0,
+            block_count: 0,
+            file_offset: 0,
+            file_size: 0,
+            partition_name: Default::default(),
+            flash_filename: Default::default(),
+            fota_filename: Default::default(),
+        };
+
+        let seq = vec![0xAAu8; 0x20000];
+        let sequences = vec![seq].into_iter();
+
+        assert!(matches!(
+            session.send_raw_sequences(sequences, &pit_entry),
+            Err(OdinError::Loke(LokeError::AuthFailure))
+        ));
+    }
+
+    #[test]
+    fn test_odin_mock_file_part_chunk_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_file_part(-4));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let pit_entry = PitEntry {
+            binary_type: samloader_pit::BinaryType::ApplicationProcessor,
+            device_type: samloader_pit::DeviceType::MMC,
+            identifier: 20,
+            attributes: Default::default(),
+            update_attributes: Default::default(),
+            block_size_or_offset: 0,
+            block_count: 0,
+            file_offset: 0,
+            file_size: 0,
+            partition_name: Default::default(),
+            flash_filename: Default::default(),
+            fota_filename: Default::default(),
+        };
+
+        let seq = vec![0xAAu8; 0x20000];
+        let sequences = vec![seq].into_iter();
+
+        assert!(matches!(
+            session.send_raw_sequences(sequences, &pit_entry),
+            Err(OdinError::Loke(LokeError::WriteFailure))
+        ));
+    }
+
+    #[test]
+    fn test_odin_mock_close_session_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_end_session(-2));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let session = connection.begin_session().unwrap();
+        assert!(matches!(
+            session.close(),
+            Err(OdinError::Loke(LokeError::WriteProtection))
+        ));
     }
 }

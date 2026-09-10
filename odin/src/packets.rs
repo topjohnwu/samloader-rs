@@ -24,6 +24,9 @@ pub(crate) const RESPONSE_TYPE_PIT_FILE: u32 = 0x65;
 pub(crate) const RESPONSE_TYPE_FILE_TRANSFER: u32 = 0x66;
 pub(crate) const RESPONSE_TYPE_END_SESSION: u32 = 0x67;
 
+/// Special opcode returned by Samsung LOKE bootloader indicating an error condition.
+pub(crate) const RESPONSE_TYPE_FAIL: u32 = 0xFFFFFFFF;
+
 #[derive(BinRead, BinWrite, Debug)]
 #[brw(little)]
 pub(crate) enum RequestPacket {
@@ -285,7 +288,7 @@ impl<'a> FilePartPacket<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Response {
     pub response_type: u32,
     pub value: u32,
@@ -308,6 +311,14 @@ impl Response {
             response_type,
             value,
         })
+    }
+
+    pub(crate) fn is_fail(&self) -> bool {
+        self.response_type == RESPONSE_TYPE_FAIL
+    }
+
+    pub(crate) fn signed_value(&self) -> i32 {
+        self.value as i32
     }
 }
 
@@ -429,5 +440,21 @@ mod tests {
         assert_eq!(subcmd, 6);
         assert_eq!(compressed_size, 0x1234);
         assert_eq!(uncompressed_size, 0x5678);
+    }
+
+    #[test]
+    fn test_response_parse_and_fail_detection() {
+        let ok_bytes = [0x64, 0x00, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00];
+        let resp = Response::parse(&ok_bytes).unwrap();
+        assert_eq!(resp.response_type, 0x64);
+        assert_eq!(resp.value, 0x00028000);
+        assert!(!resp.is_fail());
+        assert_eq!(resp.signed_value(), 0x00028000);
+
+        let fail_bytes = [0xff, 0xff, 0xff, 0xff, 0xfb, 0xff, 0xff, 0xff]; // opcode -1, value -5
+        let fail_resp = Response::parse(&fail_bytes).unwrap();
+        assert_eq!(fail_resp.response_type, RESPONSE_TYPE_FAIL);
+        assert!(fail_resp.is_fail());
+        assert_eq!(fail_resp.signed_value(), -5);
     }
 }

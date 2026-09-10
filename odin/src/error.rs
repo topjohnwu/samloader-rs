@@ -91,30 +91,6 @@ pub enum OdinError {
         received: u32,
     },
 
-    /// Failed to receive PIT file size.
-    #[error("Failed to receive PIT file size!")]
-    PitFileSizeReceiveFailed,
-
-    /// Failed to request a specific part of the PIT file.
-    #[error("Failed to request PIT file part #{0}!")]
-    PitFilePartRequestFailed(u32),
-
-    /// Failed to receive a specific part of the PIT file.
-    #[error("Failed to receive PIT file part #{0}!")]
-    PitFilePartReceiveFailed(u32),
-
-    /// Failed to request ending the PIT file transfer sequence.
-    #[error("Failed to send request to end PIT file transfer!")]
-    PitFileEndSendFailed,
-
-    /// General failure during device PIT file download.
-    #[error("Failed to download PIT file!")]
-    PitDownloadFailed,
-
-    /// Failed to start the sequence for uploading/downloading a firmware file.
-    #[error("Failed to begin file transfer sequence!")]
-    FileTransferSequenceBeginFailed,
-
     /// File part index received from device did not match what we expected to send.
     #[error("Expected file part index: {expected} Received: {received}")]
     FilePartIndexMismatch {
@@ -128,49 +104,9 @@ pub enum OdinError {
     #[error("Failed to receive file part response!")]
     FilePartResponseReceiveFailed,
 
-    /// Failed to end the sequence for uploading/downloading a firmware file.
-    #[error("Failed to end file transfer sequence!")]
-    FileTransferSequenceEndFailed,
-
-    /// Failed to start the Odin flashing session.
-    #[error("Failed to begin session!")]
-    BeginSessionFailed,
-
-    /// Failed to negotiate the packet transfer chunk size.
-    #[error("Failed to send file part size packet!")]
-    FilePartSizeSendFailed,
-
-    /// Negotiating packet transfer chunk size returned an error status code.
-    #[error("Unexpected file part size response!\nExpected: 0\nReceived: {0}")]
-    UnexpectedFilePartSizeResponse(u32),
-
-    /// Failed to end the Odin flashing session.
-    #[error("Failed to send end session packet!")]
-    EndSessionSendFailed,
-
-    /// Failed to initialize PIT flashing transfer.
-    #[error("Failed to initialize PIT file transfer!")]
-    PitFileTransferInitFailed,
-
-    /// Failed to send PIT partition metadata info.
-    #[error("Failed to send PIT file part information!")]
-    PitFilePartInfoSendFailed,
-
-    /// Failed to complete PIT partition flashing sequence.
-    #[error("Failed to send end PIT file transfer packet!")]
-    PitFileTransferEndSendFailed,
-
-    /// Failed to prepare file transfer operations.
-    #[error("Failed to initialize file transfer!")]
-    FileTransferInitFailed,
-
-    /// Failed to advertise the total flashing session payload size in bytes.
-    #[error("Failed to send total bytes packet!")]
-    TotalBytesSendFailed,
-
-    /// Initiating session total bytes returned an error status code.
-    #[error("Unexpected session total bytes response!\nExpected: 0\nReceived: {0}")]
-    UnexpectedTotalBytesResponse(u32),
+    /// An error reported by the Samsung LOKE bootloader.
+    #[error("{0}")]
+    Loke(#[from] LokeError),
 
     /// An error occurred on the serial/VCOM communication port.
     #[error("Serial port error: {0}")]
@@ -179,6 +115,83 @@ pub enum OdinError {
     /// An error occurred while parsing structures or headers.
     #[error("{0}")]
     ParseError(String),
+}
+
+/// Detailed error status reported by the Samsung LOKE bootloader.
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LokeError {
+    /// General failure / operation aborted / buffer overflow (-1 or 0).
+    #[error("LOKE returned general failure (FAIL!) [code: {0}]")]
+    General(i32),
+
+    /// Storage partition is write-protected (-2).
+    #[error("Storage partition is write-protected (FAIL! WP) [code: -2]")]
+    WriteProtection,
+
+    /// Flash block erase failure (-3).
+    #[error("Flash block erase failure (FAIL! Erase) [code: -3]")]
+    EraseFailure,
+
+    /// Flash storage write failure (-4).
+    #[error("Flash storage write failure (FAIL! Write) [code: -4]")]
+    WriteFailure,
+
+    /// Cryptographic signature, anti-rollback, or device lock verification failure (-5).
+    #[error("Security or signature verification failure (FAIL! Auth) [code: -5]")]
+    AuthFailure,
+
+    /// Flashed image exceeds partition capacity or size limit (-6).
+    #[error("Image exceeds partition size limit (FAIL! Size) [code: -6]")]
+    SizeLimitExceeded,
+
+    /// Sparse image format error or corrupt ext4 filesystem (-7).
+    #[error("Corrupt filesystem or sparse image format error (FAIL! Ext4) [code: -7]")]
+    Ext4Error,
+
+    /// Binary rejected: partition name is blacklisted (code: 2).
+    #[error("Binary rejected by device: invalid binary name (code: 2)")]
+    InvalidBinary,
+
+    /// Partition table mismatch between PIT and device GPT (code: 3).
+    #[error("Partition table mismatch: PIT and GPT do not match (code: 3)")]
+    PitGptMismatch,
+
+    /// Flashed image exceeds partition boundary (code: 5).
+    #[error("Image size exceeds partition boundary (code: 5)")]
+    PartitionSizeExceeded,
+
+    /// Partition not found in device partition table (code: 14).
+    #[error("Partition not found in device partition table (code: 14)")]
+    PartitionNotFound,
+
+    /// Unsupported storage device type (code: 0x80000000).
+    #[error("Unsupported storage device type (code: 0x80000000)")]
+    UnsupportedDeviceType,
+
+    /// Other failure code returned by LOKE.
+    #[error("LOKE returned error status {0} (FAIL!)")]
+    Other(i32),
+}
+
+impl LokeError {
+    /// Maps a raw 32-bit status code from LOKE into a typed [`LokeError`].
+    pub fn from_status(status_code: i32) -> Self {
+        match status_code {
+            -2 => Self::WriteProtection,
+            -3 => Self::EraseFailure,
+            -4 => Self::WriteFailure,
+            -5 => Self::AuthFailure,
+            -6 => Self::SizeLimitExceeded,
+            -7 => Self::Ext4Error,
+            2 => Self::InvalidBinary,
+            3 => Self::PitGptMismatch,
+            5 => Self::PartitionSizeExceeded,
+            14 => Self::PartitionNotFound,
+            i32::MIN => Self::UnsupportedDeviceType,
+            0 | -1 => Self::General(status_code),
+            other => Self::Other(other),
+        }
+    }
 }
 
 /// Represents errors that can occur during the high-level flashing process.

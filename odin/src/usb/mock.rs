@@ -16,8 +16,9 @@
 //! emulating a Samsung SM-F968B device.
 
 use crate::packets::{
-    RESPONSE_TYPE_END_SESSION, RESPONSE_TYPE_FILE_TRANSFER, RESPONSE_TYPE_PIT_FILE,
-    RESPONSE_TYPE_SEND_FILE_PART, RESPONSE_TYPE_SESSION_SETUP, RequestPacket,
+    RESPONSE_TYPE_END_SESSION, RESPONSE_TYPE_FAIL, RESPONSE_TYPE_FILE_TRANSFER,
+    RESPONSE_TYPE_PIT_FILE, RESPONSE_TYPE_SEND_FILE_PART, RESPONSE_TYPE_SESSION_SETUP,
+    RequestPacket,
 };
 use crate::usb::UsbTransfer;
 use binrw::BinRead;
@@ -43,6 +44,10 @@ pub struct MockBackend {
     current_part_index: u32,
     packet_size: usize,
     pit_data: &'static [u8],
+    fail_begin_session: Option<i32>,
+    fail_commit: Option<i32>,
+    fail_file_part: Option<i32>,
+    fail_end_session: Option<i32>,
 }
 
 impl MockBackend {
@@ -59,7 +64,39 @@ impl MockBackend {
                 env!("CARGO_MANIFEST_DIR"),
                 "/test-data/Q7MQ_EUR_OPENX.pit"
             )),
+            fail_begin_session: None,
+            fail_commit: None,
+            fail_file_part: None,
+            fail_end_session: None,
         }
+    }
+
+    /// Injects an error status on begin session handshake.
+    #[allow(dead_code)]
+    pub fn with_fail_begin_session(mut self, status: i32) -> Self {
+        self.fail_begin_session = Some(status);
+        self
+    }
+
+    /// Injects an error status on slice commit (end sequence packet).
+    #[allow(dead_code)]
+    pub fn with_fail_commit(mut self, status: i32) -> Self {
+        self.fail_commit = Some(status);
+        self
+    }
+
+    /// Injects an error status on file part chunk receipt.
+    #[allow(dead_code)]
+    pub fn with_fail_file_part(mut self, status: i32) -> Self {
+        self.fail_file_part = Some(status);
+        self
+    }
+
+    /// Injects an error status on end session.
+    #[allow(dead_code)]
+    pub fn with_fail_end_session(mut self, status: i32) -> Self {
+        self.fail_end_session = Some(status);
+        self
     }
 
     fn push_response(&mut self, response_type: u32, value: u32) {
@@ -119,8 +156,12 @@ impl UsbTransfer for MockBackend {
                             self.packet_size, self.current_part_index
                         );
                     }
-                    self.push_response(RESPONSE_TYPE_SEND_FILE_PART, self.current_part_index);
-                    self.current_part_index += 1;
+                    if let Some(err) = self.fail_file_part {
+                        self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                    } else {
+                        self.push_response(RESPONSE_TYPE_SEND_FILE_PART, self.current_part_index);
+                        self.current_part_index += 1;
+                    }
                     self.incoming_buffer.drain(..self.packet_size);
                     return true;
                 }
@@ -135,9 +176,13 @@ impl UsbTransfer for MockBackend {
                         match packet {
                             RequestPacket::Session(session_req) => match session_req {
                                 crate::packets::SessionRequest::Begin { .. } => {
-                                    self.state = State::SessionBegun;
-                                    // Report version 2 + LZ4 compression support
-                                    self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0x00028000);
+                                    if let Some(err) = self.fail_begin_session {
+                                        self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                                    } else {
+                                        self.state = State::SessionBegun;
+                                        // Report version 2 + LZ4 compression support
+                                        self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0x00028000);
+                                    }
                                 }
                                 crate::packets::SessionRequest::FilePartSize { size } => {
                                     self.packet_size = size as usize;
@@ -182,14 +227,22 @@ impl UsbTransfer for MockBackend {
                                 }
                                 crate::packets::FileTransferRequest::End(_)
                                 | crate::packets::FileTransferRequest::Lz4End(_) => {
-                                    self.state = State::SessionBegun;
-                                    self.push_response(RESPONSE_TYPE_FILE_TRANSFER, 0);
+                                    if let Some(err) = self.fail_commit {
+                                        self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                                    } else {
+                                        self.state = State::SessionBegun;
+                                        self.push_response(RESPONSE_TYPE_FILE_TRANSFER, 0);
+                                    }
                                 }
                             },
                             RequestPacket::EndSession(end_req) => match end_req {
                                 crate::packets::EndSessionRequest::EndSession => {
-                                    self.state = State::HandshakeComplete;
-                                    self.push_response(RESPONSE_TYPE_END_SESSION, 0);
+                                    if let Some(err) = self.fail_end_session {
+                                        self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                                    } else {
+                                        self.state = State::HandshakeComplete;
+                                        self.push_response(RESPONSE_TYPE_END_SESSION, 0);
+                                    }
                                 }
                                 crate::packets::EndSessionRequest::RebootDevice => {
                                     self.state = State::Uninitialized;

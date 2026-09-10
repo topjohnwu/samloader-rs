@@ -24,7 +24,7 @@ mod packets;
 mod progress;
 mod usb;
 
-pub use error::{FlashError, OdinError};
+pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
