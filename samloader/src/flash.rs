@@ -132,6 +132,7 @@ pub(crate) fn action_flash(
     pit: Option<&str>,
     packages: &[String],
     partitions: &[PartitionArg],
+    csc_code: Option<&str>,
 ) -> i32 {
     set_progress(CliProgress::new(verbose));
 
@@ -168,7 +169,8 @@ pub(crate) fn action_flash(
         .skip_size_check(skip_size_check)
         .skip_md5(skip_md5)
         .packages(packages)
-        .partitions(&mapped_partitions);
+        .partitions(&mapped_partitions)
+        .sales_code(csc_code);
 
     if let Some(pit_path) = pit {
         flash_manager = flash_manager.pit(pit_path);

@@ -83,6 +83,7 @@ pub struct MockBackend {
     fail_end_session: Option<i32>,
     fail_check_super_size: Option<i32>,
     protocol_version: u32,
+    last_sales_code: Option<[u8; 3]>,
 }
 
 impl MockBackend {
@@ -106,7 +107,14 @@ impl MockBackend {
             fail_end_session: None,
             fail_check_super_size: None,
             protocol_version: 2,
+            last_sales_code: None,
         }
+    }
+
+    /// Returns the last sales code configured via Opcode 0x64 Subcmd 9.
+    #[allow(dead_code)]
+    pub fn last_sales_code(&self) -> Option<[u8; 3]> {
+        self.last_sales_code
     }
 
     /// Sets the bootloader protocol version reported by the mock device (default: 3).
@@ -250,6 +258,10 @@ impl UsbTransfer for MockBackend {
                                 }
                                 crate::packets::SessionRequest::FilePartSize { size } => {
                                     self.packet_size = size as usize;
+                                    self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);
+                                }
+                                crate::packets::SessionRequest::SalesCode { c0, c1, c2 } => {
+                                    self.last_sales_code = Some([c0 as u8, c1 as u8, c2 as u8]);
                                     self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);
                                 }
                                 _ => {

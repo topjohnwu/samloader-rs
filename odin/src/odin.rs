@@ -465,6 +465,21 @@ impl OdinSession {
         SessionDeviceInfo::parse(&buffer)
     }
 
+    /// Sets the device CSC / Sales Code in bootloader parameter storage (Opcode 0x64, Subcmd 9).
+    pub fn set_sales_code(&mut self, sales_code: &str) -> Result<(), OdinError> {
+        let bytes = sales_code.as_bytes();
+        if bytes.len() != 3 || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(OdinError::InvalidSalesCode(sales_code.to_string()));
+        }
+        let code = [bytes[0], bytes[1], bytes[2]];
+        let packet = RequestPacket::session_sales_code(code);
+        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
+        Ok(())
+    }
+
     /// Returns whether the negotiated device session supports flashing LZ4-compressed streams.
     pub fn is_lz4_supported(&self) -> bool {
         self.lz4_supported
@@ -935,6 +950,32 @@ mod tests {
             Some("1501004b333230340000000000000000")
         );
         assert_eq!(info.sales_code.as_deref(), Some("TUR"));
+        assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_set_sales_code() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        assert!(session.set_sales_code("TUR").is_ok());
+
+        // Verify invalid formats are rejected
+        assert!(matches!(
+            session.set_sales_code("TU"),
+            Err(OdinError::InvalidSalesCode(_))
+        ));
+        assert!(matches!(
+            session.set_sales_code("TUR1"),
+            Err(OdinError::InvalidSalesCode(_))
+        ));
+        assert!(matches!(
+            session.set_sales_code("T-R"),
+            Err(OdinError::InvalidSalesCode(_))
+        ));
+
         assert!(session.close().is_ok());
     }
 }

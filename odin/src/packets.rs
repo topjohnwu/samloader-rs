@@ -60,6 +60,8 @@ pub(crate) enum SessionRequest {
     TotalBytes { total_bytes: u64 },
     #[brw(magic = 5u32)]
     FilePartSize { size: u32 },
+    #[brw(magic = 9u32)]
+    SalesCode { c0: u32, c1: u32, c2: u32 },
 }
 
 #[derive(BinRead, BinWrite, Debug)]
@@ -190,6 +192,14 @@ impl RequestPacket {
 
     pub(crate) fn file_part_size(size: u32) -> Self {
         Self::Session(SessionRequest::FilePartSize { size })
+    }
+
+    pub(crate) fn session_sales_code(code: [u8; 3]) -> Self {
+        Self::Session(SessionRequest::SalesCode {
+            c0: code[0] as u32,
+            c1: code[1] as u32,
+            c2: code[2] as u32,
+        })
     }
 
     pub(crate) fn end_session() -> Self {
@@ -547,5 +557,25 @@ mod tests {
         check_aligned(0x20000, 0x20000);
         check_aligned(0x20001, 0x40000);
         check_aligned(31_457_280, 31_457_280); // 30 MB (standard slice)
+    }
+
+    #[test]
+    fn test_session_sales_code_packet_layout() {
+        let packet = RequestPacket::session_sales_code(*b"TUR");
+        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_SESSION_SETUP);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let c0 = u32::from_le_bytes(packed[8..12].try_into().unwrap());
+        let c1 = u32::from_le_bytes(packed[12..16].try_into().unwrap());
+        let c2 = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+
+        assert_eq!(opcode, 0x64);
+        assert_eq!(subcmd, 9);
+        assert_eq!(c0, b'T' as u32);
+        assert_eq!(c1, b'U' as u32);
+        assert_eq!(c2, b'R' as u32);
+        assert!(packed[20..].iter().all(|&b| b == 0));
     }
 }

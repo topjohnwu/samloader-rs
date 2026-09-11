@@ -365,6 +365,13 @@ fn main() {
                         .num_args(1)
                         .value_name("FILE")
                         .help(FILE_HELP),
+                )
+                .arg(
+                    Arg::new("csc_code")
+                        .long("csc-code")
+                        .num_args(1)
+                        .value_name("CODE")
+                        .help("Set the 3-letter CSC / Sales Code in device storage (e.g. BTU, TUR, XAA)"),
                 ),
         )
         .subcommand(
@@ -523,8 +530,21 @@ fn main() {
                 }
             }
 
-            if packages.is_empty() && partitions.is_empty() {
-                print_error!("No packages, files, or partitions specified for flashing.");
+            let csc_code = sub_matches
+                .get_one::<String>("csc_code")
+                .map(|s| s.as_str());
+            if let Some(code) = csc_code
+                && (code.len() != 3 || !code.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                print_error!(
+                    "Invalid CSC code \"{}\": must be 3 alphanumeric ASCII characters.",
+                    code
+                );
+                std::process::exit(1);
+            }
+
+            if packages.is_empty() && partitions.is_empty() && csc_code.is_none() {
+                print_error!("No packages, files, partitions, or CSC code specified for flashing.");
                 std::process::exit(1);
             }
 
@@ -545,6 +565,7 @@ fn main() {
                 pit,
                 &packages,
                 &partitions,
+                csc_code,
             );
             std::process::exit(result);
         }

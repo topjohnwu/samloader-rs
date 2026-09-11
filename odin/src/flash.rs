@@ -137,6 +137,7 @@ pub struct FlashManager<'a> {
     partitions: Vec<(Option<String>, String)>,
     super_used_size: Option<u32>,
     has_download_list: bool,
+    sales_code: Option<&'a str>,
 }
 
 impl<'a> FlashManager<'a> {
@@ -154,7 +155,14 @@ impl<'a> FlashManager<'a> {
             partitions: Vec::new(),
             super_used_size: None,
             has_download_list: false,
+            sales_code: None,
         }
+    }
+
+    /// Sets an optional 3-letter CSC / Sales Code to configure on the device.
+    pub fn sales_code(mut self, sales_code: Option<&'a str>) -> Self {
+        self.sales_code = sales_code;
+        self
     }
 
     /// Sets whether to perform repartitioning.
@@ -201,6 +209,22 @@ impl<'a> FlashManager<'a> {
 
     /// Executes the flashing pipeline sequence.
     pub fn execute(&mut self) -> Result<(), FlashError> {
+        // Step 0: Set device sales code if configured
+        if let Some(sales_code) = self.sales_code {
+            progress::println(&format!("Setting device sales code to {}...", sales_code));
+            self.session.set_sales_code(sales_code)?;
+        }
+
+        // If no packages, partitions, or explicit PIT are specified, complete session and return
+        if self.packages.is_empty() && self.partitions.is_empty() && self.pit_path.is_none() {
+            if self.auto_reboot {
+                self.session.reboot_device()?;
+            } else {
+                self.session.end_session()?;
+            }
+            return Ok(());
+        }
+
         // Step 1: Resolve explicit PIT file if provided
         if let Some(pit_path) = self.pit_path {
             let mut f = File::open(pit_path)
@@ -716,5 +740,16 @@ mod tests {
         manager.has_download_list = true;
 
         assert!(manager.flash_partitions(Vec::new(), false).is_ok());
+    }
+
+    #[test]
+    fn test_flash_manager_standalone_sales_code() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).sales_code(Some("TUR"));
+        assert!(manager.execute().is_ok());
     }
 }

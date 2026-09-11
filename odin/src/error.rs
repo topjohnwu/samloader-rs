@@ -123,6 +123,10 @@ pub enum OdinError {
     /// Failed to parse device diagnostics.
     #[error("Failed to parse device information: {0}")]
     DeviceInfoParseFailed(String),
+
+    /// Invalid sales code provided (must be 3 ASCII alphanumeric characters).
+    #[error("Invalid sales code \"{0}\": must be 3 alphanumeric ASCII characters (e.g. BTU, XAA)")]
+    InvalidSalesCode(String),
 }
 
 /// Detailed error status reported by the Samsung LOKE bootloader.
