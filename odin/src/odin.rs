@@ -28,14 +28,7 @@ use std::time::Duration;
 /// via [`begin_session`](Self::begin_session).
 pub struct OdinConnection {
     usb: Box<dyn UsbTransfer>,
-}
-
-#[derive(PartialEq, Eq, Copy, Clone)]
-enum EmptySendKind {
-    None,
-    Before,
-    After,
-    BeforeAndAfter,
+    skip_empty_send: bool,
 }
 
 const FILE_TRANSFER_SEQUENCE_MAX_LENGTH_DEFAULT: usize = 800;
@@ -44,8 +37,28 @@ const FILE_TRANSFER_SEQUENCE_TIMEOUT_DEFAULT: u32 = 30000;
 
 impl OdinConnection {
     /// Creates a new `OdinConnection` instance with a given transport.
+    ///
+    /// Following official `odin4` behavior, empty packets (ZLPs) after 1024-byte
+    /// request packets are skipped on Qualcomm and modern bootloaders, but are sent
+    /// on older Exynos bootloaders that advertise the "Gadget Serial" USB product string.
     pub fn new(usb: Box<dyn UsbTransfer>) -> Self {
-        Self { usb }
+        let skip_empty_send = !usb
+            .product_name()
+            .is_some_and(|name| name.starts_with("Gadget Serial"));
+        Self {
+            usb,
+            skip_empty_send,
+        }
+    }
+
+    /// Returns whether empty packets are skipped after request packets.
+    pub fn skip_empty_send(&self) -> bool {
+        self.skip_empty_send
+    }
+
+    /// Overrides whether empty packets are skipped after request packets.
+    pub fn set_skip_empty_send(&mut self, skip: bool) {
+        self.skip_empty_send = skip;
     }
 
     /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
@@ -151,7 +164,7 @@ impl OdinSession {
         };
 
         let packet = RequestPacket::begin_session();
-        let session_response = session.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let session_response = session.request_and_response(&packet, 3000)?;
 
         session.bootloader_protocol_version = if session_response == 0 {
             1
@@ -171,7 +184,7 @@ impl OdinSession {
             session.file_transfer_sequence_max_length = 30;
 
             let packet = RequestPacket::file_part_size(session.file_transfer_packet_size as u32);
-            let value = session.request_and_response(&packet, EmptySendKind::After, 3000)?;
+            let value = session.request_and_response(&packet, 3000)?;
 
             if value != 0 {
                 return Err(OdinError::Loke(LokeError::from_status(value as i32)));
@@ -187,7 +200,7 @@ impl OdinSession {
         progress::println("Ending session...");
 
         let packet = RequestPacket::end_session();
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
@@ -200,16 +213,15 @@ impl OdinSession {
         progress::println("Rebooting device...");
 
         let packet = RequestPacket::reboot_device();
-        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
+        // Send reboot packet using standard send_packet, which automatically
+        // appends an empty packet (ZLP) for "Gadget Serial" devices (e.g. S10).
+        let _ = self.send_packet(&packet, 500);
 
-        // The device immediately reboots and drops the USB connection,
-        // so the write may partially fail and a response will never arrive.
-        // We do a fire-and-forget send with no retries and a short timeout.
-        let _ = self.connection.usb.send_data(&packet.pack(), 500, false);
-
-        // This is required for some devices e.g. A55.
-        self.send_empty(100);
-        self.receive_empty(100);
+        // Attempt to read from the IN endpoint to consume any response or ACK/ZLP
+        // sent by the bootloader before resetting (required on devices such as A55).
+        // Any timeout or disconnect error is ignored since the device is rebooting.
+        let mut buffer = [0u8; 64];
+        let _ = self.connection.usb.receive_data(&mut buffer, 100, false);
 
         Ok(())
     }
@@ -236,53 +248,39 @@ impl OdinSession {
             .receive_data(&mut buffer, timeout, false);
     }
 
-    fn send_bytes(
-        &mut self,
-        bytes: &[u8],
-        empty_send_kind: EmptySendKind,
-        timeout: i32,
-    ) -> Result<(), ()> {
-        if empty_send_kind == EmptySendKind::Before
-            || empty_send_kind == EmptySendKind::BeforeAndAfter
-        {
-            self.send_empty(100);
-        }
-        if !self.connection.usb.send_data(bytes, timeout, true) {
+    fn send_packet(&mut self, packet: &RequestPacket, timeout: i32) -> Result<(), ()> {
+        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
+        let packet_bytes = packet.pack();
+        if !self.connection.usb.send_data(&packet_bytes, timeout, true) {
             return Err(());
         }
-        if empty_send_kind == EmptySendKind::After
-            || empty_send_kind == EmptySendKind::BeforeAndAfter
-        {
+        if !self.connection.skip_empty_send {
             self.send_empty(100);
         }
         Ok(())
     }
 
-    fn send_packet(
-        &mut self,
-        packet: &RequestPacket,
-        empty_send_kind: EmptySendKind,
-        timeout: i32,
-    ) -> Result<(), ()> {
-        progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
-        let packet_bytes = packet.pack();
-        self.send_bytes(&packet_bytes, empty_send_kind, timeout)
-    }
-
     fn send_file_part(
         &mut self,
         packet: &packets::FilePartPacket<'_>,
-        empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<(), ()> {
         progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
         let packet_bytes = packet.as_bytes();
-        self.send_bytes(&packet_bytes, empty_send_kind, timeout)
+        if !self.connection.usb.send_data(&packet_bytes, timeout, true) {
+            return Err(());
+        }
+        Ok(())
     }
 
     fn receive_response(&mut self, timeout: i32) -> Result<packets::Response, OdinError> {
         let mut buffer = [0u8; packets::Response::SIZE];
-        let received_size = self.connection.usb.receive_data(&mut buffer, timeout, true);
+        let mut received_size = self.connection.usb.receive_data(&mut buffer, timeout, true);
+
+        // Mirror odin4: if 0 bytes received (a ZLP was received), read again
+        if received_size == 0 {
+            received_size = self.connection.usb.receive_data(&mut buffer, timeout, true);
+        }
 
         if received_size < 0 {
             return Err(OdinError::ReceivePacketFailed);
@@ -297,10 +295,9 @@ impl OdinSession {
     fn request_and_response(
         &mut self,
         packet: &RequestPacket,
-        empty_send_kind: EmptySendKind,
         timeout: i32,
     ) -> Result<u32, OdinError> {
-        self.send_packet(packet, empty_send_kind, timeout)
+        self.send_packet(packet, timeout)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
         let response = self.receive_response(timeout)?;
@@ -334,21 +331,21 @@ impl OdinSession {
 
         // Start file transfer
         let packet = RequestPacket::pit_file_flash();
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
 
         // Transfer file size
         let packet = RequestPacket::flash_part_pit_file(pit_buffer_size);
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
 
         // Flash pit file
         let packet = packets::FilePartPacket::new(pit_buffer, pit_buffer_size as usize);
-        self.send_file_part(&packet, EmptySendKind::After, 3000)
+        self.send_file_part(&packet, 3000)
             .map_err(|_| OdinError::SendPacketFailed)?;
 
         let response = self.receive_response(3000)?;
@@ -376,7 +373,7 @@ impl OdinSession {
 
         // End pit file transfer
         let packet = RequestPacket::end_pit_file_transfer(pit_buffer_size);
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
@@ -387,7 +384,7 @@ impl OdinSession {
     /// Downloads/dumps the active Partition Information Table (PIT) file from the device.
     pub fn download_pit_file(&mut self) -> Result<Vec<u8>, OdinError> {
         let packet = RequestPacket::pit_file_dump();
-        let file_size = self.request_and_response(&packet, EmptySendKind::After, 3000)? as usize;
+        let file_size = self.request_and_response(&packet, 3000)? as usize;
 
         const PIT_CHUNK_SIZE: usize = 500;
         let transfer_count = file_size.div_ceil(PIT_CHUNK_SIZE);
@@ -396,7 +393,7 @@ impl OdinSession {
 
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_pit_file(i as u32);
-            self.send_packet(&packet, EmptySendKind::After, 3000)
+            self.send_packet(&packet, 3000)
                 .map_err(|_| OdinError::SendPacketFailed)?;
 
             let expected_size = std::cmp::min(file_size - buffer.len(), PIT_CHUNK_SIZE);
@@ -417,7 +414,7 @@ impl OdinSession {
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
@@ -430,7 +427,7 @@ impl OdinSession {
     /// Available on bootloader protocol version >= 4. Kept as reference for mid-session inspection.
     pub fn dump_device_info(&mut self) -> Result<SessionDeviceInfo, OdinError> {
         let packet = RequestPacket::device_info_dump();
-        let total_bytes = self.request_and_response(&packet, EmptySendKind::None, 3000)? as usize;
+        let total_bytes = self.request_and_response(&packet, 3000)? as usize;
         if total_bytes == 0 || total_bytes > 0x100000 {
             return Err(OdinError::DeviceInfoUnavailable);
         }
@@ -442,7 +439,7 @@ impl OdinSession {
 
         for i in 0..transfer_count {
             let packet = RequestPacket::dump_part_device_info(i as u32);
-            self.send_packet(&packet, EmptySendKind::None, 3000)
+            self.send_packet(&packet, 3000)
                 .map_err(|_| OdinError::SendPacketFailed)?;
 
             let expected_size = std::cmp::min(total_bytes - buffer.len(), CHUNK_SIZE);
@@ -457,7 +454,7 @@ impl OdinSession {
         }
 
         let packet = RequestPacket::end_device_info();
-        let value = self.request_and_response(&packet, EmptySendKind::None, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
@@ -473,7 +470,7 @@ impl OdinSession {
         }
         let code = [bytes[0], bytes[1], bytes[2]];
         let packet = RequestPacket::session_sales_code(code);
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
         }
@@ -577,13 +574,12 @@ impl OdinSession {
         end_packet: &RequestPacket,
         sequence_data: &[u8],
     ) -> Result<(), OdinError> {
-        let init_val = self.request_and_response(init_packet, EmptySendKind::After, 3000)?;
+        let init_val = self.request_and_response(init_packet, 3000)?;
         if init_val != 0 {
             return Err(OdinError::Loke(LokeError::from_status(init_val as i32)));
         }
 
-        let start_val =
-            self.request_and_response(start_packet, EmptySendKind::BeforeAndAfter, 3000)?;
+        let start_val = self.request_and_response(start_packet, 3000)?;
         if start_val != 0 {
             return Err(OdinError::Loke(LokeError::from_status(start_val as i32)));
         }
@@ -601,13 +597,7 @@ impl OdinSession {
                 let packet =
                     packets::FilePartPacket::new(file_buffer, self.file_transfer_packet_size);
 
-                let empty_send_kind = if file_part_index == 0 {
-                    EmptySendKind::None
-                } else {
-                    EmptySendKind::Before
-                };
-
-                if self.send_file_part(&packet, empty_send_kind, 3000).is_err() {
+                if self.send_file_part(&packet, 3000).is_err() {
                     continue;
                 }
 
@@ -645,11 +635,8 @@ impl OdinSession {
             progress::inc(file_buffer.len() as u64);
         }
 
-        let end_val = self.request_and_response(
-            end_packet,
-            EmptySendKind::BeforeAndAfter,
-            self.file_transfer_sequence_timeout as i32,
-        )?;
+        let end_val =
+            self.request_and_response(end_packet, self.file_transfer_sequence_timeout as i32)?;
         if end_val != 0 {
             return Err(OdinError::Loke(LokeError::from_status(end_val as i32)));
         }
@@ -661,7 +648,7 @@ impl OdinSession {
     /// to update its progress indicator.
     pub fn set_total_bytes(&mut self, total_bytes: u64) -> Result<(), OdinError> {
         let packet = RequestPacket::total_bytes(total_bytes);
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
 
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
@@ -673,7 +660,7 @@ impl OdinSession {
     /// Performs a pre-flight dynamic partition size check on modern LOKE bootloaders.
     pub fn check_super_size(&mut self, super_used_size: u32) -> Result<(), OdinError> {
         let packet = RequestPacket::check_super_size(super_used_size);
-        let value = self.request_and_response(&packet, EmptySendKind::After, 3000)?;
+        let value = self.request_and_response(&packet, 3000)?;
 
         if value != 0 {
             return Err(OdinError::Loke(LokeError::from_status(value as i32)));
@@ -977,5 +964,192 @@ mod tests {
         ));
 
         assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_skip_empty_send_detection() {
+        let gadget = Box::new(MockBackend::new(false).with_product_name("Gadget Serial"));
+        let conn_gadget = OdinConnection::new(gadget);
+        assert!(!conn_gadget.skip_empty_send());
+
+        let gadget_prefix = Box::new(MockBackend::new(false).with_product_name("Gadget Serial v2"));
+        let conn_gadget_prefix = OdinConnection::new(gadget_prefix);
+        assert!(!conn_gadget_prefix.skip_empty_send());
+
+        let msm = Box::new(MockBackend::new(false).with_product_name("MSM8996"));
+        let conn_msm = OdinConnection::new(msm);
+        assert!(conn_msm.skip_empty_send());
+
+        let apq = Box::new(MockBackend::new(false).with_product_name("APQ8084"));
+        let conn_apq = OdinConnection::new(apq);
+        assert!(conn_apq.skip_empty_send());
+
+        let generic = Box::new(MockBackend::new(false).with_product_name("SAMSUNG_Android"));
+        let conn_generic = OdinConnection::new(generic);
+        assert!(conn_generic.skip_empty_send());
+
+        let none = Box::new(MockBackend::new(false));
+        let conn_none = OdinConnection::new(none);
+        assert!(conn_none.skip_empty_send());
+    }
+
+    #[derive(Default)]
+    struct SpyTransferInner {
+        sent_data: Vec<Vec<u8>>,
+        read_queue: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    struct SpyTransfer {
+        inner: std::sync::Arc<std::sync::Mutex<SpyTransferInner>>,
+        product: Option<String>,
+    }
+
+    impl UsbTransfer for SpyTransfer {
+        fn reset(&mut self) {}
+        fn send_data(&mut self, data: &[u8], _timeout: i32, _retry: bool) -> bool {
+            self.inner.lock().unwrap().sent_data.push(data.to_vec());
+            true
+        }
+        fn receive_data(&mut self, data: &mut [u8], _timeout: i32, _retry: bool) -> i32 {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(packet) = inner.read_queue.pop_front() {
+                let len = std::cmp::min(data.len(), packet.len());
+                data[..len].copy_from_slice(&packet[..len]);
+                len as i32
+            } else {
+                0
+            }
+        }
+        fn product_name(&self) -> Option<&str> {
+            self.product.as_deref()
+        }
+    }
+
+    #[test]
+    fn test_gadget_serial_sends_empty_packets_after_control_requests() {
+        let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
+        let spy = Box::new(SpyTransfer {
+            inner: spy_inner.clone(),
+            product: Some("Gadget Serial".to_string()),
+        });
+
+        let conn = OdinConnection::new(spy);
+        assert!(!conn.skip_empty_send());
+
+        let mut session = OdinSession {
+            connection: conn,
+            file_transfer_sequence_max_length: 30,
+            file_transfer_packet_size: 0x20000,
+            file_transfer_sequence_timeout: 3000,
+            lz4_supported: false,
+            bootloader_protocol_version: 2,
+        };
+
+        // 1. Control request packet -> must send 1024 bytes followed by 0 bytes (ZLP)
+        let req = RequestPacket::begin_session();
+        assert!(session.send_packet(&req, 1000).is_ok());
+
+        {
+            let inner = spy_inner.lock().unwrap();
+            assert_eq!(inner.sent_data.len(), 2);
+            assert_eq!(inner.sent_data[0].len(), 1024);
+            assert_eq!(inner.sent_data[1].len(), 0); // ZLP
+        }
+
+        // 2. Data chunk -> must send raw chunk bytes with NO ZLP
+        let chunk_data = vec![0xABu8; 1024];
+        let file_part = packets::FilePartPacket::new(&chunk_data, chunk_data.len());
+        assert!(session.send_file_part(&file_part, 1000).is_ok());
+
+        {
+            let inner = spy_inner.lock().unwrap();
+            assert_eq!(inner.sent_data.len(), 3);
+            assert_eq!(inner.sent_data[2].len(), 1024);
+        }
+
+        // 3. Reboot device -> must send reboot packet with trailing ZLP
+        assert!(session.reboot_device().is_ok());
+        {
+            let inner = spy_inner.lock().unwrap();
+            assert_eq!(inner.sent_data.len(), 5);
+            assert_eq!(inner.sent_data[3].len(), 1024);
+            assert_eq!(inner.sent_data[4].len(), 0); // trailing ZLP for reboot on S10!
+        }
+    }
+
+    #[test]
+    fn test_non_gadget_serial_skips_empty_packets() {
+        let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
+        let spy = Box::new(SpyTransfer {
+            inner: spy_inner.clone(),
+            product: Some("MSM8996".to_string()),
+        });
+
+        let conn = OdinConnection::new(spy);
+        assert!(conn.skip_empty_send());
+
+        let mut session = OdinSession {
+            connection: conn,
+            file_transfer_sequence_max_length: 30,
+            file_transfer_packet_size: 0x20000,
+            file_transfer_sequence_timeout: 3000,
+            lz4_supported: false,
+            bootloader_protocol_version: 2,
+        };
+
+        // 1. Control request packet -> only sends 1024 bytes, no ZLP
+        let req = RequestPacket::begin_session();
+        assert!(session.send_packet(&req, 1000).is_ok());
+
+        {
+            let inner = spy_inner.lock().unwrap();
+            assert_eq!(inner.sent_data.len(), 1);
+            assert_eq!(inner.sent_data[0].len(), 1024);
+        }
+
+        // 2. Reboot device -> sends 1024 bytes, no ZLP
+        assert!(session.reboot_device().is_ok());
+        {
+            let inner = spy_inner.lock().unwrap();
+            assert_eq!(inner.sent_data.len(), 2);
+            assert_eq!(inner.sent_data[1].len(), 1024);
+        }
+    }
+
+    #[test]
+    fn test_receive_response_retry_on_zero_length_packet() {
+        let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
+
+        // Push a 0-length packet first (ZLP), followed by a valid 8-byte response packet
+        let mut response_bytes = Vec::new();
+        response_bytes.extend_from_slice(&packets::RESPONSE_TYPE_SESSION_SETUP.to_le_bytes());
+        response_bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        {
+            let mut inner = spy_inner.lock().unwrap();
+            inner.read_queue.push_back(vec![]); // 0-byte packet
+            inner.read_queue.push_back(response_bytes); // actual 8-byte response
+        }
+
+        let spy = Box::new(SpyTransfer {
+            inner: spy_inner,
+            product: None,
+        });
+
+        let conn = OdinConnection::new(spy);
+        let mut session = OdinSession {
+            connection: conn,
+            file_transfer_sequence_max_length: 30,
+            file_transfer_packet_size: 0x20000,
+            file_transfer_sequence_timeout: 3000,
+            lz4_supported: false,
+            bootloader_protocol_version: 2,
+        };
+
+        let response = session
+            .receive_response(1000)
+            .expect("Should retry after 0-byte packet and receive response");
+        assert_eq!(response.response_type, packets::RESPONSE_TYPE_SESSION_SETUP);
+        assert_eq!(response.value, 0);
     }
 }

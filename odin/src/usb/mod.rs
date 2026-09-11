@@ -66,6 +66,10 @@ pub trait UsbTransfer {
     fn send_data(&mut self, data: &[u8], timeout: i32, retry: bool) -> bool;
     /// Receives data from the transport into a buffer, returning the number of bytes read.
     fn receive_data(&mut self, data: &mut [u8], timeout: i32, retry: bool) -> i32;
+    /// Returns the USB Product descriptor string if available.
+    fn product_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Trait representing a backend factory and device locator for USB or serial transports.

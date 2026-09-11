@@ -19,6 +19,7 @@ use super::*;
 pub struct RusbBackend {
     verbose: bool,
     handle: DeviceHandle<Context>,
+    product: Option<String>,
 
     interface_index: i32,
     in_endpoint: u8,
@@ -90,6 +91,11 @@ impl UsbBackend for RusbBackend {
             Self::print_device_info(&device, &handle);
         }
 
+        let product = device
+            .device_descriptor()
+            .ok()
+            .and_then(|desc| handle.read_product_string_ascii(&desc).ok());
+
         let config_descriptor = device
             .config_descriptor(0)
             .map_err(|_| OdinError::ConfigDescriptorRetrieval)?;
@@ -157,6 +163,7 @@ impl UsbBackend for RusbBackend {
         Ok(Self {
             verbose,
             handle,
+            product,
 
             interface_index,
             in_endpoint,
@@ -262,6 +269,10 @@ impl UsbTransfer for RusbBackend {
             }
         }
         -1
+    }
+
+    fn product_name(&self) -> Option<&str> {
+        self.product.as_deref()
     }
 }
 

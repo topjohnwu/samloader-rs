@@ -19,6 +19,7 @@ use super::*;
 pub struct SerialBackend {
     verbose: bool,
     port: Box<dyn serialport::SerialPort>,
+    product: Option<String>,
 }
 
 impl SerialBackend {
@@ -49,6 +50,8 @@ impl UsbBackend for SerialBackend {
             Self::print_device_info(info);
         }
 
+        let product = info.product.clone();
+
         let port = serialport::new(&device.port_name, 115_200)
             .timeout(Duration::from_millis(1000))
             .open()
@@ -56,7 +59,11 @@ impl UsbBackend for SerialBackend {
                 OdinError::SerialError(format!("Failed to open port {}: {}", device.port_name, e))
             })?;
 
-        Ok(Self { verbose, port })
+        Ok(Self {
+            verbose,
+            port,
+            product,
+        })
     }
 
     fn find_device<F>(wait: bool, mut predicate: F) -> Result<Self::UsbDevice, OdinError>
@@ -188,5 +195,9 @@ impl UsbTransfer for SerialBackend {
             }
         }
         -1
+    }
+
+    fn product_name(&self) -> Option<&str> {
+        self.product.as_deref()
     }
 }

@@ -21,6 +21,7 @@ pub struct NusbBackend {
     handle: ::nusb::Device,
     ep_in: ::nusb::Endpoint<::nusb::transfer::Bulk, ::nusb::transfer::In>,
     ep_out: ::nusb::Endpoint<::nusb::transfer::Bulk, ::nusb::transfer::Out>,
+    product: Option<String>,
 }
 
 impl NusbBackend {
@@ -114,11 +115,14 @@ impl UsbBackend for NusbBackend {
             .endpoint::<::nusb::transfer::Bulk, ::nusb::transfer::Out>(out_endpoint)
             .map_err(|e| OdinError::SerialError(format!("Failed to open OUT endpoint: {}", e)))?;
 
+        let product = device.product_string().map(|s| s.to_string());
+
         Ok(Self {
             verbose,
             handle,
             ep_in,
             ep_out,
+            product,
         })
     }
 
@@ -193,5 +197,9 @@ impl UsbTransfer for NusbBackend {
             }
         }
         -1
+    }
+
+    fn product_name(&self) -> Option<&str> {
+        self.product.as_deref()
     }
 }

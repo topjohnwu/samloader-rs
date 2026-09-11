@@ -84,6 +84,8 @@ pub struct MockBackend {
     fail_check_super_size: Option<i32>,
     protocol_version: u32,
     last_sales_code: Option<[u8; 3]>,
+    product: Option<String>,
+    empty_send_count: usize,
 }
 
 impl MockBackend {
@@ -108,7 +110,22 @@ impl MockBackend {
             fail_check_super_size: None,
             protocol_version: 2,
             last_sales_code: None,
+            product: None,
+            empty_send_count: 0,
         }
+    }
+
+    /// Sets the simulated USB product name descriptor.
+    #[allow(dead_code)]
+    pub fn with_product_name(mut self, product: &str) -> Self {
+        self.product = Some(product.to_string());
+        self
+    }
+
+    /// Returns the number of 0-length bulk packets sent to this backend.
+    #[allow(dead_code)]
+    pub fn empty_send_count(&self) -> usize {
+        self.empty_send_count
     }
 
     /// Returns the last sales code configured via Opcode 0x64 Subcmd 9.
@@ -185,6 +202,7 @@ impl UsbTransfer for MockBackend {
 
     fn send_data(&mut self, data: &[u8], _timeout: i32, _retry: bool) -> bool {
         if data.is_empty() {
+            self.empty_send_count += 1;
             return true;
         }
 
@@ -368,5 +386,9 @@ impl UsbTransfer for MockBackend {
             *item = self.outgoing_queue.pop_front().unwrap();
         }
         size as i32
+    }
+
+    fn product_name(&self) -> Option<&str> {
+        self.product.as_deref()
     }
 }
