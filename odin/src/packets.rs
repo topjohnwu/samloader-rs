@@ -23,6 +23,7 @@ pub(crate) const RESPONSE_TYPE_SESSION_SETUP: u32 = 0x64;
 pub(crate) const RESPONSE_TYPE_PIT_FILE: u32 = 0x65;
 pub(crate) const RESPONSE_TYPE_FILE_TRANSFER: u32 = 0x66;
 pub(crate) const RESPONSE_TYPE_END_SESSION: u32 = 0x67;
+pub(crate) const RESPONSE_TYPE_DEVICE_INFO: u32 = 0x69;
 pub(crate) const RESPONSE_TYPE_DYNAMIC_PARTITION: u32 = 0x6a;
 
 /// Special opcode returned by Samsung LOKE bootloader indicating an error condition.
@@ -42,6 +43,9 @@ pub(crate) enum RequestPacket {
 
     #[brw(magic = 0x67u32)]
     EndSession(EndSessionRequest),
+
+    #[brw(magic = 0x69u32)]
+    DeviceInfo(DeviceInfoRequest),
 
     #[brw(magic = 0x6au32)]
     DynamicPartition(DynamicPartitionRequest),
@@ -157,6 +161,17 @@ pub(crate) enum EndSessionRequest {
 
 #[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
 #[brw(little)]
+pub(crate) enum DeviceInfoRequest {
+    #[brw(magic = 0u32)]
+    Dump,
+    #[brw(magic = 1u32)]
+    Part { part: u32 },
+    #[brw(magic = 2u32)]
+    End,
+}
+
+#[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
+#[brw(little)]
 pub(crate) enum DynamicPartitionRequest {
     #[brw(magic = 0u32)]
     CheckSuperSize { super_used_size: u32 },
@@ -260,12 +275,25 @@ impl RequestPacket {
         Self::DynamicPartition(DynamicPartitionRequest::CheckSuperSize { super_used_size })
     }
 
+    pub(crate) fn device_info_dump() -> Self {
+        Self::DeviceInfo(DeviceInfoRequest::Dump)
+    }
+
+    pub(crate) fn dump_part_device_info(part: u32) -> Self {
+        Self::DeviceInfo(DeviceInfoRequest::Part { part })
+    }
+
+    pub(crate) fn end_device_info() -> Self {
+        Self::DeviceInfo(DeviceInfoRequest::End)
+    }
+
     pub(crate) fn expected_response_type(&self) -> u32 {
         match self {
             Self::Session(_) => RESPONSE_TYPE_SESSION_SETUP,
             Self::PitFile(_) => RESPONSE_TYPE_PIT_FILE,
             Self::FileTransfer(_) => RESPONSE_TYPE_FILE_TRANSFER,
             Self::EndSession(_) => RESPONSE_TYPE_END_SESSION,
+            Self::DeviceInfo(_) => RESPONSE_TYPE_DEVICE_INFO,
             Self::DynamicPartition(_) => RESPONSE_TYPE_DYNAMIC_PARTITION,
         }
     }

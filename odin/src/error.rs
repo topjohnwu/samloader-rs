@@ -115,6 +115,14 @@ pub enum OdinError {
     /// An error occurred while parsing structures or headers.
     #[error("{0}")]
     ParseError(String),
+
+    /// Device diagnostics (DVIF / 0x69) are not supported or unavailable on this device.
+    #[error("Device information is not available on this device.")]
+    DeviceInfoUnavailable,
+
+    /// Failed to parse device diagnostics.
+    #[error("Failed to parse device information: {0}")]
+    DeviceInfoParseFailed(String),
 }
 
 /// Detailed error status reported by the Samsung LOKE bootloader.

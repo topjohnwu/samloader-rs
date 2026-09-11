@@ -95,6 +95,7 @@ const DETECT_HELP: &str = r#"Indicates whether or not a download mode device can
 
 Returns instantly per default, or waits until device is found
 when --wait argument is used"#;
+const DETECT_JSON_HELP: &str = "Output device diagnostics as JSON (compatible with odin4 -i)";
 
 // --- Dump PIT Command (`dump-pit`) ---
 const DUMP_PIT_ABOUT: &str = "Dumps the connected device's PIT file to the specified output file";
@@ -254,6 +255,12 @@ fn main() {
                         .long("wait")
                         .action(ArgAction::SetTrue)
                         .help(WAIT_HELP),
+                )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help(DETECT_JSON_HELP),
                 ),
         )
         .subcommand(
@@ -441,9 +448,11 @@ fn main() {
             }
             0
         }
-        Some(("detect", sub_matches)) => {
-            actions::action_detect(usb_backend, sub_matches.get_flag("wait"))
-        }
+        Some(("detect", sub_matches)) => actions::action_detect(
+            usb_backend,
+            sub_matches.get_flag("wait"),
+            sub_matches.get_flag("json"),
+        ),
         Some(("dump-pit", sub_matches)) => actions::action_dump_pit(
             usb_backend,
             sub_matches.get_one::<String>("output").unwrap(),

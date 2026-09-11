@@ -16,22 +16,38 @@
 use crate::flash::CliProgress;
 use crate::print_error;
 use samloader_odin::{
-    OdinConnection, UsbBackendOption, create_backend, detect_device, set_progress,
-    verify_md5_footer,
+    OdinConnection, UsbBackendOption, create_backend, detect_device, query_device_info,
+    set_progress, verify_md5_footer,
 };
 use samloader_pit::PitData;
 use std::fs::File;
 use std::io::{Read, Write};
 
-pub(crate) fn action_detect(usb_backend: UsbBackendOption, wait: bool) -> i32 {
+pub(crate) fn action_detect(usb_backend: UsbBackendOption, wait: bool, json: bool) -> i32 {
     let detected = detect_device(usb_backend, wait);
-    if detected {
-        println!("Device detected");
-        0
-    } else {
+    if !detected {
         eprintln!("ERROR: Failed to detect compatible download-mode device.");
-        1
+        return 1;
     }
+
+    match query_device_info(usb_backend, false) {
+        Ok(info) => {
+            if json {
+                println!("{}", info.to_json());
+            } else {
+                println!("Device detected (Download mode)");
+                print!("{}", info);
+            }
+        }
+        Err(_) => {
+            if json {
+                println!("{{\"modelName\":\"\",\"serialNumber\":\"\"}}");
+            } else {
+                println!("Device detected (Download mode)");
+            }
+        }
+    }
+    0
 }
 
 pub(crate) fn action_dump_pit(

@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::device_info::{DeviceInfo, SessionDeviceInfo};
 use crate::error::{LokeError, OdinError};
 use crate::packets::{self, RequestPacket};
 use crate::progress;
@@ -96,6 +97,26 @@ impl OdinConnection {
             received_size, data
         ));
         Ok(String::from_utf8_lossy(&data).into_owned())
+    }
+
+    /// Queries the connected device for hardware and software diagnostics using the pre-handshake DVIF protocol.
+    ///
+    /// Can be called prior to `init()` to inspect the device without opening an Odin session.
+    pub fn query_device_info(&mut self) -> Result<DeviceInfo, OdinError> {
+        progress::println_verbose("Querying device info via DVIF...");
+        if !self.usb.send_data(b"DVIF", 1000, false) {
+            return Err(OdinError::SendPacketFailed);
+        }
+
+        let mut buffer = [0u8; 1024];
+        let received_size = self.usb.receive_data(&mut buffer, 1000, false);
+        if received_size <= 0 {
+            return Err(OdinError::DeviceInfoUnavailable);
+        }
+
+        let s = String::from_utf8_lossy(&buffer[..received_size as usize]);
+        progress::println_verbose(&format!("DVIF response ({} bytes): {}", received_size, s));
+        DeviceInfo::parse(&s)
     }
 
     /// Begins an active flashing session, negotiating features such as packet size and LZ4 support,
@@ -404,6 +425,46 @@ impl OdinSession {
         Ok(buffer)
     }
 
+    /// Dumps device diagnostic and identity information using in-session Opcode 0x69.
+    ///
+    /// Available on bootloader protocol version >= 4. Kept as reference for mid-session inspection.
+    pub fn dump_device_info(&mut self) -> Result<SessionDeviceInfo, OdinError> {
+        let packet = RequestPacket::device_info_dump();
+        let total_bytes = self.request_and_response(&packet, EmptySendKind::None, 3000)? as usize;
+        if total_bytes == 0 || total_bytes > 0x100000 {
+            return Err(OdinError::DeviceInfoUnavailable);
+        }
+
+        const CHUNK_SIZE: usize = 500;
+        let transfer_count = total_bytes.div_ceil(CHUNK_SIZE);
+        let mut buffer = Vec::with_capacity(total_bytes);
+        let mut chunk = [0u8; CHUNK_SIZE];
+
+        for i in 0..transfer_count {
+            let packet = RequestPacket::dump_part_device_info(i as u32);
+            self.send_packet(&packet, EmptySendKind::None, 3000)
+                .map_err(|_| OdinError::SendPacketFailed)?;
+
+            let expected_size = std::cmp::min(total_bytes - buffer.len(), CHUNK_SIZE);
+            let received =
+                self.connection
+                    .usb
+                    .receive_data(&mut chunk[..expected_size], 3000, false);
+            if received < 0 {
+                return Err(OdinError::ReceivePacketFailed);
+            }
+            buffer.extend_from_slice(&chunk[..received as usize]);
+        }
+
+        let packet = RequestPacket::end_device_info();
+        let value = self.request_and_response(&packet, EmptySendKind::None, 3000)?;
+        if value != 0 {
+            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
+        }
+
+        SessionDeviceInfo::parse(&buffer)
+    }
+
     /// Returns whether the negotiated device session supports flashing LZ4-compressed streams.
     pub fn is_lz4_supported(&self) -> bool {
         self.lz4_supported
@@ -647,6 +708,16 @@ pub fn reboot_download(usb_backend: crate::usb::UsbBackendOption) -> Result<(), 
     Ok(())
 }
 
+/// Connects to a device in download mode and queries diagnostic info via `DVIF`.
+pub fn query_device_info(
+    usb_backend: crate::usb::UsbBackendOption,
+    wait: bool,
+) -> Result<DeviceInfo, OdinError> {
+    let usb = crate::usb::create_backend(usb_backend, false, wait)?;
+    let mut conn = OdinConnection::new(usb);
+    conn.query_device_info()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +898,43 @@ mod tests {
 
         let res = session.check_super_size(27276104);
         assert!(matches!(res, Err(OdinError::Loke(LokeError::General(-1)))));
+    }
+
+    #[test]
+    fn test_odin_mock_query_device_info() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+
+        let info = connection
+            .query_device_info()
+            .expect("Failed to query device info via DVIF");
+        assert_eq!(info.model.as_deref(), Some("SM-F968B"));
+        assert_eq!(info.serial_number.as_deref(), Some("C1A2B3C4"));
+        assert_eq!(info.storage_capacity_gb, Some(512));
+        assert_eq!(info.sales_code.as_deref(), Some("TUR"));
+
+        // Verify connection can still be initialized and session opened after DVIF query
+        assert!(connection.init().is_ok());
+        let session = connection.begin_session().unwrap();
+        assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_dump_device_info() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let info = session
+            .dump_device_info()
+            .expect("Failed to dump device info via opcode 0x69");
+        assert_eq!(info.model.as_deref(), Some("SM-F968B"));
+        assert_eq!(
+            info.unique_number.as_deref(),
+            Some("1501004b333230340000000000000000")
+        );
+        assert_eq!(info.sales_code.as_deref(), Some("TUR"));
+        assert!(session.close().is_ok());
     }
 }

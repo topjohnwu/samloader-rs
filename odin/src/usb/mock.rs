@@ -16,9 +16,9 @@
 //! emulating a Samsung SM-F968B device.
 
 use crate::packets::{
-    RESPONSE_TYPE_DYNAMIC_PARTITION, RESPONSE_TYPE_END_SESSION, RESPONSE_TYPE_FAIL,
-    RESPONSE_TYPE_FILE_TRANSFER, RESPONSE_TYPE_PIT_FILE, RESPONSE_TYPE_SEND_FILE_PART,
-    RESPONSE_TYPE_SESSION_SETUP, RequestPacket,
+    RESPONSE_TYPE_DEVICE_INFO, RESPONSE_TYPE_DYNAMIC_PARTITION, RESPONSE_TYPE_END_SESSION,
+    RESPONSE_TYPE_FAIL, RESPONSE_TYPE_FILE_TRANSFER, RESPONSE_TYPE_PIT_FILE,
+    RESPONSE_TYPE_SEND_FILE_PART, RESPONSE_TYPE_SESSION_SETUP, RequestPacket,
 };
 use crate::usb::UsbTransfer;
 use binrw::BinRead;
@@ -34,6 +34,38 @@ enum State {
     FileTransferPart,
 }
 
+fn default_mock_device_info() -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x12345678u32.to_le_bytes()); // magic
+    data.extend_from_slice(&3u32.to_le_bytes()); // 3 entries
+
+    // Entry 0: Tag 0 (Model), offset 36 (abs 44), len 32
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&36u32.to_le_bytes());
+    data.extend_from_slice(&32u32.to_le_bytes());
+
+    // Entry 1: Tag 1 (UN/CID), offset 68 (abs 76), len 36
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&68u32.to_le_bytes());
+    data.extend_from_slice(&36u32.to_le_bytes());
+
+    // Entry 2: Tag 2 (Sales Code), offset 104 (abs 112), len 4
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&104u32.to_le_bytes());
+    data.extend_from_slice(&4u32.to_le_bytes());
+
+    let mut model_bytes = b"SM-F968B\0".to_vec();
+    model_bytes.resize(32, 0);
+    data.extend_from_slice(&model_bytes);
+
+    let mut cid_bytes = b"1501004b333230340000000000000000\0".to_vec();
+    cid_bytes.resize(36, 0);
+    data.extend_from_slice(&cid_bytes);
+
+    data.extend_from_slice(b"TUR\0");
+    data
+}
+
 /// A mock USB/serial transport backend that implements the Loke-Odin protocol,
 /// emulating a Samsung SM-F968B device.
 pub struct MockBackend {
@@ -44,6 +76,7 @@ pub struct MockBackend {
     current_part_index: u32,
     packet_size: usize,
     pit_data: &'static [u8],
+    device_info_data: Vec<u8>,
     fail_begin_session: Option<i32>,
     fail_commit: Option<i32>,
     fail_file_part: Option<i32>,
@@ -66,6 +99,7 @@ impl MockBackend {
                 env!("CARGO_MANIFEST_DIR"),
                 "/test-data/Q7MQ_EUR_OPENX.pit"
             )),
+            device_info_data: default_mock_device_info(),
             fail_begin_session: None,
             fail_commit: None,
             fail_file_part: None,
@@ -150,7 +184,15 @@ impl UsbTransfer for MockBackend {
 
         match self.state {
             State::Uninitialized => {
-                if self.incoming_buffer == b"ODIN" {
+                if self.incoming_buffer == b"DVIF" {
+                    if self.verbose {
+                        eprintln!("MockBackend: Received DVIF query");
+                    }
+                    self.outgoing_queue.extend(
+                        b"@#MODEL=SM-F968B;UN=C1A2B3C4;CAPA=512;VENDOR=SAMSUNG;FWVER=0800;PRODUCT=KLUEG8UHDB;PROV=2;SALES=TUR;VER=F968BXXS7BZH3;TMU_TEMP=32;",
+                    );
+                    self.incoming_buffer.clear();
+                } else if self.incoming_buffer == b"ODIN" {
                     if self.verbose {
                         eprintln!("MockBackend: Handshake matching ODIN -> LOKE");
                     }
@@ -277,6 +319,25 @@ impl UsbTransfer for MockBackend {
                                     self.push_response(RESPONSE_TYPE_DYNAMIC_PARTITION, 0);
                                 }
                             }
+                            RequestPacket::DeviceInfo(info_req) => match info_req {
+                                crate::packets::DeviceInfoRequest::Dump => {
+                                    self.push_response(
+                                        RESPONSE_TYPE_DEVICE_INFO,
+                                        self.device_info_data.len() as u32,
+                                    );
+                                }
+                                crate::packets::DeviceInfoRequest::Part { part } => {
+                                    let offset = part as usize * 500;
+                                    let end = (offset + 500).min(self.device_info_data.len());
+                                    if offset < self.device_info_data.len() {
+                                        self.outgoing_queue
+                                            .extend(&self.device_info_data[offset..end]);
+                                    }
+                                }
+                                crate::packets::DeviceInfoRequest::End => {
+                                    self.push_response(RESPONSE_TYPE_DEVICE_INFO, 0);
+                                }
+                            },
                         }
                     }
                     self.incoming_buffer.drain(..1024);

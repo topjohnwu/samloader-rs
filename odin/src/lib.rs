@@ -16,6 +16,7 @@
 
 #![deny(missing_docs)]
 
+mod device_info;
 mod error;
 mod firmware;
 mod flash;
@@ -24,12 +25,13 @@ mod packets;
 mod progress;
 mod usb;
 
+pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
 pub use flash::FlashManager;
-pub use odin::{OdinConnection, OdinSession, reboot_download};
+pub use odin::{OdinConnection, OdinSession, query_device_info, reboot_download};
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 
