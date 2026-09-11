@@ -93,6 +93,7 @@ pub(crate) fn action_download(args: DownloadArgs) {
         .info
         .filename
         .strip_suffix(".enc4")
+        .or_else(|| client.info.filename.strip_suffix(".enc2"))
         .unwrap_or(client.info.filename.as_str());
 
     let final_out = match (args.out_file, args.out_dir) {

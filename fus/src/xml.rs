@@ -223,19 +223,34 @@ impl BinaryInform {
         let fw_ver = kv
             .remove("BINARY_SW_VERSION")
             .or_else(|| kv.remove("LATEST_FW_VERSION"))?;
-        let logic_val = kv
-            .remove("LOGIC_VALUE_FACTORY")
-            .or_else(|| kv.remove("LOGIC_VALUE_HOME"))?;
-        let key = get_logic_check(&fw_ver, &logic_val);
+        let filename = kv.remove("BINARY_NAME")?;
+        let region = kv
+            .remove("BINARY_LOCAL_CODE")
+            .or_else(|| kv.remove("DEVICE_LOCAL_CODE"))?;
+
+        let key = if filename.ends_with(".enc2") {
+            let model = kv
+                .remove("BINARY_MODEL_NAME")
+                .or_else(|| kv.remove("DEVICE_MODEL_NAME"))
+                .or_else(|| filename.split('_').next().map(str::to_string))?;
+            let dec_str = format!("{region}:{model}:{fw_ver}");
+            fast_md5::digest(dec_str.as_bytes()).to_vec()
+        } else {
+            let logic_val = kv
+                .remove("LOGIC_VALUE_FACTORY")
+                .or_else(|| kv.remove("LOGIC_VALUE_HOME"))?;
+            let key = get_logic_check(&fw_ver, &logic_val);
+            fast_md5::digest(key.as_bytes()).to_vec()
+        };
 
         Some(Self {
             version: fw_ver,
-            filename: kv.remove("BINARY_NAME")?,
+            filename,
             path: kv.remove("MODEL_PATH")?,
             size: kv.remove("BINARY_BYTE_SIZE")?.parse().ok()?,
-            key: fast_md5::digest(key.as_bytes()).to_vec(),
+            key,
             model_type: kv.remove("DEVICE_MODEL_TYPE")?,
-            region: kv.remove("BINARY_LOCAL_CODE")?,
+            region,
         })
     }
 }
@@ -386,6 +401,76 @@ mod tests {
         assert_eq!(
             info.beta[0],
             "S931U1UES9BZBH/S931U1OYM9BZBH/S931U1UES9BZBH/S931U1UES9BZBHZ"
+        );
+    }
+
+    #[test]
+    fn test_parse_binary_inform_enc2() {
+        let xml = r#"<FUSMsg>
+<FUSBody>
+    <Results><Status>S00</Status></Results>
+    <Put>
+        <BINARY_NAME><Data>GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip.enc2</Data></BINARY_NAME>
+        <BINARY_BYTE_SIZE><Data>1029656336</Data></BINARY_BYTE_SIZE>
+        <BINARY_LOCAL_CODE><Data>XSP</Data></BINARY_LOCAL_CODE>
+        <BINARY_MODEL_NAME><Data>GT-I9305</Data></BINARY_MODEL_NAME>
+        <BINARY_SW_VERSION><Data>I9305XXUEML8/I9305QLBEML4/I9305XXUEMK1/I9305XXUEML8</Data></BINARY_SW_VERSION>
+        <DEVICE_MODEL_TYPE><Data>9</Data></DEVICE_MODEL_TYPE>
+        <MODEL_PATH><Data>/neofus/9/</Data></MODEL_PATH>
+        <LOGIC_VALUE_FACTORY><Data></Data></LOGIC_VALUE_FACTORY>
+        <LOGIC_VALUE_HOME><Data></Data></LOGIC_VALUE_HOME>
+    </Put>
+</FUSBody>
+</FUSMsg>"#;
+
+        let info = BinaryInform::parse(xml).expect("Failed to parse enc2 inform");
+        assert_eq!(
+            info.filename,
+            "GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip.enc2"
+        );
+        assert_eq!(info.size, 1029656336);
+        assert_eq!(info.region, "XSP");
+        assert_eq!(info.model_type, "9");
+        assert_eq!(info.path, "/neofus/9/");
+        assert_eq!(
+            info.key,
+            fast_md5::digest(b"XSP:GT-I9305:I9305XXUEML8/I9305QLBEML4/I9305XXUEMK1/I9305XXUEML8")
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_parse_binary_inform_enc4() {
+        let xml = r#"<FUSMsg>
+<FUSBody>
+    <Results><Status>S00</Status></Results>
+    <Put>
+        <BINARY_NAME><Data>SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4</Data></BINARY_NAME>
+        <BINARY_BYTE_SIZE><Data>5000000000</Data></BINARY_BYTE_SIZE>
+        <BINARY_LOCAL_CODE><Data>XAA</Data></BINARY_LOCAL_CODE>
+        <BINARY_MODEL_NAME><Data>SM-S931U1</Data></BINARY_MODEL_NAME>
+        <BINARY_SW_VERSION><Data>S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1/S931U1UEU1AWF1</Data></BINARY_SW_VERSION>
+        <DEVICE_MODEL_TYPE><Data>9</Data></DEVICE_MODEL_TYPE>
+        <MODEL_PATH><Data>/neofus/9/</Data></MODEL_PATH>
+        <LOGIC_VALUE_FACTORY><Data>1234567890abcdef</Data></LOGIC_VALUE_FACTORY>
+    </Put>
+</FUSBody>
+</FUSMsg>"#;
+
+        let info = BinaryInform::parse(xml).expect("Failed to parse enc4 inform");
+        assert_eq!(
+            info.filename,
+            "SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4"
+        );
+        assert_eq!(info.size, 5000000000);
+        assert_eq!(info.region, "XAA");
+        let expected_key_str = get_logic_check(
+            "S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1/S931U1UEU1AWF1",
+            "1234567890abcdef",
+        );
+        assert_eq!(
+            info.key,
+            fast_md5::digest(expected_key_str.as_bytes()).to_vec()
         );
     }
 }
