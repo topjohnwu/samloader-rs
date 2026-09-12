@@ -1500,6 +1500,7 @@ dependencies = [
  "cfg-if",
  "clap",
  "indicatif",
+ "libc",
  "samloader-fus",
  "samloader-odin",
  "samloader-pit",

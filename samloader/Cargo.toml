@@ -16,6 +16,9 @@ clap = { workspace = true }
 indicatif = { workspace = true }
 cfg-if = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [features]
 default = ["nusb", "serialport"]
 rusb = ["samloader-odin/rusb"]
