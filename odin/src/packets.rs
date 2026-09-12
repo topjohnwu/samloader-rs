@@ -154,13 +154,15 @@ impl FileTransferEnd {
     }
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
 #[brw(little)]
 pub(crate) enum EndSessionRequest {
     #[brw(magic = 0u32)]
     EndSession,
     #[brw(magic = 1u32)]
     RebootDevice,
+    #[brw(magic = 2u32)]
+    RebootDownload,
 }
 
 #[derive(BinRead, BinWrite, Debug, PartialEq, Eq)]
@@ -214,6 +216,10 @@ impl RequestPacket {
 
     pub(crate) fn reboot_device() -> Self {
         Self::EndSession(EndSessionRequest::RebootDevice)
+    }
+
+    pub(crate) fn reboot_to_download() -> Self {
+        Self::EndSession(EndSessionRequest::RebootDownload)
     }
 
     pub(crate) fn pit_file_flash() -> Self {
@@ -597,5 +603,26 @@ mod tests {
         assert_eq!(opcode, 0x64);
         assert_eq!(subcmd, 7);
         assert!(packed[8..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_end_session_reboot_download_packet_layout() {
+        let packet = RequestPacket::reboot_to_download();
+        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_END_SESSION);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+
+        assert_eq!(opcode, 0x67);
+        assert_eq!(subcmd, 2);
+        assert!(packed[8..].iter().all(|&b| b == 0));
+
+        let mut cursor = Cursor::new(&packed);
+        let parsed = RequestPacket::read_le(&mut cursor).unwrap();
+        assert!(matches!(
+            parsed,
+            RequestPacket::EndSession(EndSessionRequest::RebootDownload)
+        ));
     }
 }

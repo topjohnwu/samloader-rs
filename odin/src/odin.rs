@@ -210,12 +210,23 @@ impl OdinSession {
 
     /// Reboots the device normally out of Download Mode.
     pub fn reboot_device(&mut self) -> Result<(), OdinError> {
-        progress::println("Rebooting device...");
+        self.reboot_with_packet(&RequestPacket::reboot_device(), "Rebooting device...")
+    }
 
-        let packet = RequestPacket::reboot_device();
+    /// Reboots the device back into Download Mode.
+    pub fn reboot_to_download(&mut self) -> Result<(), OdinError> {
+        self.reboot_with_packet(
+            &RequestPacket::reboot_to_download(),
+            "Rebooting device to Download Mode...",
+        )
+    }
+
+    fn reboot_with_packet(&mut self, packet: &RequestPacket, msg: &str) -> Result<(), OdinError> {
+        progress::println(msg);
+
         // Send reboot packet using standard send_packet, which automatically
         // appends an empty packet (ZLP) for "Gadget Serial" devices (e.g. S10).
-        let _ = self.send_packet(&packet, 500);
+        let _ = self.send_packet(packet, 500);
 
         // Attempt to read from the IN endpoint to consume any response or ACK/ZLP
         // sent by the bootloader before resetting (required on devices such as A55).
@@ -755,6 +766,17 @@ mod tests {
 
         // connection is usable again
         assert!(connection.send_string("ODIN", 1000).is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_session_reboot_to_download() {
+        let backend = Box::new(MockBackend::new(true));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        // reboot to download mode
+        assert!(session.reboot_to_download().is_ok());
     }
 
     #[test]

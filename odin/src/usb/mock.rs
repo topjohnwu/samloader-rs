@@ -366,7 +366,8 @@ impl UsbTransfer for MockBackend {
                                         self.push_response(RESPONSE_TYPE_END_SESSION, 0);
                                     }
                                 }
-                                crate::packets::EndSessionRequest::RebootDevice => {
+                                crate::packets::EndSessionRequest::RebootDevice
+                                | crate::packets::EndSessionRequest::RebootDownload => {
                                     self.state = State::Uninitialized;
                                 }
                             },

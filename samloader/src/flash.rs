@@ -18,8 +18,8 @@ use crate::PartitionArg;
 use crate::print_error;
 use indicatif::{ProgressBar, ProgressStyle};
 use samloader_odin::{
-    FlashEvent, FlashManager, FlashProgress, OdinConnection, UsbBackendOption, create_backend,
-    set_progress,
+    FlashEvent, FlashManager, FlashProgress, OdinConnection, RebootMode, UsbBackendOption,
+    create_backend, set_progress,
 };
 use std::time::Duration;
 
@@ -125,7 +125,7 @@ pub(crate) fn action_flash(
     usb_backend: UsbBackendOption,
     repartition: bool,
     verbose: bool,
-    reboot_device: bool,
+    reboot_mode: RebootMode,
     wait: bool,
     skip_size_check: bool,
     skip_md5: bool,
@@ -166,7 +166,7 @@ pub(crate) fn action_flash(
 
     let mut flash_manager = FlashManager::new(&mut session)
         .repartition(repartition)
-        .auto_reboot(reboot_device)
+        .reboot_mode(reboot_mode)
         .skip_size_check(skip_size_check)
         .skip_md5(skip_md5)
         .erase(erase)

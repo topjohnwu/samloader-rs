@@ -16,7 +16,7 @@
 use crate::flash::CliProgress;
 use crate::print_error;
 use samloader_odin::{
-    OdinConnection, UsbBackendOption, create_backend, detect_device, query_device_info,
+    OdinConnection, RebootMode, UsbBackendOption, create_backend, detect_device, query_device_info,
     set_progress, verify_md5_footer,
 };
 use samloader_pit::PitData;
@@ -54,7 +54,7 @@ pub(crate) fn action_dump_pit(
     usb_backend: UsbBackendOption,
     output: &str,
     verbose: bool,
-    reboot_device: bool,
+    reboot_mode: RebootMode,
     wait: bool,
 ) -> i32 {
     if output.is_empty() {
@@ -117,9 +117,20 @@ pub(crate) fn action_dump_pit(
         success = false;
     }
 
-    if reboot_device && let Err(e) = session.reboot_device() {
-        print_error!("{}", e);
-        success = false;
+    match reboot_mode {
+        RebootMode::Normal => {
+            if let Err(e) = session.reboot_device() {
+                print_error!("{}", e);
+                success = false;
+            }
+        }
+        RebootMode::Download => {
+            if let Err(e) = session.reboot_to_download() {
+                print_error!("{}", e);
+                success = false;
+            }
+        }
+        RebootMode::None => {}
     }
 
     if success { 0 } else { 1 }
@@ -129,7 +140,7 @@ pub(crate) fn action_print_pit(
     usb_backend: UsbBackendOption,
     file: &str,
     verbose: bool,
-    reboot_device: bool,
+    reboot_mode: RebootMode,
     wait: bool,
 ) -> i32 {
     if !file.is_empty() {
@@ -211,9 +222,20 @@ pub(crate) fn action_print_pit(
             success = false;
         }
 
-        if reboot_device && let Err(e) = session.reboot_device() {
-            print_error!("{}", e);
-            success = false;
+        match reboot_mode {
+            RebootMode::Normal => {
+                if let Err(e) = session.reboot_device() {
+                    print_error!("{}", e);
+                    success = false;
+                }
+            }
+            RebootMode::Download => {
+                if let Err(e) = session.reboot_to_download() {
+                    print_error!("{}", e);
+                    success = false;
+                }
+            }
+            RebootMode::None => {}
         }
 
         if success { 0 } else { 1 }

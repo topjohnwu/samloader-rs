@@ -122,6 +122,18 @@ fn create_firmware_info<'a>(
     }
 }
 
+/// Specifies the device reboot behavior after a flash session concludes.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum RebootMode {
+    /// Do not reboot the device; end the session and remain in download mode.
+    #[default]
+    None,
+    /// Reboot the device normally out of Download Mode.
+    Normal,
+    /// Reboot the device back into Download Mode.
+    Download,
+}
+
 /// Orchestrates the flashing pipeline, processing package and partition sources
 /// and executing the Loke flash protocol.
 pub struct FlashManager<'a> {
@@ -129,7 +141,7 @@ pub struct FlashManager<'a> {
     pit_file_bytes: Option<Vec<u8>>,
 
     repartition: bool,
-    auto_reboot: bool,
+    reboot_mode: RebootMode,
     skip_size_check: bool,
     skip_md5: bool,
     pit_path: Option<&'a str>,
@@ -148,7 +160,7 @@ impl<'a> FlashManager<'a> {
             session,
             pit_file_bytes: None,
             repartition: false,
-            auto_reboot: false,
+            reboot_mode: RebootMode::None,
             skip_size_check: false,
             skip_md5: false,
             pit_path: None,
@@ -180,9 +192,27 @@ impl<'a> FlashManager<'a> {
         self
     }
 
-    /// Sets whether to automatically reboot after flashing.
+    /// Sets the reboot mode to perform after flashing completes.
+    pub fn reboot_mode(mut self, mode: RebootMode) -> Self {
+        self.reboot_mode = mode;
+        self
+    }
+
+    /// Sets whether to automatically reboot normally out of Download Mode after flashing.
     pub fn auto_reboot(mut self, enabled: bool) -> Self {
-        self.auto_reboot = enabled;
+        self.reboot_mode = if enabled {
+            RebootMode::Normal
+        } else {
+            RebootMode::None
+        };
+        self
+    }
+
+    /// Sets whether to reboot the device back into Download Mode after flashing.
+    pub fn redownload(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.reboot_mode = RebootMode::Download;
+        }
         self
     }
 
@@ -229,10 +259,10 @@ impl<'a> FlashManager<'a> {
             if self.erase {
                 self.session.nand_erase()?;
             }
-            if self.auto_reboot {
-                self.session.reboot_device()?;
-            } else {
-                self.session.end_session()?;
+            match self.reboot_mode {
+                RebootMode::Normal => self.session.reboot_device()?,
+                RebootMode::Download => self.session.reboot_to_download()?,
+                RebootMode::None => self.session.end_session()?,
             }
             return Ok(());
         }
@@ -263,7 +293,7 @@ impl<'a> FlashManager<'a> {
         )?;
 
         // Step 5: Flash payloads to the device
-        self.flash_partitions(partition_infos, self.auto_reboot)?;
+        self.flash_partitions(partition_infos, self.reboot_mode)?;
 
         Ok(())
     }
@@ -563,7 +593,7 @@ impl<'a> FlashManager<'a> {
     fn flash_partitions(
         &mut self,
         partition_infos: Vec<FirmwareInfo<'_>>,
-        reboot_device: bool,
+        reboot_mode: RebootMode,
     ) -> Result<(), FlashError> {
         let total_bytes: u64 = partition_infos
             .iter()
@@ -621,8 +651,14 @@ impl<'a> FlashManager<'a> {
 
         self.session.end_session()?;
 
-        if reboot_device {
-            self.session.reboot_device()?;
+        match reboot_mode {
+            RebootMode::Normal => {
+                self.session.reboot_device()?;
+            }
+            RebootMode::Download => {
+                self.session.reboot_to_download()?;
+            }
+            RebootMode::None => {}
         }
 
         Ok(())
@@ -718,7 +754,11 @@ mod tests {
         manager.super_used_size = Some(27276104);
         manager.has_download_list = true;
 
-        assert!(manager.flash_partitions(Vec::new(), false).is_ok());
+        assert!(
+            manager
+                .flash_partitions(Vec::new(), RebootMode::None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -736,7 +776,7 @@ mod tests {
         manager.super_used_size = Some(27276104);
         manager.has_download_list = true;
 
-        let res = manager.flash_partitions(Vec::new(), false);
+        let res = manager.flash_partitions(Vec::new(), RebootMode::None);
         assert!(matches!(res, Err(FlashError::SuperSizeCheckFailed(_))));
     }
 
@@ -756,7 +796,11 @@ mod tests {
         manager.super_used_size = Some(27276104);
         manager.has_download_list = true;
 
-        assert!(manager.flash_partitions(Vec::new(), false).is_ok());
+        assert!(
+            manager
+                .flash_partitions(Vec::new(), RebootMode::None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -822,5 +866,31 @@ mod tests {
                 LokeError::WriteProtection
             )))
         ));
+    }
+
+    #[test]
+    fn test_flash_manager_standalone_redownload() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).redownload(true);
+        assert!(manager.execute().is_ok());
+    }
+
+    #[test]
+    fn test_flash_manager_reboot_mode_download() {
+        let backend = Box::new(MockBackend::new(false));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).reboot_mode(RebootMode::Download);
+        assert!(
+            manager
+                .flash_partitions(Vec::new(), RebootMode::Download)
+                .is_ok()
+        );
     }
 }

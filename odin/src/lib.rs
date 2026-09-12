@@ -30,7 +30,7 @@ pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::{
     FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
 };
-pub use flash::FlashManager;
+pub use flash::{FlashManager, RebootMode};
 pub use odin::{OdinConnection, OdinSession, query_device_info, reboot_download};
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};

@@ -21,9 +21,9 @@ mod actions;
 mod download;
 mod flash;
 
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use samloader_fus::{FusClient, fetch_version_xml};
-use samloader_odin::UsbBackendOption;
+use samloader_odin::{RebootMode, UsbBackendOption};
 
 pub(crate) struct PartitionArg {
     pub(crate) name: Option<String>,
@@ -177,8 +177,26 @@ impl OdinOptionExt for Command {
             Arg::new("no-reboot")
                 .long("no-reboot")
                 .action(ArgAction::SetTrue)
+                .conflicts_with("redownload")
                 .help(NO_REBOOT_HELP),
         )
+        .arg(
+            Arg::new("redownload")
+                .long("redownload")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("no-reboot")
+                .help("Reboot the device back into Download Mode instead of normal mode"),
+        )
+    }
+}
+
+fn get_reboot_mode(matches: &ArgMatches) -> RebootMode {
+    if matches.get_flag("redownload") {
+        RebootMode::Download
+    } else if matches.get_flag("no-reboot") {
+        RebootMode::None
+    } else {
+        RebootMode::Normal
     }
 }
 
@@ -472,7 +490,7 @@ fn main() {
             usb_backend,
             sub_matches.get_one::<String>("output").unwrap(),
             verbose,
-            !sub_matches.get_flag("no-reboot"),
+            get_reboot_mode(sub_matches),
             sub_matches.get_flag("wait"),
         ),
         Some(("print-pit", sub_matches)) => actions::action_print_pit(
@@ -482,7 +500,7 @@ fn main() {
                 .map(|s| s.as_str())
                 .unwrap_or(""),
             verbose,
-            !sub_matches.get_flag("no-reboot"),
+            get_reboot_mode(sub_matches),
             sub_matches.get_flag("wait"),
         ),
         Some(("flash", sub_matches)) => {
@@ -552,9 +570,15 @@ fn main() {
             }
 
             let erase = sub_matches.get_flag("erase");
-            if packages.is_empty() && partitions.is_empty() && csc_code.is_none() && !erase {
+            let redownload = sub_matches.get_flag("redownload");
+            if packages.is_empty()
+                && partitions.is_empty()
+                && csc_code.is_none()
+                && !erase
+                && !redownload
+            {
                 print_error!(
-                    "No packages, files, partitions, CSC code, or erase option specified for flashing."
+                    "No packages, files, partitions, CSC code, erase option, or redownload option specified for flashing."
                 );
                 std::process::exit(1);
             }
@@ -569,7 +593,7 @@ fn main() {
                 usb_backend,
                 sub_matches.get_flag("repartition"),
                 verbose,
-                !sub_matches.get_flag("no-reboot"),
+                get_reboot_mode(sub_matches),
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("skip-size-check"),
                 sub_matches.get_flag("skip-md5"),
