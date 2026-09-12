@@ -237,17 +237,6 @@ impl OdinSession {
         self.connection
     }
 
-    fn send_empty(&mut self, timeout: i32) {
-        self.connection.usb.send_data(&[], timeout, false);
-    }
-
-    fn receive_empty(&mut self, timeout: i32) {
-        let mut buffer = [0u8; 1];
-        self.connection
-            .usb
-            .receive_data(&mut buffer, timeout, false);
-    }
-
     fn send_packet(&mut self, packet: &RequestPacket, timeout: i32) -> Result<(), ()> {
         progress::println_verbose(&format!("Sending packet: {:#04X?}", packet));
         let packet_bytes = packet.pack();
@@ -255,7 +244,7 @@ impl OdinSession {
             return Err(());
         }
         if !self.connection.skip_empty_send {
-            self.send_empty(100);
+            self.connection.usb.send_data(&[], 100, false);
         }
         Ok(())
     }
@@ -410,7 +399,8 @@ impl OdinSession {
 
         // Receive empty packet after the last PIT transfer,
         // this is required for some older devices e.g. Tab S2 VE.
-        self.receive_empty(100);
+        let mut empty = [0u8; 1];
+        self.connection.usb.receive_data(&mut empty, 100, false);
 
         // End file transfer
         let packet = RequestPacket::pit_file_end();
