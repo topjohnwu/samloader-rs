@@ -467,6 +467,23 @@ impl OdinSession {
         Ok(())
     }
 
+    /// Dispatches a low-level hardware NAND Erase for the USERDATA partition (Opcode 0x64, Subcmd 7).
+    ///
+    /// Instructs the device bootloader to issue a hardware flash block erase across the
+    /// `USERDATA` partition range (from the starting sector of `USERDATA` to the end of user storage).
+    ///
+    /// Returns the number of storage sectors erased by the device.
+    pub fn nand_erase(&mut self) -> Result<u32, OdinError> {
+        progress::println("Erasing storage (USERDATA)...");
+        let packet = RequestPacket::nand_erase();
+        let erased_sectors = self.request_and_response(&packet, 60_000)?;
+        progress::println(&format!(
+            "Storage erased successfully ({} sectors)\n",
+            erased_sectors
+        ));
+        Ok(erased_sectors)
+    }
+
     /// Returns whether the negotiated device session supports flashing LZ4-compressed streams.
     pub fn is_lz4_supported(&self) -> bool {
         self.lz4_supported
@@ -954,6 +971,44 @@ mod tests {
         ));
 
         assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_nand_erase_success() {
+        let backend = Box::new(MockBackend::new(false).with_nand_erase(1_048_576));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        let sectors = session.nand_erase().expect("NAND erase failed");
+        assert_eq!(sectors, 1_048_576);
+
+        assert!(session.close().is_ok());
+    }
+
+    #[test]
+    fn test_odin_mock_nand_erase_failure() {
+        // Test Auth/Security failure (-5)
+        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-5));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        match session.nand_erase() {
+            Err(OdinError::Loke(LokeError::AuthFailure)) => {}
+            other => panic!("Expected AuthFailure, got {:?}", other),
+        }
+
+        // Test WriteProtection failure (-20, returned by sboot)
+        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-20));
+        let mut connection = OdinConnection::new(backend);
+        assert!(connection.init().is_ok());
+        let mut session = connection.begin_session().unwrap();
+
+        match session.nand_erase() {
+            Err(OdinError::Loke(LokeError::WriteProtection)) => {}
+            other => panic!("Expected WriteProtection, got {:?}", other),
+        }
     }
 
     #[test]

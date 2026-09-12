@@ -82,6 +82,8 @@ pub struct MockBackend {
     fail_file_part: Option<i32>,
     fail_end_session: Option<i32>,
     fail_check_super_size: Option<i32>,
+    fail_nand_erase: Option<i32>,
+    nand_erase_sectors: u32,
     protocol_version: u32,
     last_sales_code: Option<[u8; 3]>,
     product: Option<String>,
@@ -108,6 +110,8 @@ impl MockBackend {
             fail_file_part: None,
             fail_end_session: None,
             fail_check_super_size: None,
+            fail_nand_erase: None,
+            nand_erase_sectors: 524_288,
             protocol_version: 2,
             last_sales_code: None,
             product: None,
@@ -173,6 +177,20 @@ impl MockBackend {
     #[allow(dead_code)]
     pub fn with_fail_check_super_size(mut self, status: i32) -> Self {
         self.fail_check_super_size = Some(status);
+        self
+    }
+
+    /// Injects an error status on NAND storage erase request.
+    #[allow(dead_code)]
+    pub fn with_fail_nand_erase(mut self, status: i32) -> Self {
+        self.fail_nand_erase = Some(status);
+        self
+    }
+
+    /// Configures the simulated number of erased sectors returned on NAND erase.
+    #[allow(dead_code)]
+    pub fn with_nand_erase(mut self, sectors: u32) -> Self {
+        self.nand_erase_sectors = sectors;
         self
     }
 
@@ -281,6 +299,16 @@ impl UsbTransfer for MockBackend {
                                 crate::packets::SessionRequest::SalesCode { c0, c1, c2 } => {
                                     self.last_sales_code = Some([c0 as u8, c1 as u8, c2 as u8]);
                                     self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);
+                                }
+                                crate::packets::SessionRequest::NandErase => {
+                                    if let Some(err) = self.fail_nand_erase {
+                                        self.push_response(RESPONSE_TYPE_FAIL, err as u32);
+                                    } else {
+                                        self.push_response(
+                                            RESPONSE_TYPE_SESSION_SETUP,
+                                            self.nand_erase_sectors,
+                                        );
+                                    }
                                 }
                                 _ => {
                                     self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);

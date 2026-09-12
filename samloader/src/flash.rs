@@ -133,6 +133,7 @@ pub(crate) fn action_flash(
     packages: &[String],
     partitions: &[PartitionArg],
     csc_code: Option<&str>,
+    erase: bool,
 ) -> i32 {
     set_progress(CliProgress::new(verbose));
 
@@ -168,6 +169,7 @@ pub(crate) fn action_flash(
         .auto_reboot(reboot_device)
         .skip_size_check(skip_size_check)
         .skip_md5(skip_md5)
+        .erase(erase)
         .packages(packages)
         .partitions(&mapped_partitions)
         .sales_code(csc_code);

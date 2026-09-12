@@ -138,6 +138,7 @@ pub struct FlashManager<'a> {
     super_used_size: Option<u32>,
     has_download_list: bool,
     sales_code: Option<&'a str>,
+    erase: bool,
 }
 
 impl<'a> FlashManager<'a> {
@@ -156,7 +157,15 @@ impl<'a> FlashManager<'a> {
             super_used_size: None,
             has_download_list: false,
             sales_code: None,
+            erase: false,
         }
+    }
+
+    /// Sets whether to perform a low-level NAND hardware erase on the `USERDATA` partition
+    /// prior to flashing or as a standalone wipe operation.
+    pub fn erase(mut self, enabled: bool) -> Self {
+        self.erase = enabled;
+        self
     }
 
     /// Sets an optional 3-letter CSC / Sales Code to configure on the device.
@@ -217,6 +226,9 @@ impl<'a> FlashManager<'a> {
 
         // If no packages, partitions, or explicit PIT are specified, complete session and return
         if self.packages.is_empty() && self.partitions.is_empty() && self.pit_path.is_none() {
+            if self.erase {
+                self.session.nand_erase()?;
+            }
             if self.auto_reboot {
                 self.session.reboot_device()?;
             } else {
@@ -409,6 +421,10 @@ impl<'a> FlashManager<'a> {
     fn download_and_parse_pit(&mut self, repartition: bool) -> Result<PitData, FlashError> {
         if repartition && self.pit_file_bytes.is_none() {
             return Err(FlashError::RepartitionPitRequired);
+        }
+
+        if self.erase {
+            self.session.nand_erase()?;
         }
 
         if repartition {
@@ -618,6 +634,7 @@ mod tests {
     use super::*;
     use crate::odin::OdinConnection;
     use crate::usb::MockBackend;
+    use crate::{LokeError, OdinError};
 
     #[test]
     fn test_scan_tar_packages_metadata_and_manifest() {
@@ -751,5 +768,59 @@ mod tests {
 
         let mut manager = FlashManager::new(&mut session).sales_code(Some("TUR"));
         assert!(manager.execute().is_ok());
+    }
+
+    #[test]
+    fn test_flash_manager_standalone_nand_erase() {
+        let backend = Box::new(MockBackend::new(false).with_nand_erase(1_048_576));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).erase(true);
+        assert!(manager.execute().is_ok());
+    }
+
+    #[test]
+    fn test_flash_manager_standalone_nand_erase_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-5));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).erase(true);
+        assert!(matches!(
+            manager.execute(),
+            Err(FlashError::Odin(OdinError::Loke(LokeError::AuthFailure)))
+        ));
+    }
+
+    #[test]
+    fn test_flash_manager_nand_erase_in_download_and_parse_pit() {
+        let backend = Box::new(MockBackend::new(false).with_nand_erase(1_048_576));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).erase(true);
+        let pit_data = manager.download_and_parse_pit(false);
+        assert!(pit_data.is_ok());
+    }
+
+    #[test]
+    fn test_flash_manager_nand_erase_in_download_and_parse_pit_failure() {
+        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-20));
+        let mut connection = OdinConnection::new(backend);
+        connection.init().unwrap();
+        let mut session = connection.begin_session().unwrap();
+
+        let mut manager = FlashManager::new(&mut session).erase(true);
+        let res = manager.download_and_parse_pit(false);
+        assert!(matches!(
+            res,
+            Err(FlashError::Odin(OdinError::Loke(
+                LokeError::WriteProtection
+            )))
+        ));
     }
 }

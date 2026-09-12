@@ -60,6 +60,8 @@ pub(crate) enum SessionRequest {
     TotalBytes { total_bytes: u64 },
     #[brw(magic = 5u32)]
     FilePartSize { size: u32 },
+    #[brw(magic = 7u32)]
+    NandErase,
     #[brw(magic = 9u32)]
     SalesCode { c0: u32, c1: u32, c2: u32 },
 }
@@ -192,6 +194,10 @@ impl RequestPacket {
 
     pub(crate) fn file_part_size(size: u32) -> Self {
         Self::Session(SessionRequest::FilePartSize { size })
+    }
+
+    pub(crate) fn nand_erase() -> Self {
+        Self::Session(SessionRequest::NandErase)
     }
 
     pub(crate) fn session_sales_code(code: [u8; 3]) -> Self {
@@ -577,5 +583,19 @@ mod tests {
         assert_eq!(c1, b'U' as u32);
         assert_eq!(c2, b'R' as u32);
         assert!(packed[20..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_session_nand_erase_packet_layout() {
+        let packet = RequestPacket::nand_erase();
+        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_SESSION_SETUP);
+        let packed = packet.pack();
+
+        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
+
+        assert_eq!(opcode, 0x64);
+        assert_eq!(subcmd, 7);
+        assert!(packed[8..].iter().all(|&b| b == 0));
     }
 }

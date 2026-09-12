@@ -189,7 +189,7 @@ impl LokeError {
     /// Maps a raw 32-bit status code from LOKE into a typed [`LokeError`].
     pub fn from_status(status_code: i32) -> Self {
         match status_code {
-            -2 => Self::WriteProtection,
+            -2 | -20 => Self::WriteProtection,
             -3 => Self::EraseFailure,
             -4 => Self::WriteFailure,
             -5 => Self::AuthFailure,

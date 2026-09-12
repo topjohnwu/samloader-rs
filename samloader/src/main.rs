@@ -120,6 +120,7 @@ Example explicit flashing: samloader flash -p RECOVERY recovery.img
 Example auto-matching: samloader flash -f boot.img"#;
 
 const NO_REBOOT_HELP: &str = "Disables automatic reboot after flashing";
+const ERASE_HELP: &str = "Perform low-level NAND hardware erase on USERDATA before flashing";
 const REPARTITION_HELP: &str = "Repartition the device. WARNING: It's strongly recommended \
                                 you specify all files at your disposal";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition";
@@ -294,6 +295,13 @@ fn main() {
                 .about(FLASH_ABOUT)
                 .long_about(FLASH_HELP)
                 .odin_options()
+                .arg(
+                    Arg::new("erase")
+                        .short('e')
+                        .long("erase")
+                        .action(ArgAction::SetTrue)
+                        .help(ERASE_HELP),
+                )
                 .arg(
                     Arg::new("repartition")
                         .long("repartition")
@@ -543,8 +551,11 @@ fn main() {
                 std::process::exit(1);
             }
 
-            if packages.is_empty() && partitions.is_empty() && csc_code.is_none() {
-                print_error!("No packages, files, partitions, or CSC code specified for flashing.");
+            let erase = sub_matches.get_flag("erase");
+            if packages.is_empty() && partitions.is_empty() && csc_code.is_none() && !erase {
+                print_error!(
+                    "No packages, files, partitions, CSC code, or erase option specified for flashing."
+                );
                 std::process::exit(1);
             }
 
@@ -566,6 +577,7 @@ fn main() {
                 &packages,
                 &partitions,
                 csc_code,
+                erase,
             );
             std::process::exit(result);
         }
