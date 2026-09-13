@@ -278,3 +278,30 @@ pub enum FlashError {
     )]
     SuperSizeCheckFailed(#[source] OdinError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loke_error_from_status() {
+        assert_eq!(LokeError::from_status(-2), LokeError::WriteProtection);
+        assert_eq!(LokeError::from_status(-20), LokeError::WriteProtection);
+        assert_eq!(LokeError::from_status(-3), LokeError::EraseFailure);
+        assert_eq!(LokeError::from_status(-4), LokeError::WriteFailure);
+        assert_eq!(LokeError::from_status(-5), LokeError::AuthFailure);
+        assert_eq!(LokeError::from_status(-6), LokeError::SizeLimitExceeded);
+        assert_eq!(LokeError::from_status(-7), LokeError::Ext4Error);
+        assert_eq!(LokeError::from_status(2), LokeError::InvalidBinary);
+        assert_eq!(LokeError::from_status(3), LokeError::PitGptMismatch);
+        assert_eq!(LokeError::from_status(5), LokeError::PartitionSizeExceeded);
+        assert_eq!(LokeError::from_status(14), LokeError::PartitionNotFound);
+        assert_eq!(
+            LokeError::from_status(i32::MIN),
+            LokeError::UnsupportedDeviceType
+        );
+        assert_eq!(LokeError::from_status(0), LokeError::General(0));
+        assert_eq!(LokeError::from_status(-1), LokeError::General(-1));
+        assert_eq!(LokeError::from_status(999), LokeError::Other(999));
+    }
+}

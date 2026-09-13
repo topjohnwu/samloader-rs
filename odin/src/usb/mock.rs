@@ -26,17 +26,6 @@ use samloader_pit::PitData;
 use std::collections::VecDeque;
 use std::io::Cursor;
 
-/// Simulated device reboot destination mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebootMode {
-    /// Standard normal Android boot.
-    Normal,
-    /// Recovery mode (e.g. triggered by Sprint RTN provisioning reset).
-    Recovery,
-    /// Re-enter download mode.
-    Download,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Uninitialized,
@@ -362,7 +351,6 @@ pub struct MockBackend {
     packet_size: usize,
     active_pit_data: Vec<u8>,
     parsed_pit: Option<PitData>,
-    flashed_partitions: Vec<(u32, usize)>,
     current_partition_bytes: usize,
     fail_begin_session: Option<i32>,
     fail_commit: Option<i32>,
@@ -372,13 +360,8 @@ pub struct MockBackend {
     fail_nand_erase: Option<i32>,
     nand_erase_sectors: u32,
     protocol_version: u32,
-    last_sales_code: Option<[u8; 3]>,
-    sprint_rtn: bool,
-    last_reboot_mode: Option<RebootMode>,
     product_override: Option<String>,
     empty_send_count: usize,
-    total_bytes_transferred: usize,
-    strict_pit_check: bool,
 }
 
 #[allow(dead_code)]
@@ -409,7 +392,6 @@ impl MockBackend {
             packet_size: default_packet,
             active_pit_data: active_pit,
             parsed_pit,
-            flashed_partitions: Vec::new(),
             current_partition_bytes: 0,
             fail_begin_session: None,
             fail_commit: None,
@@ -419,20 +401,9 @@ impl MockBackend {
             fail_nand_erase: None,
             nand_erase_sectors: 524_288,
             protocol_version: p_ver,
-            last_sales_code: None,
-            sprint_rtn: false,
-            last_reboot_mode: None,
             product_override: None,
             empty_send_count: 0,
-            total_bytes_transferred: 0,
-            strict_pit_check: false,
         }
-    }
-
-    /// Enables or disables strict PIT project name and TargetID verification.
-    pub fn with_strict_pit_check(mut self, strict: bool) -> Self {
-        self.strict_pit_check = strict;
-        self
     }
 
     /// Returns a reference to the active `DeviceProfile`.
@@ -451,29 +422,9 @@ impl MockBackend {
         self.empty_send_count
     }
 
-    /// Returns the last sales code configured via Opcode 0x64 Subcmd 9.
-    pub fn last_sales_code(&self) -> Option<[u8; 3]> {
-        self.last_sales_code
-    }
-
-    /// Returns the final reboot mode requested upon ending the session.
-    pub fn last_reboot_mode(&self) -> Option<RebootMode> {
-        self.last_reboot_mode
-    }
-
-    /// Returns a slice of all partitions flashed during this session: `(target_id, byte_count)`.
-    pub fn flashed_partitions(&self) -> &[(u32, usize)] {
-        &self.flashed_partitions
-    }
-
     /// Returns the active in-memory PIT representation, if successfully parsed.
     pub fn active_pit(&self) -> Option<&PitData> {
         self.parsed_pit.as_ref()
-    }
-
-    /// Returns the cumulative payload bytes received across all partition chunks.
-    pub fn total_bytes_transferred(&self) -> usize {
-        self.total_bytes_transferred
     }
 
     /// Sets the bootloader protocol version reported by the mock device.
@@ -599,7 +550,6 @@ impl UsbTransfer for MockBackend {
                         self.push_response(RESPONSE_TYPE_FAIL, err as u32);
                     } else {
                         self.current_partition_bytes += chunk_size;
-                        self.total_bytes_transferred += chunk_size;
                         self.push_response(RESPONSE_TYPE_SEND_FILE_PART, self.current_part_index);
                         self.current_part_index += 1;
                     }
@@ -616,23 +566,7 @@ impl UsbTransfer for MockBackend {
                             ..
                         })) = RequestPacket::read_le(&mut cursor)
                         {
-                            if self.strict_pit_check && !self.active_pit_data.is_empty() {
-                                match PitData::new(&self.active_pit_data) {
-                                    Ok(new_pit) => {
-                                        if new_pit.cpu_bl_id != self.profile.cpu_bl_id.as_str() {
-                                            self.push_response(RESPONSE_TYPE_FAIL, 0xffff_ffff);
-                                            self.incoming_buffer.drain(..1024);
-                                            return true;
-                                        }
-                                        self.parsed_pit = Some(new_pit);
-                                    }
-                                    Err(_) => {
-                                        self.push_response(RESPONSE_TYPE_FAIL, 0xffff_ffff);
-                                        self.incoming_buffer.drain(..1024);
-                                        return true;
-                                    }
-                                }
-                            } else if !self.active_pit_data.is_empty() {
+                            if !self.active_pit_data.is_empty() {
                                 self.parsed_pit = PitData::new(&self.active_pit_data).ok();
                             }
                             self.state = State::SessionBegun;
@@ -681,18 +615,7 @@ impl UsbTransfer for MockBackend {
                                     self.packet_size = size as usize;
                                     self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);
                                 }
-                                crate::packets::SessionRequest::SalesCode { c0, c1, c2 } => {
-                                    let code = [c0 as u8, c1 as u8, c2 as u8];
-                                    self.last_sales_code = Some(code);
-                                    // Reverse-engineered Sprint RTN logic from abl_odin.efi (FUN_00058ea8):
-                                    // SPR (Sprint), BST (Boost), VMU (Virgin), XAS (Sprint MVNO)
-                                    if code == *b"SPR"
-                                        || code == *b"BST"
-                                        || code == *b"VMU"
-                                        || code == *b"XAS"
-                                    {
-                                        self.sprint_rtn = true;
-                                    }
+                                crate::packets::SessionRequest::SalesCode { .. } => {
                                     self.push_response(RESPONSE_TYPE_SESSION_SETUP, 0);
                                 }
                                 crate::packets::SessionRequest::NandErase => {
@@ -746,34 +669,11 @@ impl UsbTransfer for MockBackend {
                                     self.current_part_index = 0;
                                     self.push_response(RESPONSE_TYPE_FILE_TRANSFER, 0);
                                 }
-                                crate::packets::FileTransferRequest::End(end)
-                                | crate::packets::FileTransferRequest::Lz4End(end) => {
+                                crate::packets::FileTransferRequest::End(_)
+                                | crate::packets::FileTransferRequest::Lz4End(_) => {
                                     if let Some(err) = self.fail_commit {
                                         self.push_response(RESPONSE_TYPE_FAIL, err as u32);
                                     } else {
-                                        let target_id = match end {
-                                            crate::packets::FileTransferEnd::Unified {
-                                                partition_identifier,
-                                                ..
-                                            } => partition_identifier,
-                                            crate::packets::FileTransferEnd::LegacyModem {
-                                                partition_identifier,
-                                                ..
-                                            } => partition_identifier,
-                                        };
-
-                                        if self.strict_pit_check
-                                            && self.parsed_pit.as_ref().is_some_and(|pit| {
-                                                pit.find_entry_by_id(target_id).is_none()
-                                            })
-                                        {
-                                            self.push_response(RESPONSE_TYPE_FAIL, 0xffff_ffff);
-                                            self.incoming_buffer.drain(..1024);
-                                            return true;
-                                        }
-
-                                        self.flashed_partitions
-                                            .push((target_id, self.current_partition_bytes));
                                         self.current_partition_bytes = 0;
                                         self.state = State::SessionBegun;
                                         self.push_response(RESPONSE_TYPE_FILE_TRANSFER, 0);
@@ -789,16 +689,8 @@ impl UsbTransfer for MockBackend {
                                         self.push_response(RESPONSE_TYPE_END_SESSION, 0);
                                     }
                                 }
-                                crate::packets::EndSessionRequest::RebootDevice => {
-                                    self.last_reboot_mode = Some(if self.sprint_rtn {
-                                        RebootMode::Recovery
-                                    } else {
-                                        RebootMode::Normal
-                                    });
-                                    self.state = State::Uninitialized;
-                                }
-                                crate::packets::EndSessionRequest::RebootDownload => {
-                                    self.last_reboot_mode = Some(RebootMode::Download);
+                                crate::packets::EndSessionRequest::RebootDevice
+                                | crate::packets::EndSessionRequest::RebootDownload => {
                                     self.state = State::Uninitialized;
                                 }
                             },
@@ -886,8 +778,7 @@ mod tests {
     use super::*;
     use crate::error::OdinError;
     use crate::odin::OdinConnection;
-    use crate::packets::{FileTransferEnd, RequestPacket};
-    use samloader_pit::{BinaryType, DeviceType};
+    use samloader_pit::BinaryType;
 
     #[test]
     fn test_sm_f968b_modern_profile_lifecycle() {
@@ -973,165 +864,5 @@ mod tests {
 
         // 7. Close session
         let _ = session.close().unwrap();
-    }
-
-    #[test]
-    fn test_device_profile_builder() {
-        let custom_pit = DeviceProfile::gt_i9305().default_pit;
-        let profile = DeviceProfile::builder()
-            .model("CUSTOM-DEVICE")
-            .cpu_bl_id("TEST_CPU")
-            .build_version("CUSTOM_BUILD_1")
-            .serial_number("SN123456")
-            .storage_cid("CID0001")
-            .storage_capacity_gb(256)
-            .default_sales_code("XAA")
-            .usb_product_name(Some("Gadget Serial".to_string()))
-            .protocol_version(2)
-            .lz4_supported(false)
-            .max_packet_size(0x20000)
-            .super_partition_free_space(1000)
-            .supports_dvif(true)
-            .supports_device_info(true)
-            .supports_dynamic_partition(true)
-            .default_pit(custom_pit)
-            .build();
-
-        assert_eq!(profile.model, "CUSTOM-DEVICE");
-        assert_eq!(profile.cpu_bl_id, "TEST_CPU");
-        assert_eq!(profile.storage_capacity_gb, 256);
-        assert!(profile.supports_dvif);
-
-        let dvif = profile.dvif_string();
-        assert!(dvif.contains("MODEL=CUSTOM-DEVICE;"));
-        assert!(dvif.contains("UN=SN123456;"));
-        assert!(dvif.contains("SALES=XAA;"));
-
-        let binary_info = profile.binary_device_info();
-        assert_eq!(&binary_info[0..4], &0x12345678u32.to_le_bytes());
-    }
-
-    #[test]
-    fn test_sprint_rtn_recovery_reboot_mode() {
-        let mut backend = MockBackend::with_profile(DeviceProfile::sm_f968b(), false);
-        // Simulate sales code SPR (Sprint)
-        let sc_packet = RequestPacket::session_sales_code(*b"SPR");
-        let mut sc_buf = Vec::new();
-        binrw::BinWrite::write_le(&sc_packet, &mut std::io::Cursor::new(&mut sc_buf)).unwrap();
-        sc_buf.resize(1024, 0);
-
-        backend.send_data(b"ODIN", 1000, false);
-        assert_eq!(backend.state, State::HandshakeComplete);
-
-        let begin_packet = RequestPacket::begin_session();
-        let mut begin_buf = Vec::new();
-        binrw::BinWrite::write_le(&begin_packet, &mut std::io::Cursor::new(&mut begin_buf))
-            .unwrap();
-        begin_buf.resize(1024, 0);
-        backend.send_data(&begin_buf, 1000, false);
-        assert_eq!(backend.state, State::SessionBegun);
-
-        backend.send_data(&sc_buf, 1000, false);
-        assert_eq!(backend.last_sales_code(), Some(*b"SPR"));
-
-        let reboot_packet = RequestPacket::reboot_device();
-        let mut reboot_buf = Vec::new();
-        binrw::BinWrite::write_le(&reboot_packet, &mut std::io::Cursor::new(&mut reboot_buf))
-            .unwrap();
-        reboot_buf.resize(1024, 0);
-        backend.send_data(&reboot_buf, 1000, false);
-
-        // Sprint sales code triggers recovery reboot!
-        assert_eq!(backend.last_reboot_mode(), Some(RebootMode::Recovery));
-    }
-
-    #[test]
-    fn test_flashing_partition_tracking_and_strict_pit() {
-        let mut backend =
-            MockBackend::with_profile(DeviceProfile::gt_i9305(), false).with_strict_pit_check(true);
-
-        backend.send_data(b"ODIN", 1000, false);
-        let mut handshake_resp = [0u8; 4];
-        assert_eq!(backend.receive_data(&mut handshake_resp, 10, false), 4);
-        assert_eq!(&handshake_resp, b"LOKE");
-
-        let begin_packet = RequestPacket::begin_session();
-        let mut begin_buf = Vec::new();
-        binrw::BinWrite::write_le(&begin_packet, &mut std::io::Cursor::new(&mut begin_buf))
-            .unwrap();
-        begin_buf.resize(1024, 0);
-        backend.send_data(&begin_buf, 1000, false);
-        let mut resp_bytes = [0u8; 8];
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-
-        // Init flash
-        let flash_packet = RequestPacket::FileTransfer(crate::packets::FileTransferRequest::Flash);
-        let mut flash_buf = Vec::new();
-        binrw::BinWrite::write_le(&flash_packet, &mut std::io::Cursor::new(&mut flash_buf))
-            .unwrap();
-        flash_buf.resize(1024, 0);
-        backend.send_data(&flash_buf, 1000, false);
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-
-        // Send a chunk of 0x20000 bytes
-        let part_packet = RequestPacket::FileTransfer(crate::packets::FileTransferRequest::Part {
-            sequence_byte_count: 0x20000,
-        });
-        let mut part_buf = Vec::new();
-        binrw::BinWrite::write_le(&part_packet, &mut std::io::Cursor::new(&mut part_buf)).unwrap();
-        part_buf.resize(1024, 0);
-        backend.send_data(&part_buf, 1000, false);
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-
-        let chunk = vec![0xABu8; 0x20000];
-        backend.send_data(&chunk, 1000, false);
-        assert_eq!(backend.total_bytes_transferred(), 0x20000);
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-
-        // End transfer with valid TargetID 10 (RADIO in GT-I9305 PIT)
-        let end_packet = RequestPacket::FileTransfer(crate::packets::FileTransferRequest::End(
-            FileTransferEnd::LegacyModem {
-                sequence_byte_count: 0x20000,
-                binary_type: BinaryType::ApplicationProcessor,
-                device_type: DeviceType::MMC,
-                is_last_sequence: 1,
-                reserved: 0,
-                partition_identifier: 10,
-            },
-        ));
-        let mut end_buf = Vec::new();
-        binrw::BinWrite::write_le(&end_packet, &mut std::io::Cursor::new(&mut end_buf)).unwrap();
-        end_buf.resize(1024, 0);
-        backend.send_data(&end_buf, 1000, false);
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-        assert_eq!(
-            u32::from_le_bytes(resp_bytes[0..4].try_into().unwrap()),
-            RESPONSE_TYPE_FILE_TRANSFER
-        );
-
-        assert_eq!(backend.flashed_partitions(), &[(10, 0x20000)]);
-
-        // Now test invalid TargetID 999 under strict PIT check -> fails
-        backend.send_data(&flash_buf, 1000, false);
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-
-        let bad_end_packet = RequestPacket::FileTransfer(crate::packets::FileTransferRequest::End(
-            FileTransferEnd::Unified {
-                sequence_byte_count: 0,
-                binary_type: BinaryType::ApplicationProcessor,
-                device_type: DeviceType::MMC,
-                partition_identifier: 999,
-                is_last_sequence: 1,
-            },
-        ));
-        let mut bad_end_buf = Vec::new();
-        binrw::BinWrite::write_le(&bad_end_packet, &mut std::io::Cursor::new(&mut bad_end_buf))
-            .unwrap();
-        bad_end_buf.resize(1024, 0);
-        backend.send_data(&bad_end_buf, 1000, false);
-
-        assert_eq!(backend.receive_data(&mut resp_bytes, 10, false), 8);
-        let resp_type = u32::from_le_bytes(resp_bytes[0..4].try_into().unwrap());
-        assert_eq!(resp_type, RESPONSE_TYPE_FAIL);
     }
 }

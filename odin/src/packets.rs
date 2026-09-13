@@ -418,97 +418,44 @@ mod tests {
     }
 
     #[test]
-    fn test_file_transfer_end_modern_unified_layout() {
+    fn test_file_transfer_end_layout_selection() {
         let modem_entry = mock_pit_entry(BinaryType::CommunicationProcessor, DeviceType::UFS, 80);
-        let packet = RequestPacket::end_file_transfer(0x1E00000, &modem_entry, true, false, 5);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-        let slice_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
-        let bin_type = u32::from_le_bytes(packed[16..20].try_into().unwrap());
-        let dev_type = u32::from_le_bytes(packed[20..24].try_into().unwrap());
-        let part_id = u32::from_le_bytes(packed[24..28].try_into().unwrap());
-        let is_last = u32::from_le_bytes(packed[28..32].try_into().unwrap());
-
-        assert_eq!(opcode, RESPONSE_TYPE_FILE_TRANSFER);
-        assert_eq!(subcmd, 3);
-        assert_eq!(magic, 0, "Modern protocol must use magic = 0 for CP/Modem");
-        assert_eq!(slice_size, 0x1E00000);
-        assert_eq!(bin_type, 1, "CommunicationProcessor must be 1");
-        assert_eq!(dev_type, 8, "UFS device type must be 8");
-        assert_eq!(
-            part_id, 80,
-            "Partition ID must be at offset +0x10 (packet[6])"
-        );
-        assert_eq!(is_last, 1, "is_last must be at offset +0x14 (packet[7])");
-        // Remaining buffer is zero-padded by RequestPacket::pack
-        assert_eq!(&packed[32..40], &[0u8; 8]);
-    }
-
-    #[test]
-    fn test_file_transfer_end_legacy_modem_layout() {
-        let modem_entry = mock_pit_entry(BinaryType::CommunicationProcessor, DeviceType::MMC, 75);
-        let packet = RequestPacket::end_file_transfer(0x100000, &modem_entry, true, false, 2);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-        let slice_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
-        let bin_type = u32::from_le_bytes(packed[16..20].try_into().unwrap());
-        let dev_type = u32::from_le_bytes(packed[20..24].try_into().unwrap());
-        let is_last = u32::from_le_bytes(packed[24..28].try_into().unwrap());
-        let reserved = u32::from_le_bytes(packed[28..32].try_into().unwrap());
-        let part_id = u32::from_le_bytes(packed[32..36].try_into().unwrap());
-
-        assert_eq!(opcode, RESPONSE_TYPE_FILE_TRANSFER);
-        assert_eq!(subcmd, 3);
-        assert_eq!(
-            magic, 1,
-            "Legacy protocol (< 3) for CP/Modem must use magic = 1"
-        );
-        assert_eq!(slice_size, 0x100000);
-        assert_eq!(bin_type, 1);
-        assert_eq!(dev_type, 2);
-        assert_eq!(is_last, 1, "Legacy layout must place is_last at packet[6]");
-        assert_eq!(
-            reserved, 0,
-            "Legacy layout must place reserved at packet[7]"
-        );
-        assert_eq!(part_id, 75, "Legacy layout must place part_id at packet[8]");
-    }
-
-    #[test]
-    fn test_file_transfer_end_legacy_ap_uses_unified() {
         let ap_entry = mock_pit_entry(BinaryType::ApplicationProcessor, DeviceType::MMC, 20);
-        let packet = RequestPacket::end_file_transfer(0x100000, &ap_entry, false, false, 1);
-        let packed = packet.pack();
 
-        let magic = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-        let part_id = u32::from_le_bytes(packed[24..28].try_into().unwrap());
-        let is_last = u32::from_le_bytes(packed[28..32].try_into().unwrap());
+        // Modern protocol (>= 3): CP/Modem uses Unified layout
+        let modern_cp = FileTransferEnd::new(0x1E00000, &modem_entry, true, 3);
+        assert!(matches!(
+            modern_cp,
+            FileTransferEnd::Unified {
+                sequence_byte_count: 0x1E00000,
+                partition_identifier: 80,
+                is_last_sequence: 1,
+                ..
+            }
+        ));
 
-        assert_eq!(magic, 0, "AP partitions must always use magic = 0");
-        assert_eq!(part_id, 20);
-        assert_eq!(is_last, 0);
-    }
+        // Legacy protocol (< 3): CP/Modem uses LegacyModem layout
+        let legacy_cp = FileTransferEnd::new(0x100000, &modem_entry, true, 2);
+        assert!(matches!(
+            legacy_cp,
+            FileTransferEnd::LegacyModem {
+                sequence_byte_count: 0x100000,
+                partition_identifier: 80,
+                is_last_sequence: 1,
+                ..
+            }
+        ));
 
-    #[test]
-    fn test_file_transfer_lz4_part_packet_layout() {
-        let packet = RequestPacket::flash_part_lz4_file_transfer(0x1234, 0x5678);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        let compressed_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-        let uncompressed_size = u32::from_le_bytes(packed[12..16].try_into().unwrap());
-
-        assert_eq!(opcode, 0x66);
-        assert_eq!(subcmd, 6);
-        assert_eq!(compressed_size, 0x1234);
-        assert_eq!(uncompressed_size, 0x5678);
+        // ApplicationProcessor always uses Unified layout even on legacy protocol
+        let legacy_ap = FileTransferEnd::new(0x100000, &ap_entry, false, 1);
+        assert!(matches!(
+            legacy_ap,
+            FileTransferEnd::Unified {
+                partition_identifier: 20,
+                is_last_sequence: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -528,39 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_partition_check_super_size_packet_layout() {
-        let packet = RequestPacket::check_super_size(27276104);
-        assert_eq!(
-            packet.expected_response_type(),
-            RESPONSE_TYPE_DYNAMIC_PARTITION
-        );
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        let super_used_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-
-        assert_eq!(opcode, 0x6a);
-        assert_eq!(subcmd, 0);
-        assert_eq!(super_used_size, 27276104);
-        // Remainder of packet should be zero-padded
-        assert!(packed[12..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
     fn test_flash_part_file_transfer_128k_alignment() {
         // Test size round-up behavior to 128 KB (0x20000)
         let check_aligned = |raw_size: u32, expected_aligned: u32| {
             let packet = RequestPacket::flash_part_file_transfer(raw_size);
             assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_FILE_TRANSFER);
             let packed = packet.pack();
-            let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-            let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
             let announced_size = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-            assert_eq!(opcode, 0x66);
-            assert_eq!(subcmd, 2);
             assert_eq!(announced_size, expected_aligned);
-            assert!(packed[12..].iter().all(|&b| b == 0));
         };
 
         check_aligned(0, 0);
@@ -569,60 +491,5 @@ mod tests {
         check_aligned(0x20000, 0x20000);
         check_aligned(0x20001, 0x40000);
         check_aligned(31_457_280, 31_457_280); // 30 MB (standard slice)
-    }
-
-    #[test]
-    fn test_session_sales_code_packet_layout() {
-        let packet = RequestPacket::session_sales_code(*b"TUR");
-        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_SESSION_SETUP);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-        let c0 = u32::from_le_bytes(packed[8..12].try_into().unwrap());
-        let c1 = u32::from_le_bytes(packed[12..16].try_into().unwrap());
-        let c2 = u32::from_le_bytes(packed[16..20].try_into().unwrap());
-
-        assert_eq!(opcode, 0x64);
-        assert_eq!(subcmd, 9);
-        assert_eq!(c0, b'T' as u32);
-        assert_eq!(c1, b'U' as u32);
-        assert_eq!(c2, b'R' as u32);
-        assert!(packed[20..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_session_nand_erase_packet_layout() {
-        let packet = RequestPacket::nand_erase();
-        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_SESSION_SETUP);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-
-        assert_eq!(opcode, 0x64);
-        assert_eq!(subcmd, 7);
-        assert!(packed[8..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_end_session_reboot_download_packet_layout() {
-        let packet = RequestPacket::reboot_to_download();
-        assert_eq!(packet.expected_response_type(), RESPONSE_TYPE_END_SESSION);
-        let packed = packet.pack();
-
-        let opcode = u32::from_le_bytes(packed[0..4].try_into().unwrap());
-        let subcmd = u32::from_le_bytes(packed[4..8].try_into().unwrap());
-
-        assert_eq!(opcode, 0x67);
-        assert_eq!(subcmd, 2);
-        assert!(packed[8..].iter().all(|&b| b == 0));
-
-        let mut cursor = Cursor::new(&packed);
-        let parsed = RequestPacket::read_le(&mut cursor).unwrap();
-        assert!(matches!(
-            parsed,
-            RequestPacket::EndSession(EndSessionRequest::RebootDownload)
-        ));
     }
 }

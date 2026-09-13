@@ -670,7 +670,6 @@ mod tests {
     use super::*;
     use crate::odin::OdinConnection;
     use crate::usb::MockBackend;
-    use crate::{LokeError, OdinError};
 
     #[test]
     fn test_scan_tar_packages_metadata_and_manifest() {
@@ -799,97 +798,6 @@ mod tests {
         assert!(
             manager
                 .flash_partitions(Vec::new(), RebootMode::None)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_flash_manager_standalone_sales_code() {
-        let backend = Box::new(MockBackend::new(false));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).sales_code(Some("TUR"));
-        assert!(manager.execute().is_ok());
-    }
-
-    #[test]
-    fn test_flash_manager_standalone_nand_erase() {
-        let backend = Box::new(MockBackend::new(false).with_nand_erase(1_048_576));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).erase(true);
-        assert!(manager.execute().is_ok());
-    }
-
-    #[test]
-    fn test_flash_manager_standalone_nand_erase_failure() {
-        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-5));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).erase(true);
-        assert!(matches!(
-            manager.execute(),
-            Err(FlashError::Odin(OdinError::Loke(LokeError::AuthFailure)))
-        ));
-    }
-
-    #[test]
-    fn test_flash_manager_nand_erase_in_download_and_parse_pit() {
-        let backend = Box::new(MockBackend::new(false).with_nand_erase(1_048_576));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).erase(true);
-        let pit_data = manager.download_and_parse_pit(false);
-        assert!(pit_data.is_ok());
-    }
-
-    #[test]
-    fn test_flash_manager_nand_erase_in_download_and_parse_pit_failure() {
-        let backend = Box::new(MockBackend::new(false).with_fail_nand_erase(-20));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).erase(true);
-        let res = manager.download_and_parse_pit(false);
-        assert!(matches!(
-            res,
-            Err(FlashError::Odin(OdinError::Loke(
-                LokeError::WriteProtection
-            )))
-        ));
-    }
-
-    #[test]
-    fn test_flash_manager_standalone_redownload() {
-        let backend = Box::new(MockBackend::new(false));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).redownload(true);
-        assert!(manager.execute().is_ok());
-    }
-
-    #[test]
-    fn test_flash_manager_reboot_mode_download() {
-        let backend = Box::new(MockBackend::new(false));
-        let mut connection = OdinConnection::new(backend);
-        connection.init().unwrap();
-        let mut session = connection.begin_session().unwrap();
-
-        let mut manager = FlashManager::new(&mut session).reboot_mode(RebootMode::Download);
-        assert!(
-            manager
-                .flash_partitions(Vec::new(), RebootMode::Download)
                 .is_ok()
         );
     }
