@@ -257,6 +257,12 @@ fn main() {
                         .long("force")
                         .action(ArgAction::SetTrue)
                         .help(FORCE_HELP),
+                )
+                .arg(
+                    Arg::new("machine_progress")
+                        .long("machine-progress")
+                        .action(ArgAction::SetTrue)
+                        .help("Emit machine-readable progress lines on stdout for a wrapping GUI"),
                 ),
         )
         .subcommand(
@@ -436,6 +442,7 @@ fn main() {
             let out_dir = sub_m.get_one::<String>("out_dir").cloned();
             let out_file = sub_m.get_one::<String>("out_file").cloned();
             let force = sub_m.get_flag("force");
+            let machine = sub_m.get_flag("machine_progress");
             let args = download::DownloadArgs {
                 model,
                 region,
@@ -445,6 +452,7 @@ fn main() {
                 out_file,
                 force,
                 verbose,
+                machine,
             };
             download::action_download(args);
             0
