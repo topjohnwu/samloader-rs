@@ -16,14 +16,16 @@
 
 use crate::FlashError;
 use crate::firmware::{
-    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, verify_md5_footer,
+    FirmwareFile, FirmwareInfo, FirmwareLz4File, Lz4FrameHeader, expanded_android_image_size,
+    verify_md5_footer,
 };
 use crate::lp::inspect_super_firmware_info;
 use crate::odin::OdinSession;
 use crate::progress::{self, FlashEvent};
+use lz4_flex::frame::FrameDecoder;
 use memmap2::{Mmap, MmapOptions};
 use samloader_pit::{PitData, PitEntry};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -81,6 +83,7 @@ fn create_firmware_info<'a>(
     pit_entry: &'a PitEntry,
     skip_size_check: bool,
     file_display_name: &str,
+    prevalidated_expanded_size: Option<u64>,
 ) -> Result<FirmwareInfo<'a>, FlashError> {
     let lz4_frame_header = if is_lz4_suffix {
         let cursor = std::io::Cursor::new(&mmap);
@@ -94,15 +97,20 @@ fn create_firmware_info<'a>(
         None
     };
 
+    let expanded_size = if let Some(size) = prevalidated_expanded_size {
+        size
+    } else if let Some(fh) = &lz4_frame_header {
+        expanded_android_image_size(FrameDecoder::new(&mmap[..]), fh.content_size)
+            .map_err(|e| FlashError::ImageSize(file_display_name.to_string(), e))?
+    } else {
+        expanded_android_image_size(&mmap[..], source_size)
+            .map_err(|e| FlashError::ImageSize(file_display_name.to_string(), e))?
+    };
+
     if !skip_size_check {
         let partition_size = pit_entry.partition_size();
-        let check_size = if let Some(fh) = &lz4_frame_header {
-            fh.content_size
-        } else {
-            source_size
-        };
 
-        if partition_size > 0 && check_size > partition_size {
+        if partition_size > 0 && expanded_size > partition_size {
             return Err(FlashError::PartitionTooSmall(
                 pit_entry.partition_name.to_string_lossy().into_owned(),
             ));
@@ -114,11 +122,13 @@ fn create_firmware_info<'a>(
             pit_entry,
             file: mmap,
             header,
+            expanded_size,
         }))
     } else {
         Ok(FirmwareInfo::Normal(FirmwareFile {
             pit_entry,
             file: mmap,
+            expanded_size,
         }))
     }
 }
@@ -135,10 +145,32 @@ pub enum RebootMode {
     Download,
 }
 
+/// One partition selected by an offline firmware preflight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreflightPartition {
+    /// PIT partition name.
+    pub name: String,
+    /// Filename expected by the PIT for this partition.
+    pub flash_filename: String,
+    /// Logical bytes that will be written after decompression.
+    pub image_size: u64,
+    /// Capacity of the target partition according to the supplied PIT.
+    pub partition_size: u64,
+}
+
+/// Results from an offline firmware preflight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreflightReport {
+    /// Deduplicated partitions selected for flashing, in transfer order.
+    pub partitions: Vec<PreflightPartition>,
+    /// Whether Samsung download-list metadata controlled archive selection.
+    pub has_download_list: bool,
+}
+
 /// Orchestrates the flashing pipeline, processing package and partition sources
 /// and executing the Loke flash protocol.
 pub struct FlashManager<'a> {
-    session: &'a mut OdinSession,
+    session: Option<&'a mut OdinSession>,
     pit_file_bytes: Option<Vec<u8>>,
 
     reboot_mode: RebootMode,
@@ -149,6 +181,7 @@ pub struct FlashManager<'a> {
     partitions: Vec<(Option<String>, String)>,
     super_used_size: Option<u32>,
     has_download_list: bool,
+    prevalidated_sizes: HashMap<String, u64>,
     sales_code: Option<&'a str>,
     erase: bool,
 }
@@ -157,7 +190,7 @@ impl<'a> FlashManager<'a> {
     /// Creates a new `FlashManager` associated with an active `OdinSession`.
     pub fn new(session: &'a mut OdinSession) -> Self {
         Self {
-            session,
+            session: Some(session),
             pit_file_bytes: None,
             reboot_mode: RebootMode::None,
             skip_size_check: false,
@@ -167,9 +200,68 @@ impl<'a> FlashManager<'a> {
             partitions: Vec::new(),
             super_used_size: None,
             has_download_list: false,
+            prevalidated_sizes: HashMap::new(),
             sales_code: None,
             erase: false,
         }
+    }
+
+    /// Creates a manager for a strictly offline preflight with no device session.
+    pub fn new_offline() -> Self {
+        Self {
+            session: None,
+            pit_file_bytes: None,
+            reboot_mode: RebootMode::None,
+            skip_size_check: false,
+            skip_md5: false,
+            pit_path: None,
+            packages: Vec::new(),
+            partitions: Vec::new(),
+            super_used_size: None,
+            has_download_list: false,
+            prevalidated_sizes: HashMap::new(),
+            sales_code: None,
+            erase: false,
+        }
+    }
+
+    /// Validates packages, resolves their payloads against an explicit local PIT,
+    /// and checks every logical image size without opening a USB device.
+    pub fn preflight(&mut self) -> Result<PreflightReport, FlashError> {
+        let pit_path = self.pit_path.ok_or(FlashError::PitRequiredForPreflight)?;
+        let mut pit_bytes = Vec::new();
+        File::open(pit_path)
+            .map_err(|e| FlashError::FileOpenFailed(pit_path.to_string(), e))?
+            .read_to_end(&mut pit_bytes)
+            .map_err(|e| FlashError::FileReadFailed(pit_path.to_string(), e))?;
+        self.pit_file_bytes = Some(pit_bytes.clone());
+
+        let opened_packages = self.open_and_verify_packages()?;
+        let resolved_entries = self.scan_tar_packages(&opened_packages)?;
+        let pit_data = PitData::new(&pit_bytes).map_err(FlashError::PitUnpackFailed)?;
+        let partition_infos =
+            self.build_partition_infos(&pit_data, resolved_entries, &self.partitions, false)?;
+
+        let partitions = partition_infos
+            .iter()
+            .map(|info| {
+                let (entry, image_size) = match info {
+                    FirmwareInfo::Normal(f) => (f.pit_entry, f.expanded_size),
+                    FirmwareInfo::Lz4(f) => (f.pit_entry, f.expanded_size),
+                };
+                PreflightPartition {
+                    name: entry.partition_name.to_string_lossy().into_owned(),
+                    flash_filename: entry.flash_filename.to_string_lossy().into_owned(),
+                    image_size,
+                    partition_size: entry.partition_size(),
+                }
+            })
+            .collect();
+
+        Ok(PreflightReport {
+            partitions,
+            has_download_list: self.has_download_list,
+        })
     }
 
     /// Sets whether to perform a low-level NAND hardware erase on the `USERDATA` partition
@@ -239,23 +331,39 @@ impl<'a> FlashManager<'a> {
         self
     }
 
+    /// Reuses expanded image sizes established by a successful offline preflight in the
+    /// same process. This avoids lengthy LZ4 decompression while a live Odin session is idle.
+    pub fn prevalidated(mut self, report: &PreflightReport) -> Self {
+        self.prevalidated_sizes = report
+            .partitions
+            .iter()
+            .map(|part| (part.name.clone(), part.image_size))
+            .collect();
+        self
+    }
+
     /// Executes the flashing pipeline sequence.
     pub fn execute(&mut self) -> Result<(), FlashError> {
+        let session = self
+            .session
+            .as_deref_mut()
+            .expect("device execution requires an Odin session");
+
         // Step 0: Set device sales code if configured
         if let Some(sales_code) = self.sales_code {
             progress::println(&format!("Setting device sales code to {}...", sales_code));
-            self.session.set_sales_code(sales_code)?;
+            session.set_sales_code(sales_code)?;
         }
 
         // If no packages, partitions, or explicit PIT are specified, complete session and return
         if self.packages.is_empty() && self.partitions.is_empty() && self.pit_path.is_none() {
             if self.erase {
-                self.session.nand_erase()?;
+                session.nand_erase()?;
             }
             match self.reboot_mode {
-                RebootMode::Normal => self.session.reboot_device()?,
-                RebootMode::Download => self.session.reboot_to_download()?,
-                RebootMode::None => self.session.end_session()?,
+                RebootMode::Normal => session.reboot_device()?,
+                RebootMode::Download => session.reboot_to_download()?,
+                RebootMode::None => session.end_session()?,
             }
             return Ok(());
         }
@@ -453,12 +561,17 @@ impl<'a> FlashManager<'a> {
             }
         }
 
-        // Extract PIT local bytes if any from TAR archives and set internal field if still None
-        if self.pit_file_bytes.is_none()
-            && let Some(entry) = pit_entry
-        {
+        // Never silently combine an explicit repartition layout with a package built for a
+        // different layout. If no explicit PIT was supplied, retain the package PIT as before.
+        if let Some(entry) = pit_entry {
             let mmap = entry.map()?;
-            self.pit_file_bytes = Some(mmap.to_vec());
+            if let Some(explicit_pit) = &self.pit_file_bytes {
+                if explicit_pit.as_slice() != &mmap[..] {
+                    return Err(FlashError::PitMismatch(entry.original_name));
+                }
+            } else {
+                self.pit_file_bytes = Some(mmap.to_vec());
+            }
         }
 
         Ok(resolved_entries)
@@ -466,18 +579,22 @@ impl<'a> FlashManager<'a> {
 
     // Helper 3: Flash PIT if available and download active PIT data
     fn download_and_parse_pit(&mut self) -> Result<PitData, FlashError> {
+        let session = self
+            .session
+            .as_deref_mut()
+            .expect("PIT transfer requires an Odin session");
         if self.erase {
-            self.session.nand_erase()?;
+            session.nand_erase()?;
         }
 
         if let Some(pit_bytes) = &self.pit_file_bytes {
             progress::println("Flashing PIT");
-            self.session.send_pit_info(pit_bytes)?;
+            session.send_pit_info(pit_bytes)?;
             progress::println("PIT flash successful\n");
         }
 
         progress::println("Downloading device's PIT file");
-        let pit_buffer = self.session.receive_pit_info()?;
+        let pit_buffer = session.receive_pit_info()?;
 
         let pit_data = PitData::new(&pit_buffer).map_err(FlashError::PitUnpackFailed)?;
         Ok(pit_data)
@@ -594,6 +711,9 @@ impl<'a> FlashManager<'a> {
                 planned.pit_entry,
                 skip_size_check,
                 &display_name,
+                self.prevalidated_sizes
+                    .get(planned.pit_entry.partition_name.to_string_lossy().as_ref())
+                    .copied(),
             )?;
             unique_partition_infos.push(info);
         }
@@ -607,6 +727,10 @@ impl<'a> FlashManager<'a> {
         partition_infos: Vec<FirmwareInfo<'_>>,
         reboot_mode: RebootMode,
     ) -> Result<(), FlashError> {
+        let session = self
+            .session
+            .as_deref_mut()
+            .expect("partition flashing requires an Odin session");
         let total_bytes: u64 = partition_infos
             .iter()
             .map(|part| match part {
@@ -615,11 +739,11 @@ impl<'a> FlashManager<'a> {
             })
             .sum();
 
-        self.session.set_total_bytes(total_bytes)?;
+        session.set_total_bytes(total_bytes)?;
 
         if let Some(super_used_size) = self.super_used_size
             && super_used_size > 0
-            && self.session.bootloader_protocol_version() >= 3
+            && session.bootloader_protocol_version() >= 3
         {
             let check_size = if self.has_download_list || self.packages.is_empty() {
                 super_used_size
@@ -627,7 +751,7 @@ impl<'a> FlashManager<'a> {
                 0
             };
             progress::println("Checking available super partition size...");
-            self.session
+            session
                 .check_super_size(check_size)
                 .map_err(FlashError::SuperSizeCheckFailed)?;
         }
@@ -649,8 +773,8 @@ impl<'a> FlashManager<'a> {
             });
 
             let res = match info {
-                FirmwareInfo::Normal(f) => self.session.send_file(&f),
-                FirmwareInfo::Lz4(f) => self.session.send_lz4_file(&f),
+                FirmwareInfo::Normal(f) => session.send_file(&f),
+                FirmwareInfo::Lz4(f) => session.send_lz4_file(&f),
             };
 
             if let Err(e) = res {
@@ -661,14 +785,14 @@ impl<'a> FlashManager<'a> {
             progress::on_event(FlashEvent::PartitionEnd(&name));
         }
 
-        self.session.end_session()?;
+        session.end_session()?;
 
         match reboot_mode {
             RebootMode::Normal => {
-                self.session.reboot_device()?;
+                session.reboot_device()?;
             }
             RebootMode::Download => {
-                self.session.reboot_to_download()?;
+                session.reboot_to_download()?;
             }
             RebootMode::None => {}
         }
@@ -853,6 +977,47 @@ mod tests {
         let result = manager.scan_tar_packages(&opened_packages);
 
         assert!(matches!(result, Err(FlashError::ArchiveCorrupted(_, _))));
+
+        let _ = std::fs::remove_file(tar_path);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_explicit_pit_must_match_package_pit() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("samloader_test_pit_match_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let tar_path = temp_dir.join("package.tar");
+        let pit_bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-data/M3_EUR_OPEN_4G.pit"
+        ));
+
+        {
+            let tar_file = File::create(&tar_path).unwrap();
+            let mut builder = tar::Builder::new(tar_file);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(pit_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "layout.pit", &pit_bytes[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let tar_file = File::open(&tar_path).unwrap();
+        let opened_packages = vec![(tar_path.to_string_lossy().to_string(), tar_file)];
+        let mut matching = FlashManager::new_offline();
+        matching.pit_file_bytes = Some(pit_bytes.to_vec());
+        assert!(matching.scan_tar_packages(&opened_packages).is_ok());
+
+        let tar_file = File::open(&tar_path).unwrap();
+        let opened_packages = vec![(tar_path.to_string_lossy().to_string(), tar_file)];
+        let mut mismatching = FlashManager::new_offline();
+        mismatching.pit_file_bytes = Some(vec![0u8; pit_bytes.len()]);
+        let result = mismatching.scan_tar_packages(&opened_packages);
+        assert!(matches!(result, Err(FlashError::PitMismatch(_))));
 
         let _ = std::fs::remove_file(tar_path);
         let _ = std::fs::remove_dir(temp_dir);

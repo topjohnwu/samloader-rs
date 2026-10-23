@@ -21,6 +21,55 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 // This is asserted by Lz4FrameHeader so the header size is always 15
 const LZ4_HEADER_SIZE: usize = 15;
+const ANDROID_SPARSE_MAGIC: u32 = 0xED26_FF3A;
+const ANDROID_SPARSE_HEADER_SIZE: usize = 28;
+
+/// Returns the bytes occupied by an image after Android sparse expansion.
+/// Non-sparse inputs retain their caller-supplied stream size.
+pub(crate) fn expanded_android_image_size<R: Read>(
+    mut reader: R,
+    stream_size: u64,
+) -> io::Result<u64> {
+    let mut header = [0u8; ANDROID_SPARSE_HEADER_SIZE];
+    let mut read = 0;
+    while read < header.len() {
+        let count = reader.read(&mut header[read..])?;
+        if count == 0 {
+            if read >= 4
+                && u32::from_le_bytes(header[0..4].try_into().unwrap()) == ANDROID_SPARSE_MAGIC
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated Android sparse image header",
+                ));
+            }
+            return Ok(stream_size);
+        }
+        read += count;
+    }
+
+    if u32::from_le_bytes(header[0..4].try_into().unwrap()) != ANDROID_SPARSE_MAGIC {
+        return Ok(stream_size);
+    }
+
+    let major = u16::from_le_bytes(header[4..6].try_into().unwrap());
+    let file_header_size = u16::from_le_bytes(header[8..10].try_into().unwrap());
+    let block_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
+    let total_blocks = u32::from_le_bytes(header[16..20].try_into().unwrap()) as u64;
+    if major != 1 || file_header_size < ANDROID_SPARSE_HEADER_SIZE as u16 || block_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Android sparse image header",
+        ));
+    }
+
+    block_size.checked_mul(total_blocks).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Android sparse expanded size overflows u64",
+        )
+    })
+}
 
 /// Verifies the trailing MD5 checksum appended to `.tar.md5` package files.
 pub fn verify_md5_footer<R: Read + Seek>(mut reader: R, name: &str) -> io::Result<()> {
@@ -224,6 +273,8 @@ pub(crate) struct FirmwareFile<'a> {
     pub(crate) pit_entry: &'a PitEntry,
     /// Memory-mapped file content payload.
     pub(crate) file: Mmap,
+    /// Bytes occupied after Android sparse expansion.
+    pub(crate) expanded_size: u64,
 }
 
 impl<'a> FirmwareFile<'a> {
@@ -240,6 +291,8 @@ pub(crate) struct FirmwareLz4File<'a> {
     pub(crate) file: Mmap,
     /// Metadata header of the LZ4 frame.
     pub(crate) header: Lz4FrameHeader,
+    /// Bytes occupied after LZ4 decompression and Android sparse expansion.
+    pub(crate) expanded_size: u64,
 }
 
 impl<'a> FirmwareLz4File<'a> {
@@ -373,6 +426,39 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn test_expanded_android_sparse_image_size() {
+        let mut header = [0u8; ANDROID_SPARSE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&ANDROID_SPARSE_MAGIC.to_le_bytes());
+        header[4..6].copy_from_slice(&1u16.to_le_bytes());
+        header[8..10].copy_from_slice(&(ANDROID_SPARSE_HEADER_SIZE as u16).to_le_bytes());
+        header[12..16].copy_from_slice(&4096u32.to_le_bytes());
+        header[16..20].copy_from_slice(&512_000u32.to_le_bytes());
+
+        assert_eq!(
+            expanded_android_image_size(Cursor::new(header), 1234).unwrap(),
+            2_097_152_000
+        );
+    }
+
+    #[test]
+    fn test_expanded_android_raw_image_uses_stream_size() {
+        let raw = [0x5au8; ANDROID_SPARSE_HEADER_SIZE];
+        assert_eq!(
+            expanded_android_image_size(Cursor::new(raw), 98_765).unwrap(),
+            98_765
+        );
+    }
+
+    #[test]
+    fn test_expanded_android_sparse_image_rejects_truncated_header() {
+        let mut header = vec![0u8; 12];
+        header[0..4].copy_from_slice(&ANDROID_SPARSE_MAGIC.to_le_bytes());
+
+        let error = expanded_android_image_size(Cursor::new(header), 12).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
 
     #[derive(Clone)]
     struct TestProgress {

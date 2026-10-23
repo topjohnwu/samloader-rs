@@ -120,6 +120,72 @@ impl FlashProgress for CliProgress {
     }
 }
 
+pub(crate) fn action_preflight(
+    verbose: bool,
+    skip_md5: bool,
+    pit: &str,
+    packages: &[String],
+    partitions: &[PartitionArg],
+) -> i32 {
+    set_progress(CliProgress::new(verbose));
+
+    let mapped_partitions: Vec<(Option<String>, String)> = partitions
+        .iter()
+        .map(|p| (p.name.clone(), p.filename.clone()))
+        .collect();
+
+    let result = FlashManager::new_offline()
+        .skip_md5(skip_md5)
+        .pit(pit)
+        .packages(packages)
+        .partitions(&mapped_partitions)
+        .preflight();
+
+    let report = match result {
+        Ok(report) => report,
+        Err(e) => {
+            print_error!("{}", e);
+            return 1;
+        }
+    };
+
+    println!(
+        "Offline preflight passed: {} partitions",
+        report.partitions.len()
+    );
+    println!(
+        "Archive selection: {}",
+        if report.has_download_list {
+            "Samsung download-list"
+        } else {
+            "all PIT-matching members"
+        }
+    );
+    println!(
+        "{:<18} {:>14} {:>14} {:>14}",
+        "PARTITION", "IMAGE", "CAPACITY", "HEADROOM"
+    );
+    for part in report.partitions {
+        let (capacity, headroom) = if part.partition_size == 0 {
+            ("grow-to-end".to_string(), "n/a".to_string())
+        } else {
+            (
+                part.partition_size.to_string(),
+                part.partition_size
+                    .saturating_sub(part.image_size)
+                    .to_string(),
+            )
+        };
+        println!(
+            "{:<18} {:>14} {:>14} {:>14}",
+            part.name, part.image_size, capacity, headroom,
+        );
+    }
+    println!("No USB device was opened or contacted.");
+    println!("Validation completed successfully (offline check-only).");
+    0
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn action_flash(
     usb_backend: UsbBackendOption,
@@ -128,6 +194,7 @@ pub(crate) fn action_flash(
     wait: bool,
     skip_size_check: bool,
     skip_md5: bool,
+    no_lz4: bool,
     pit: Option<&str>,
     packages: &[String],
     partitions: &[PartitionArg],
@@ -135,6 +202,41 @@ pub(crate) fn action_flash(
     erase: bool,
 ) -> i32 {
     set_progress(CliProgress::new(verbose));
+
+    let mapped_partitions: Vec<(Option<String>, String)> = partitions
+        .iter()
+        .map(|p| (p.name.clone(), p.filename.clone()))
+        .collect();
+
+    // A full sparse/LZ4 size validation can take minutes. Do it before opening USB so the
+    // bootloader is never left waiting in an Odin session while the host performs CPU work.
+    // The normal flash path then reuses the validated logical sizes in the same process.
+    let preflight_report = if let Some(pit_path) = pit
+        && !skip_size_check
+    {
+        println!("Validating firmware completely before opening the USB device...");
+        let result = FlashManager::new_offline()
+            .pit(pit_path)
+            .skip_md5(skip_md5)
+            .packages(packages)
+            .partitions(&mapped_partitions)
+            .preflight();
+        match result {
+            Ok(report) => {
+                println!(
+                    "Pre-USB validation passed: {} partitions. Opening Odin session...",
+                    report.partitions.len()
+                );
+                Some(report)
+            }
+            Err(e) => {
+                print_error!("{}", e);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
 
     let usb = match create_backend(usb_backend, verbose, wait) {
         Ok(u) => u,
@@ -158,15 +260,16 @@ pub(crate) fn action_flash(
         }
     };
 
-    let mapped_partitions: Vec<(Option<String>, String)> = partitions
-        .iter()
-        .map(|p| (p.name.clone(), p.filename.clone()))
-        .collect();
+    if no_lz4 {
+        println!("Direct LZ4 transfer disabled; compressed images will be decompressed on host.");
+        session.disable_lz4();
+    }
 
     let mut flash_manager = FlashManager::new(&mut session)
         .reboot_mode(reboot_mode)
         .skip_size_check(skip_size_check)
-        .skip_md5(skip_md5)
+        // A successful same-process preflight already verified every MD5 footer.
+        .skip_md5(skip_md5 || preflight_report.is_some())
         .erase(erase)
         .packages(packages)
         .partitions(&mapped_partitions)
@@ -174,6 +277,9 @@ pub(crate) fn action_flash(
 
     if let Some(pit_path) = pit {
         flash_manager = flash_manager.pit(pit_path);
+    }
+    if let Some(report) = &preflight_report {
+        flash_manager = flash_manager.prevalidated(report);
     }
 
     if let Err(e) = flash_manager.execute() {

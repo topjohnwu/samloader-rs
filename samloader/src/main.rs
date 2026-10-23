@@ -123,7 +123,11 @@ Example auto-matching: samloader flash -f boot.img"#;
 const NO_REBOOT_HELP: &str = "Disables automatic reboot after flashing";
 const ERASE_HELP: &str = "Perform low-level NAND hardware erase on USERDATA before flashing";
 const SKIP_SIZE_CHECK_HELP: &str = "Do not verify that files fit in the specified partition";
+const CHECK_ONLY_HELP: &str =
+    "Validate packages against a local PIT without opening or contacting a USB device";
 const PIT_HELP: &str = "The PIT file to flash to the device";
+const NO_LZ4_HELP: &str =
+    "Disable direct LZ4 transfer and decompress compressed images on the host";
 const SKIP_MD5_HELP: &str = "Skip MD5 checksum verification";
 const BL_HELP: &str = "BL tar package file";
 const AP_HELP: &str = "AP tar package file";
@@ -333,12 +337,31 @@ fn main() {
                         .help(SKIP_SIZE_CHECK_HELP),
                 )
                 .arg(
+                    Arg::new("check-only")
+                        .long("check-only")
+                        .action(ArgAction::SetTrue)
+                        .requires("pit")
+                        .conflicts_with_all([
+                            "skip-size-check",
+                            "erase",
+                            "csc_code",
+                            "redownload",
+                        ])
+                        .help(CHECK_ONLY_HELP),
+                )
+                .arg(
                     Arg::new("skip-md5")
                         .long("skip-md5")
                         .action(ArgAction::SetTrue)
                         .help(SKIP_MD5_HELP),
                 )
                 .arg(Arg::new("pit").long("pit").num_args(1).help(PIT_HELP))
+                .arg(
+                    Arg::new("no-lz4")
+                        .long("no-lz4")
+                        .action(ArgAction::SetTrue)
+                        .help(NO_LZ4_HELP),
+                )
                 .arg(
                     Arg::new("bl")
                         .short('b')
@@ -591,6 +614,17 @@ fn main() {
                 std::process::exit(1);
             }
 
+            if sub_matches.get_flag("check-only") {
+                let result = flash::action_preflight(
+                    verbose,
+                    sub_matches.get_flag("skip-md5"),
+                    pit.expect("clap requires --pit with --check-only"),
+                    &packages,
+                    &partitions,
+                );
+                std::process::exit(result);
+            }
+
             let result = flash::action_flash(
                 usb_backend,
                 verbose,
@@ -598,6 +632,7 @@ fn main() {
                 sub_matches.get_flag("wait"),
                 sub_matches.get_flag("skip-size-check"),
                 sub_matches.get_flag("skip-md5"),
+                sub_matches.get_flag("no-lz4"),
                 pit,
                 &packages,
                 &partitions,

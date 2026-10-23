@@ -209,6 +209,9 @@ impl LokeError {
 /// Represents errors that can occur during the high-level flashing process.
 #[derive(Error, Debug)]
 pub enum FlashError {
+    /// An offline preflight was requested without an explicit local PIT.
+    #[error("Offline preflight requires an explicit local PIT file")]
+    PitRequiredForPreflight,
     /// An error originating from the low-level Odin protocol client.
     #[error("Odin error: {0}")]
     Odin(#[from] OdinError),
@@ -233,6 +236,10 @@ pub enum FlashError {
     #[error("Failed to parse LZ4 header for \"{0}\": {1}")]
     Lz4Header(String, #[source] std::io::Error),
 
+    /// Failed to determine the expanded size of an Android image.
+    #[error("Failed to determine expanded image size for \"{0}\": {1}")]
+    ImageSize(String, #[source] std::io::Error),
+
     /// Failed to read entries from a TAR archive.
     #[error("Failed to read archive entries for \"{0}\": {1}")]
     ArchiveReadFailed(String, #[source] std::io::Error),
@@ -248,6 +255,10 @@ pub enum FlashError {
     /// The files within the packages do not agree on the download allowlist manifest.
     #[error("Cross-archive consistency check failed! download-list.txt does not match.")]
     CrossArchiveInconsistency,
+
+    /// An explicit PIT does not match the PIT embedded in a firmware package.
+    #[error("Explicit PIT does not match the PIT embedded in firmware package \"{0}\"")]
+    PitMismatch(String),
 
     /// Failed to unpack the device-specific PIT file.
     #[error("Failed to unpack device's PIT file: {0}")]

@@ -169,12 +169,34 @@ impl OdinSession {
         };
 
         let cmd = Command::begin_session();
-        let session_response = session.request_and_response(&cmd, 3000)?;
+        // The session reply is a capability word, not a signed status. Its high bit may be
+        // set to advertise direct LZ4 transfer, so it must not pass through the generic
+        // signed-status check used by ordinary command replies.
+        session
+            .send_command(&cmd, 3000)
+            .map_err(|_| OdinError::SendCommandFailed)?;
+        let response = session.receive_response(3000)?;
+        if response.is_fail() {
+            return Err(OdinError::Loke(LokeError::from_status(
+                response.signed_value(),
+            )));
+        }
+        let expected_type = cmd.expected_response_type();
+        if response.response_type != expected_type {
+            return Err(OdinError::ResponseTypeMismatch {
+                expected: expected_type,
+                received: response.response_type,
+            });
+        }
+        let session_response = response.value;
 
+        // LOKE returns the negotiated protocol version in the high 16 bits.
+        // Bit 15 of that field advertises direct LZ4 transfer support.
+        let advertised_version = session_response >> 16;
         session.bootloader_protocol_version = if session_response == 0 {
             1
         } else {
-            session_response >> 16
+            advertised_version & 0x7fff
         };
 
         progress::println(
@@ -183,7 +205,7 @@ impl OdinSession {
         std::thread::sleep(Duration::from_millis(3000));
 
         if session.bootloader_protocol_version >= 2 {
-            session.lz4_supported = (session_response & 0x8000) != 0;
+            session.lz4_supported = (advertised_version & 0x8000) != 0;
             session.slice_timeout = 120000;
             session.packet_size = 0x100000;
 
@@ -491,6 +513,15 @@ impl OdinSession {
     /// Returns whether the negotiated device session supports flashing LZ4-compressed streams.
     pub fn is_lz4_supported(&self) -> bool {
         self.lz4_supported
+    }
+
+    /// Disables direct LZ4 transfer for the remainder of this session.
+    ///
+    /// LZ4 inputs will be decompressed on the host and sent through the raw
+    /// transfer path. This is useful when a bootloader's advertised LZ4
+    /// capability is absent, ambiguous, or known not to interoperate.
+    pub fn disable_lz4(&mut self) {
+        self.lz4_supported = false;
     }
 
     /// Returns the negotiated bootloader protocol version of the connected device.

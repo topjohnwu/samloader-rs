@@ -611,7 +611,7 @@ impl UsbTransfer for MockBackend {
                                         } else {
                                             0
                                         };
-                                        let response_val = (negotiated << 16) | lz4_bit;
+                                        let response_val = (negotiated | lz4_bit) << 16;
                                         self.push_response(CMD_SESSION_INIT, response_val);
                                     }
                                 }
@@ -790,10 +790,13 @@ mod tests {
         // 2. Handshake
         assert!(connection.init().is_ok());
 
-        // 3. Begin Session (protocol v3, LZ4 supported)
+        // 3. Begin Session (protocol v3 with advertised LZ4 support)
         let mut session = connection.begin_session().unwrap();
         assert_eq!(session.bootloader_protocol_version(), 3);
         assert!(session.is_lz4_supported());
+
+        session.disable_lz4();
+        assert!(!session.is_lz4_supported());
 
         // 4. Download PIT (Q7MQ_EUR_OPENX.pit is 18492 bytes)
         let pit_bytes = session.receive_pit_info().unwrap();

@@ -32,6 +32,36 @@ Options:
 - Supports flashing raw images and official package files across Linux, macOS, and Windows.
 - Processes and extracts official TAR firmware packages in-memory, avoiding slow disk write operations.
 - Transmits raw LZ4-compressed data directly to supported devices to reduce USB transfer size and time.
+- Provides an offline, PIT-aware preflight for repartitioning and firmware size checks.
+
+## Safer repartition flashing
+
+Changing a device's PIT rewrites its partition layout and can destroy user data. Validate the
+complete firmware set against the firmware's PIT before connecting a phone:
+
+```bash
+samloader flash --check-only --pit layout.pit \
+  --AP AP.tar.md5 --CP CP.tar.md5 --CSC CSC.tar.md5
+```
+
+The offline check verifies package MD5 footers, requires an explicit PIT to match any PIT embedded
+in the selected packages, applies package precedence, and compares each image's logical size with
+its target partition. For Android sparse images this means `block_size * total_blocks`, not the
+compressed or sparse-stream file length. No USB backend is opened by `--check-only`.
+
+After a successful check, a live flash with the same explicit PIT performs the full validation
+before opening the Odin USB session and reuses the validated sizes while the bootloader waits:
+
+```bash
+samloader flash --pit layout.pit \
+  --AP AP.tar.md5 --CP CP.tar.md5 --CSC CSC.tar.md5
+```
+
+Use the full CSC package when the firmware requires a new partition layout; a `HOME_CSC` package
+may omit the PIT and the images needed for moved partitions. `--no-lz4` is available as a
+compatibility fallback for devices that reject direct compressed transfer; it decompresses LZ4
+images on the host. See [the repartitioning safety notes](docs/repartitioning.md) before using
+either command.
 
 ## Install
 
