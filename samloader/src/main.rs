@@ -20,6 +20,7 @@ compile_error!("At least one USB backend must be enabled!");
 mod cli;
 mod commands;
 mod progress;
+mod readahead;
 mod session;
 
 use clap::Parser;

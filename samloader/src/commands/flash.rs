@@ -16,12 +16,9 @@
 
 use crate::cli::FlashArgs;
 use crate::progress::CliProgress;
+use crate::readahead::ReadaheadFile;
 use crate::session::connect;
-use samloader_odin::{
-    FlashRequest, UsbBackendOption,
-    futures::{executor::block_on, io::AllowStdIo},
-    set_progress,
-};
+use samloader_odin::{FlashRequest, UsbBackendOption, futures::executor::block_on, set_progress};
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -46,10 +43,11 @@ fn confirm(question: &str) -> bool {
     }
 }
 
-// Opens a file for reading by the async flashing pipeline
-fn open(path: &str) -> Result<AllowStdIo<File>, String> {
+// Opens a file for reading by the async flashing pipeline, reading ahead of
+// the USB transfer on a helper thread
+fn open(path: &str) -> Result<ReadaheadFile, String> {
     File::open(path)
-        .map(AllowStdIo::new)
+        .and_then(ReadaheadFile::new)
         .map_err(|e| format!("Failed to open file \"{}\": {}", path, e))
 }
 
