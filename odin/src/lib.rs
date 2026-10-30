@@ -41,7 +41,7 @@ pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError, SendPartitionError, TransportError};
 pub use firmware::verify_md5_footer;
 pub use flash::{FlashRequest, PreparedFlash};
-pub use modem::reboot_download;
+pub use modem::{DownloadModeReboot, reboot_download};
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use session::{OdinConnection, OdinSession, RebootMode, SalesCode};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};

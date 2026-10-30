@@ -50,16 +50,28 @@ pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), 
     }
 }
 
+/// The outcome of [`reboot_download`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadModeReboot {
+    /// The reboot command was sent to a device in normal mode.
+    Sent,
+    /// No device in normal mode could be opened, but a device is already in
+    /// Download Mode, so nothing was sent.
+    AlreadyInDownloadMode,
+}
+
 /// Triggers a reboot of the connected Samsung device into Download Mode via the
 /// specified backend protocol.
 ///
 /// The AT command is sent to the first Samsung device not already in Download
 /// Mode that exposes a usable interface; unrelated Samsung USB devices are
 /// skipped. If no such device can be opened but one is already in Download
-/// Mode, this is a no-op.
+/// Mode, this is a no-op that returns [`DownloadModeReboot::AlreadyInDownloadMode`].
 ///
 /// On WASM, the device must first be paired with `request_reboot_device`.
-pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), TransportError> {
+pub async fn reboot_download(
+    usb_backend: UsbBackendOption,
+) -> Result<DownloadModeReboot, TransportError> {
     let mut backend = match DeviceMode::Normal.open_with(usb_backend).await {
         Ok(backend) => backend,
         Err(e) => {
@@ -69,8 +81,7 @@ pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), Transp
                 if !matches!(e, TransportError::NormalModeDeviceNotFound) {
                     crate::progress::println_verbose(&format!("Ignoring error: {e}"));
                 }
-                crate::progress::println("Device is already in Download Mode.");
-                return Ok(());
+                return Ok(DownloadModeReboot::AlreadyInDownloadMode);
             }
             return Err(e);
         }
@@ -79,5 +90,5 @@ pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), Transp
     let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
 
     backend.send(cmd, Duration::from_secs(1)).await?;
-    Ok(())
+    Ok(DownloadModeReboot::Sent)
 }

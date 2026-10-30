@@ -22,6 +22,8 @@ use crate::compat::{MaybeSend, MaybeSync};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FlashEvent<'a> {
+    /// No device is connected yet, and it is being waited for.
+    WaitingForDevice,
     /// The Odin handshake with the device has started.
     HandshakeStart,
     /// The Odin handshake has succeeded.

@@ -80,6 +80,7 @@ impl FlashProgress for CliProgress {
 
     fn on_event(&self, event: FlashEvent<'_>) {
         match event {
+            FlashEvent::WaitingForDevice => self.println("Waiting for device..."),
             FlashEvent::HandshakeStart => self.println("Initializing protocol..."),
             FlashEvent::HandshakeEnd => self.println("Protocol initialization successful.\n"),
             FlashEvent::SessionStart => self.println("Beginning session..."),

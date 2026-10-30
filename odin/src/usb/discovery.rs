@@ -156,14 +156,14 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, TransportError>>,
 {
-    let mut print_wait = false;
+    let mut waiting = false;
     loop {
         match f().await {
             Ok(val) => return Ok(val),
             Err(TransportError::DeviceNotFound) if wait => {
-                if !print_wait {
-                    crate::progress::println("Waiting for device...");
-                    print_wait = true;
+                if !waiting {
+                    crate::progress::on_event(crate::progress::FlashEvent::WaitingForDevice);
+                    waiting = true;
                 }
                 futures_timer::Delay::new(Duration::from_secs(1)).await;
             }
