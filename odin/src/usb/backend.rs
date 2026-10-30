@@ -15,7 +15,7 @@
 
 //! Selection of the USB backend implementation at runtime.
 
-use crate::error::OdinError;
+use crate::error::TransportError;
 
 /// Runs `$body` with `$b` bound to the backend type selected by `$option`.
 ///
@@ -69,7 +69,7 @@ pub enum UsbBackendOption {
 }
 
 impl TryFrom<&str> for UsbBackendOption {
-    type Error = OdinError;
+    type Error = TransportError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
@@ -81,13 +81,13 @@ impl TryFrom<&str> for UsbBackendOption {
             "nusb" => Ok(UsbBackendOption::Nusb),
             #[cfg(mock_backend)]
             "mock" => Ok(UsbBackendOption::Mock),
-            _ => Err(OdinError::UnknownBackend(s.to_string())),
+            _ => Err(TransportError::UnknownBackend(s.to_string())),
         }
     }
 }
 
 impl std::str::FromStr for UsbBackendOption {
-    type Err = OdinError;
+    type Err = TransportError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::try_from(s)

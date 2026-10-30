@@ -16,7 +16,7 @@
 use super::USB_CLASS_CDC_DATA;
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::{OdinError, TransportError};
+use crate::error::TransportError;
 use ::rusb::{Context, DeviceHandle, UsbContext};
 use std::time::Duration;
 
@@ -86,12 +86,12 @@ impl RusbBackend {
 impl UsbBackend for RusbBackend {
     type UsbDevice = ::rusb::Device<Context>;
 
-    async fn new(device: Self::UsbDevice) -> Result<Self, OdinError> {
+    async fn new(device: Self::UsbDevice) -> Result<Self, TransportError> {
         // Locate the CDC data interface from cached descriptors before opening the
         // device, so unrelated devices are never opened or reconfigured.
         let config_descriptor = device
             .config_descriptor(0)
-            .map_err(|_| OdinError::ConfigDescriptorRetrieval)?;
+            .map_err(|_| TransportError::ConfigDescriptorRetrieval)?;
 
         let mut interface_index = -1;
         let mut alt_setting_index = -1;
@@ -126,12 +126,12 @@ impl UsbBackend for RusbBackend {
         }
 
         if interface_index < 0 {
-            return Err(OdinError::InterfaceConfigurationNotFound);
+            return Err(TransportError::InterfaceConfigurationNotFound);
         }
 
         let handle = match device.open() {
             Ok(h) => h,
-            Err(e) => return Err(OdinError::DeviceAccess(Box::new(e))),
+            Err(e) => return Err(TransportError::DeviceAccess(Box::new(e))),
         };
 
         if let Ok(config) = handle.active_configuration() {
@@ -159,12 +159,12 @@ impl UsbBackend for RusbBackend {
                 let _ = handle.detach_kernel_driver(interface_index as u8);
                 print_verbose!("Claiming interface again...");
                 if handle.claim_interface(interface_index as u8).is_err() {
-                    return Err(OdinError::InterfaceClaimFailed);
+                    return Err(TransportError::InterfaceClaimFailed);
                 }
             }
             #[cfg(not(target_os = "linux"))]
             {
-                return Err(OdinError::InterfaceClaimFailed);
+                return Err(TransportError::InterfaceClaimFailed);
             }
         }
 
@@ -172,7 +172,7 @@ impl UsbBackend for RusbBackend {
             print_verbose!("Setting up interface...");
             handle
                 .set_alternate_setting(interface_index as u8, alt_setting_index as u8)
-                .map_err(|_| OdinError::InterfaceSetupFailed)?;
+                .map_err(|_| TransportError::InterfaceSetupFailed)?;
         }
 
         Ok(Self {
@@ -185,7 +185,7 @@ impl UsbBackend for RusbBackend {
         })
     }
 
-    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, TransportError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
     {
@@ -203,7 +203,7 @@ impl UsbBackend for RusbBackend {
             }
         }
 
-        Err(OdinError::DeviceNotFound)
+        Err(TransportError::DeviceNotFound)
     }
 }
 

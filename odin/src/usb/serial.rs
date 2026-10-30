@@ -15,7 +15,7 @@
 
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::{OdinError, TransportError};
+use crate::error::TransportError;
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -52,10 +52,10 @@ impl SerialBackend {
 impl UsbBackend for SerialBackend {
     type UsbDevice = serialport::SerialPortInfo;
 
-    async fn new(device: Self::UsbDevice) -> Result<Self, OdinError> {
+    async fn new(device: Self::UsbDevice) -> Result<Self, TransportError> {
         let info = match &device.port_type {
             serialport::SerialPortType::UsbPort(info) => info,
-            _ => return Err(OdinError::DeviceNotFound),
+            _ => return Err(TransportError::DeviceNotFound),
         };
 
         Self::print_device_info(info);
@@ -75,7 +75,7 @@ impl UsbBackend for SerialBackend {
         Ok(Self { port, product })
     }
 
-    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, TransportError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
     {
@@ -89,7 +89,7 @@ impl UsbBackend for SerialBackend {
             }
         }
 
-        Err(OdinError::DeviceNotFound)
+        Err(TransportError::DeviceNotFound)
     }
 }
 

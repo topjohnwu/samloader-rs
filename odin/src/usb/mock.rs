@@ -16,7 +16,7 @@
 //! backed by reverse-engineered ground truth from real device bootloaders.
 
 use crate::compat::MaybeSend;
-use crate::error::{OdinError, TransportError};
+use crate::error::TransportError;
 use crate::protocol::{
     CMD_CLOSE_CONNECTION, CMD_DDP, CMD_DEVINFO, CMD_PIT, CMD_SESSION_INIT, CMD_TRANSMIT,
     CloseConnectionCommand, Command, DeviceInfoCommand, DynamicPartitionCommand, PitCommand,
@@ -577,11 +577,11 @@ impl MockBackend {
 impl UsbBackend for MockBackend {
     type UsbDevice = ();
 
-    async fn new(_device: Self::UsbDevice) -> Result<Self, OdinError> {
+    async fn new(_device: Self::UsbDevice) -> Result<Self, TransportError> {
         Ok(Self::new())
     }
 
-    async fn find_device<'a, F>(_predicate: F) -> Result<Self::UsbDevice, OdinError>
+    async fn find_device<'a, F>(_predicate: F) -> Result<Self::UsbDevice, TransportError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
     {

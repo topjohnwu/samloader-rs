@@ -19,45 +19,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum OdinError {
-    /// Failed to detect a compatible download-mode device.
-    #[error("Failed to detect compatible download-mode device.")]
-    DeviceNotFound,
-
-    /// Failed to detect a Samsung device in normal (non-download) mode.
-    #[error("Failed to detect Samsung device in normal mode.")]
-    NormalModeDeviceNotFound,
-
-    /// Failed to access the USB device.
-    #[cfg(target_os = "linux")]
-    #[error(
-        "Failed to access device. Error: {0}\n\n\
-             On Linux, this is usually because your user lacks write permission to the USB device node.\n\
-             To automatically fix this, please run the builtin fix command as root:\n\n\
-             \tsudo samloader fix-usb"
-    )]
-    DeviceAccess(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    /// Failed to access the USB device.
-    #[cfg(not(target_os = "linux"))]
-    #[error("Failed to access device. Error: {0}")]
-    DeviceAccess(#[from] Box<dyn std::error::Error + Send + Sync>),
-
-    /// Failed to retrieve the configuration descriptor from the USB device.
-    #[error("Failed to retrieve config descriptor")]
-    ConfigDescriptorRetrieval,
-
-    /// Failed to find the correct interface configuration on the USB device.
-    #[error("Failed to find correct interface configuration")]
-    InterfaceConfigurationNotFound,
-
-    /// Failed to claim the USB interface.
-    #[error("Claiming interface failed!")]
-    InterfaceClaimFailed,
-
-    /// Failed to set up the USB interface.
-    #[error("Setting up interface failed!")]
-    InterfaceSetupFailed,
-
     /// Failed to send the handshake query.
     #[error("Failed to send handshake: {0}")]
     HandshakeSendFailed(#[source] TransportError),
@@ -113,8 +74,8 @@ pub enum OdinError {
     #[error("{0}")]
     Loke(#[from] LokeError),
 
-    /// The USB or serial transport could not be set up or failed to transfer data.
-    #[error("USB transport error: {0}")]
+    /// The USB or serial transport could not open the device or failed to transfer data.
+    #[error("{0}")]
     Transport(#[from] TransportError),
 
     /// A slice is larger than the bootloader can stage in memory.
@@ -129,10 +90,6 @@ pub enum OdinError {
     /// A response packet from the device is malformed.
     #[error("{0}")]
     InvalidResponse(String),
-
-    /// The name does not match any USB backend enabled in this build.
-    #[error("Unknown USB backend: {0}")]
-    UnknownBackend(String),
 
     /// Device diagnostics (DVIF / 0x69) are not supported or unavailable on this device.
     #[error("Device information is not available on this device.")]
@@ -155,6 +112,49 @@ pub enum OdinError {
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum TransportError {
+    /// Failed to detect a compatible download-mode device.
+    #[error("Failed to detect compatible download-mode device.")]
+    DeviceNotFound,
+
+    /// Failed to detect a Samsung device in normal (non-download) mode.
+    #[error("Failed to detect Samsung device in normal mode.")]
+    NormalModeDeviceNotFound,
+
+    /// Failed to access the USB device.
+    #[cfg(target_os = "linux")]
+    #[error(
+        "Failed to access device. Error: {0}\n\n\
+             On Linux, this is usually because your user lacks write permission to the USB device node.\n\
+             To automatically fix this, please run the builtin fix command as root:\n\n\
+             \tsudo samloader fix-usb"
+    )]
+    DeviceAccess(Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to access the USB device.
+    #[cfg(not(target_os = "linux"))]
+    #[error("Failed to access device. Error: {0}")]
+    DeviceAccess(Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to retrieve the configuration descriptor from the USB device.
+    #[error("Failed to retrieve config descriptor")]
+    ConfigDescriptorRetrieval,
+
+    /// Failed to find the correct interface configuration on the USB device.
+    #[error("Failed to find correct interface configuration")]
+    InterfaceConfigurationNotFound,
+
+    /// Failed to claim the USB interface.
+    #[error("Claiming interface failed!")]
+    InterfaceClaimFailed,
+
+    /// Failed to set up the USB interface.
+    #[error("Setting up interface failed!")]
+    InterfaceSetupFailed,
+
+    /// The name does not match any USB backend enabled in this build.
+    #[error("Unknown USB backend: {0}")]
+    UnknownBackend(String),
+
     /// The transfer did not complete before its timeout.
     #[error("Transfer timed out")]
     Timeout,

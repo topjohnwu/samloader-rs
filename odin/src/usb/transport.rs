@@ -16,7 +16,7 @@
 //! Transport abstractions implemented by every USB and serial backend.
 
 use crate::compat::MaybeSend;
-use crate::error::{OdinError, TransportError};
+use crate::error::TransportError;
 use std::time::Duration;
 
 /// USB interface class code of CDC data interfaces, which carry the Odin
@@ -65,9 +65,9 @@ pub trait UsbBackend: Sized + UsbTransfer {
     type UsbDevice: MaybeSend;
 
     /// Instantiates a new backend session wrapper for a given device.
-    async fn new(device: Self::UsbDevice) -> Result<Self, OdinError>;
+    async fn new(device: Self::UsbDevice) -> Result<Self, TransportError>;
     /// Searches for a matching connected device based on a predicate.
-    async fn find_device<'a, F>(predicate: F) -> Result<Self::UsbDevice, OdinError>
+    async fn find_device<'a, F>(predicate: F) -> Result<Self::UsbDevice, TransportError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a;
 }

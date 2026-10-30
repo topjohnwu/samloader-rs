@@ -17,7 +17,7 @@
 //! accepts AT commands. This is a separate protocol from Odin, used to reboot
 //! a device into Download Mode.
 
-use crate::error::OdinError;
+use crate::error::TransportError;
 #[cfg(target_arch = "wasm32")]
 use crate::usb::VID_SAMSUNG;
 use crate::usb::{DeviceMode, UsbBackendOption};
@@ -29,7 +29,7 @@ use std::time::Duration;
 /// Once the device reboots, it re-enumerates with a Download Mode product ID
 /// and must be paired again with [`request_device`](crate::request_device).
 #[cfg(target_arch = "wasm32")]
-pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), OdinError> {
+pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), TransportError> {
     match usb_backend {
         #[cfg(feature = "nusb")]
         UsbBackendOption::Nusb => {
@@ -41,8 +41,8 @@ pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), 
 
             ::nusb::request_device(&selectors)
                 .await
-                .map_err(|e| OdinError::DeviceAccess(Box::new(e)))?
-                .ok_or(OdinError::DeviceNotFound)?;
+                .map_err(|e| TransportError::DeviceAccess(Box::new(e)))?
+                .ok_or(TransportError::DeviceNotFound)?;
             Ok(())
         }
         #[cfg(mock_backend)]
@@ -59,14 +59,14 @@ pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), 
 /// Mode, this is a no-op.
 ///
 /// On WASM, the device must first be paired with `request_reboot_device`.
-pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), OdinError> {
+pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), TransportError> {
     let mut backend = match DeviceMode::Normal.open_with(usb_backend).await {
         Ok(backend) => backend,
         Err(e) => {
             // The error may come from an unrelated device of the same vendor,
             // so check for a device already in Download Mode before reporting it.
             if DeviceMode::Download.find_with(usb_backend).await.is_ok() {
-                if !matches!(e, OdinError::NormalModeDeviceNotFound) {
+                if !matches!(e, TransportError::NormalModeDeviceNotFound) {
                     crate::progress::println_verbose(&format!("Ignoring error: {e}"));
                 }
                 crate::progress::println("Device is already in Download Mode.");

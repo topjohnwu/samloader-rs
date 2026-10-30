@@ -16,7 +16,7 @@
 //! Discovery of Samsung devices: which connected USB devices to talk to in
 //! each mode, and waiting for and pairing with them.
 
-use crate::error::OdinError;
+use crate::error::TransportError;
 use crate::usb::{UsbBackend, UsbBackendOption, UsbTransfer, with_backend};
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ impl DeviceMode {
     }
 
     /// Finds the first connected device in this mode.
-    async fn find<B: UsbBackend>(self) -> Result<B::UsbDevice, OdinError> {
+    async fn find<B: UsbBackend>(self) -> Result<B::UsbDevice, TransportError> {
         B::find_device(move |vid, pid| self.matches(vid, pid)).await
     }
 
@@ -60,12 +60,14 @@ impl DeviceMode {
     ///
     /// In normal mode, other Samsung USB devices (e.g. portable SSDs) also
     /// match, so devices that do not expose a usable interface are skipped.
-    async fn open<B: UsbBackend>(self) -> Result<B, OdinError> {
+    async fn open<B: UsbBackend>(self) -> Result<B, TransportError> {
         match self {
             DeviceMode::Download => B::new(self.find::<B>().await?).await,
             DeviceMode::Normal => {
                 match open_first_usable(|vid, pid| self.matches(vid, pid)).await {
-                    Err(OdinError::DeviceNotFound) => Err(OdinError::NormalModeDeviceNotFound),
+                    Err(TransportError::DeviceNotFound) => {
+                        Err(TransportError::NormalModeDeviceNotFound)
+                    }
                     res => res,
                 }
             }
@@ -73,7 +75,10 @@ impl DeviceMode {
     }
 
     /// Checks whether a device in this mode is connected, using the selected backend.
-    pub(crate) async fn find_with(self, usb_backend: UsbBackendOption) -> Result<(), OdinError> {
+    pub(crate) async fn find_with(
+        self,
+        usb_backend: UsbBackendOption,
+    ) -> Result<(), TransportError> {
         with_backend!(usb_backend, |B| self.find::<B>().await.map(drop))
     }
 
@@ -81,7 +86,7 @@ impl DeviceMode {
     pub(crate) async fn open_with(
         self,
         usb_backend: UsbBackendOption,
-    ) -> Result<Box<dyn UsbTransfer>, OdinError> {
+    ) -> Result<Box<dyn UsbTransfer>, TransportError> {
         with_backend!(usb_backend, |B| Ok(Box::new(self.open::<B>().await?)))
     }
 }
@@ -91,14 +96,14 @@ impl DeviceMode {
 /// Unlike [`UsbBackend::find_device`], which returns only the first match, this
 /// moves on to the next match when a device fails to open, e.g. an unrelated
 /// device from the same vendor without a usable CDC data interface.
-async fn open_first_usable<B, P>(predicate: P) -> Result<B, OdinError>
+async fn open_first_usable<B, P>(predicate: P) -> Result<B, TransportError>
 where
     B: UsbBackend,
     P: Fn(u16, u16) -> bool + Sync,
 {
     // Errors that only indicate an unsuitable device are replaced by more
     // meaningful errors (e.g. permission denied) from later candidates.
-    let mut error = OdinError::DeviceNotFound;
+    let mut error = TransportError::DeviceNotFound;
     let mut skip = 0usize;
     loop {
         // `find_device` returns only the first match, so devices are re-enumerated
@@ -121,7 +126,7 @@ where
 
         let device = match device {
             Ok(device) => device,
-            Err(OdinError::DeviceNotFound) => return Err(error),
+            Err(TransportError::DeviceNotFound) => return Err(error),
             Err(e) => return Err(e),
         };
 
@@ -134,9 +139,9 @@ where
                 ));
                 if matches!(
                     error,
-                    OdinError::DeviceNotFound
-                        | OdinError::InterfaceConfigurationNotFound
-                        | OdinError::ConfigDescriptorRetrieval
+                    TransportError::DeviceNotFound
+                        | TransportError::InterfaceConfigurationNotFound
+                        | TransportError::ConfigDescriptorRetrieval
                 ) {
                     error = e;
                 }
@@ -146,16 +151,16 @@ where
     }
 }
 
-async fn poll_device<T, F, Fut>(wait: bool, mut f: F) -> Result<T, OdinError>
+async fn poll_device<T, F, Fut>(wait: bool, mut f: F) -> Result<T, TransportError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, OdinError>>,
+    Fut: Future<Output = Result<T, TransportError>>,
 {
     let mut print_wait = false;
     loop {
         match f().await {
             Ok(val) => return Ok(val),
-            Err(OdinError::DeviceNotFound) if wait => {
+            Err(TransportError::DeviceNotFound) if wait => {
                 if !print_wait {
                     crate::progress::println("Waiting for device...");
                     print_wait = true;
@@ -171,7 +176,7 @@ where
 pub async fn create_backend(
     usb_backend: UsbBackendOption,
     wait: bool,
-) -> Result<Box<dyn UsbTransfer>, OdinError> {
+) -> Result<Box<dyn UsbTransfer>, TransportError> {
     poll_device(wait, || DeviceMode::Download.open_with(usb_backend)).await
 }
 
@@ -184,7 +189,7 @@ pub async fn detect_device(usb_backend: UsbBackendOption, wait: bool) -> bool {
 
 /// Helper function to prompt user pairing for a compatible download-mode device on WASM.
 #[cfg(target_arch = "wasm32")]
-pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), OdinError> {
+pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), TransportError> {
     match usb_backend {
         #[cfg(feature = "nusb")]
         UsbBackendOption::Nusb => {
@@ -195,8 +200,8 @@ pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), OdinErr
 
             ::nusb::request_device(&selectors)
                 .await
-                .map_err(|e| OdinError::DeviceAccess(Box::new(e)))?
-                .ok_or(OdinError::DeviceNotFound)?;
+                .map_err(|e| TransportError::DeviceAccess(Box::new(e)))?
+                .ok_or(TransportError::DeviceNotFound)?;
             Ok(())
         }
         #[cfg(mock_backend)]
@@ -208,7 +213,6 @@ pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), OdinErr
 mod tests {
     use super::*;
     use crate::compat::MaybeSend;
-    use crate::error::TransportError;
     use std::cell::RefCell;
 
     const PID_NORMAL: u16 = 0x6860;
@@ -252,25 +256,25 @@ mod tests {
     impl UsbBackend for FakeBackend {
         type UsbDevice = FakeDevice;
 
-        async fn new(device: Self::UsbDevice) -> Result<Self, OdinError> {
+        async fn new(device: Self::UsbDevice) -> Result<Self, TransportError> {
             match device.2 {
                 Open::Ok => Ok(Self { pid: device.1 }),
-                Open::NoInterface => Err(OdinError::InterfaceConfigurationNotFound),
-                Open::ClaimFailed => Err(OdinError::InterfaceClaimFailed),
+                Open::NoInterface => Err(TransportError::InterfaceConfigurationNotFound),
+                Open::ClaimFailed => Err(TransportError::InterfaceClaimFailed),
             }
         }
 
-        async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+        async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, TransportError>
         where
             F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
         {
             DEVICES
                 .with_borrow(|d| d.iter().copied().find(|&(vid, pid, _)| predicate(vid, pid)))
-                .ok_or(OdinError::DeviceNotFound)
+                .ok_or(TransportError::DeviceNotFound)
         }
     }
 
-    fn open_normal_mode(devices: &[FakeDevice]) -> Result<FakeBackend, OdinError> {
+    fn open_normal_mode(devices: &[FakeDevice]) -> Result<FakeBackend, TransportError> {
         DEVICES.set(devices.to_vec());
         futures::executor::block_on(DeviceMode::Normal.open())
     }
@@ -300,7 +304,7 @@ mod tests {
     #[test]
     fn test_normal_mode_not_found() {
         let res = open_normal_mode(&[(VID_SAMSUNG, PID_GALAXY_S2, Open::Ok)]);
-        assert!(matches!(res, Err(OdinError::NormalModeDeviceNotFound)));
+        assert!(matches!(res, Err(TransportError::NormalModeDeviceNotFound)));
     }
 
     #[test]
@@ -309,12 +313,12 @@ mod tests {
             (VID_SAMSUNG, PID_NORMAL, Open::ClaimFailed),
             (VID_SAMSUNG, PID_PORTABLE_SSD, Open::NoInterface),
         ]);
-        assert!(matches!(res, Err(OdinError::InterfaceClaimFailed)));
+        assert!(matches!(res, Err(TransportError::InterfaceClaimFailed)));
 
         let res = open_normal_mode(&[(VID_SAMSUNG, PID_PORTABLE_SSD, Open::NoInterface)]);
         assert!(matches!(
             res,
-            Err(OdinError::InterfaceConfigurationNotFound)
+            Err(TransportError::InterfaceConfigurationNotFound)
         ));
     }
 }

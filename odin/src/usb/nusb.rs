@@ -16,7 +16,7 @@
 use super::USB_CLASS_CDC_DATA;
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::{OdinError, TransportError};
+use crate::error::TransportError;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -200,11 +200,11 @@ impl NusbBackend {
 impl UsbBackend for NusbBackend {
     type UsbDevice = ::nusb::DeviceInfo;
 
-    async fn new(device: Self::UsbDevice) -> Result<Self, OdinError> {
+    async fn new(device: Self::UsbDevice) -> Result<Self, TransportError> {
         let handle = device
             .open()
             .await
-            .map_err(|e| OdinError::DeviceAccess(Box::new(e)))?;
+            .map_err(|e| TransportError::DeviceAccess(Box::new(e)))?;
 
         // Traverse configuration and select the class USB_CLASS_CDC_DATA interface with 2 endpoints
         let mut interface_index = -1;
@@ -241,7 +241,7 @@ impl UsbBackend for NusbBackend {
         }
 
         if interface_index < 0 {
-            return Err(OdinError::InterfaceConfigurationNotFound);
+            return Err(TransportError::InterfaceConfigurationNotFound);
         }
 
         Self::print_device_info(&device);
@@ -249,13 +249,13 @@ impl UsbBackend for NusbBackend {
         let interface = handle
             .detach_and_claim_interface(interface_index as u8)
             .await
-            .map_err(|_| OdinError::InterfaceClaimFailed)?;
+            .map_err(|_| TransportError::InterfaceClaimFailed)?;
 
         if alt_setting_index != 0 {
             interface
                 .set_alt_setting(alt_setting_index as u8)
                 .await
-                .map_err(|_| OdinError::InterfaceSetupFailed)?;
+                .map_err(|_| TransportError::InterfaceSetupFailed)?;
         }
 
         let ep_in = interface
@@ -276,7 +276,7 @@ impl UsbBackend for NusbBackend {
         })
     }
 
-    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, OdinError>
+    async fn find_device<'a, F>(mut predicate: F) -> Result<Self::UsbDevice, TransportError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
     {
@@ -287,7 +287,7 @@ impl UsbBackend for NusbBackend {
                 }
             }
         }
-        Err(OdinError::DeviceNotFound)
+        Err(TransportError::DeviceNotFound)
     }
 }
 
