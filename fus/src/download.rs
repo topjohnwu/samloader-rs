@@ -19,9 +19,8 @@ use crate::error::Result;
 use aes::cipher::BlockModeDecrypt;
 use aes::cipher::inout::InOutBuf;
 use fast_md5::Md5;
-use memmap2::MmapMut;
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Condvar, Mutex};
@@ -40,6 +39,47 @@ const FOOTER_VERSION: u32 = 1;
 
 /// Length of the fixed trailing trailer: 16 (MD5) + 4 (footer_len) + 8 (magic) = 28 bytes.
 const TRAILER_LEN: usize = 28;
+
+/// Size of each worker's download buffer (a multiple of the 16-byte AES block).
+const WRITE_BUF_SIZE: usize = 1024 * 1024;
+
+#[cfg(unix)]
+fn write_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_write(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_read(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
 
 /// A trait for reporting firmware download progress and logging messages.
 pub trait DownloadProgress: Send + Sync {
@@ -368,6 +408,8 @@ struct StateTracker<'a> {
     bitfield_offset: usize,
     total_blocks: usize,
     file_size: u64,
+    /// The `.part` file and the footer's offset in it, which every changed byte is written to.
+    sink: Option<(&'a File, u64)>,
 }
 
 impl<'a> StateTracker<'a> {
@@ -382,12 +424,23 @@ impl<'a> StateTracker<'a> {
             bitfield_offset,
             total_blocks,
             file_size,
+            sink: None,
         }
     }
 
-    fn on_bytes_decrypted(&mut self, start: u64, prev_dec: usize, new_dec: usize) {
-        let prev_pos = start + prev_dec as u64;
-        let curr_pos = start + new_dec as u64;
+    fn with_sink(mut self, file: &'a File, footer_offset: u64) -> Self {
+        self.sink = Some((file, footer_offset));
+        self
+    }
+
+    fn on_bytes_decrypted(
+        &mut self,
+        start: u64,
+        prev_dec: u64,
+        new_dec: u64,
+    ) -> std::io::Result<()> {
+        let prev_pos = start + prev_dec;
+        let curr_pos = start + new_dec;
         let start_blk = (prev_pos / BLOCK_SIZE as u64) as usize;
         let end_blk = (curr_pos / BLOCK_SIZE as u64) as usize;
 
@@ -403,14 +456,25 @@ impl<'a> StateTracker<'a> {
             if curr_pos >= blk_end {
                 let byte_idx = self.bitfield_offset + blk / 8;
                 let bit_mask = 1 << (blk % 8);
-                self.footer[byte_idx] |= bit_mask;
+                if self.footer[byte_idx] & bit_mask == 0 {
+                    self.footer[byte_idx] |= bit_mask;
+                    if let Some((file, footer_offset)) = self.sink {
+                        write_at(
+                            file,
+                            &self.footer[byte_idx..=byte_idx],
+                            footer_offset + byte_idx as u64,
+                        )?;
+                    }
+                }
             }
         }
+        Ok(())
     }
 }
 
-/// Downloads the firmware binary in parallel across multiple threads, decrypting it in place,
-/// supporting interruption and resumption via an embedded `.part` footer.
+/// Downloads the firmware binary in parallel across multiple threads, decrypting each piece
+/// and writing it at its offset, supporting interruption and resumption via an embedded
+/// `.part` footer.
 pub fn download_firmware<P, PathRef>(
     client: &FusClient,
     path: PathRef,
@@ -501,46 +565,36 @@ where
         }]
     };
 
-    let mut map = unsafe { MmapMut::map_mut(&file)? };
-
     let download_chunks = partition_ranges_for_threads(&uncompleted, options.threads);
 
     if !download_chunks.is_empty() {
         client.init_download()?;
 
-        let (payload_map, footer_map) = map.split_at_mut(client.info.size as usize);
+        let mut footer = vec![0u8; layout.footer_len];
+        read_at(&file, &mut footer, client.info.size)?;
 
-        let tracker = Mutex::new(StateTracker::new(
-            footer_map,
-            layout.bitfield_offset,
-            layout.num_blocks,
-            client.info.size,
-        ));
+        let tracker = Mutex::new(
+            StateTracker::new(
+                &mut footer,
+                layout.bitfield_offset,
+                layout.num_blocks,
+                client.info.size,
+            )
+            .with_sink(&file, client.info.size),
+        );
 
-        let mut queue = VecDeque::new();
-        {
-            let mut rest = payload_map;
-            let mut current_offset = 0_u64;
-
-            for range in &download_chunks {
-                let skip = (range.start - current_offset) as usize;
-                let (_, tail) = rest.split_at_mut(skip);
-                let len = (range.end - range.start) as usize;
-                let (buf, next_rest) = tail.split_at_mut(len);
-                current_offset = range.end;
-                rest = next_rest;
-
-                queue.push_back(Chunk {
-                    buf,
-                    start: range.start,
-                    end: if range.end == client.info.size {
-                        None
-                    } else {
-                        Some(range.end - 1)
-                    },
-                });
-            }
-        }
+        let queue: VecDeque<Chunk> = download_chunks
+            .iter()
+            .map(|range| Chunk {
+                start: range.start,
+                len: range.end - range.start,
+                end: if range.end == client.info.size {
+                    None
+                } else {
+                    Some(range.end - 1)
+                },
+            })
+            .collect();
 
         let n_workers = queue.len().min(options.threads as usize);
         let pool = Pool {
@@ -556,8 +610,9 @@ where
         thread::scope(|s| {
             let pool = &pool;
             let tracker = &tracker;
+            let file = &file;
             for _ in 0..n_workers {
-                s.spawn(move || run_worker(pool, client, progress, tracker));
+                s.spawn(move || run_worker(pool, client, file, progress, tracker));
                 thread::sleep(Duration::from_millis(100));
             }
         });
@@ -566,15 +621,16 @@ where
         drop(pool);
 
         if let Some(err) = pool_error {
-            map.flush()?;
+            file.sync_data()?;
             return Err(err);
         }
     }
 
     // All blocks complete: read last byte to check PKCS#7 padding
-    let last_byte = map[client.info.size as usize - 1];
-    map.flush()?;
-    drop(map);
+    let mut last_byte = [0u8; 1];
+    read_at(&file, &mut last_byte, client.info.size - 1)?;
+    let last_byte = last_byte[0];
+    file.sync_data()?;
 
     let padding = if last_byte > 0 && last_byte <= 16 {
         last_byte as u64
@@ -593,19 +649,19 @@ where
     Ok(())
 }
 
-struct Chunk<'a> {
-    buf: &'a mut [u8],
+struct Chunk {
     start: u64,
+    len: u64,
     end: Option<u64>,
 }
 
-struct Pool<'a> {
-    inner: Mutex<PoolInner<'a>>,
+struct Pool {
+    inner: Mutex<PoolInner>,
     available: Condvar,
 }
 
-struct PoolInner<'a> {
-    queue: VecDeque<Chunk<'a>>,
+struct PoolInner {
+    queue: VecDeque<Chunk>,
     in_flight: usize,
     live: usize,
     error: Option<crate::Error>,
@@ -613,15 +669,17 @@ struct PoolInner<'a> {
 
 enum ChunkOutcome {
     Done,
-    Stalled { decrypted: usize },
+    Stalled { decrypted: u64 },
+    Failed(crate::Error),
 }
 
 const MAX_STALL_RETRIES: u32 = 4;
 const MAX_DEAD_STALLS: u32 = 4;
 
 fn run_worker(
-    pool: &Pool<'_>,
+    pool: &Pool,
     client: &FusClient,
+    file: &File,
     progress: &impl DownloadProgress,
     tracker: &Mutex<StateTracker<'_>>,
 ) {
@@ -652,8 +710,9 @@ fn run_worker(
 
         let outcome = download_chunk(
             client,
-            &mut chunk.buf[..],
+            file,
             chunk.start,
+            chunk.len,
             chunk.end,
             progress,
             tracker,
@@ -666,14 +725,22 @@ fn run_worker(
                 state.in_flight -= 1;
                 pool.available.notify_all();
             }
+            ChunkOutcome::Failed(err) => {
+                let mut state = pool.inner.lock().unwrap();
+                if state.error.is_none() {
+                    state.error = Some(err);
+                }
+                state.in_flight -= 1;
+                state.live -= 1;
+                pool.available.notify_all();
+                return;
+            }
             ChunkOutcome::Stalled { decrypted } => {
-                let stall_off = chunk.start + decrypted as u64;
-                let Chunk { buf, end, .. } = chunk;
-                let (_done, rest) = buf.split_at_mut(decrypted);
+                let stall_off = chunk.start + decrypted;
                 let remainder = Chunk {
-                    buf: rest,
                     start: stall_off,
-                    end,
+                    len: chunk.len - decrypted,
+                    end: chunk.end,
                 };
 
                 let mut state = pool.inner.lock().unwrap();
@@ -724,18 +791,21 @@ fn run_worker(
 
 fn download_chunk(
     client: &FusClient,
-    chunk: &mut [u8],
+    file: &File,
     start: u64,
+    len: u64,
     end: Option<u64>,
     progress: &impl DownloadProgress,
     tracker: &Mutex<StateTracker<'_>>,
 ) -> ChunkOutcome {
     let mut dec = client.get_decryptor();
-    let mut dec_pos = 0_usize;
+    let mut buf = vec![0u8; WRITE_BUF_SIZE];
+    // Bytes of this chunk decrypted and written to `file`.
+    let mut dec_pos = 0_u64;
     let mut retries = 0_u32;
 
     loop {
-        let mut resp = match client.download_file(Some(start + dec_pos as u64), end) {
+        let mut resp = match client.download_file(Some(start + dec_pos), end) {
             Ok(resp) => resp,
             Err(e) => {
                 retries += 1;
@@ -744,7 +814,7 @@ fn download_chunk(
                 }
                 progress.println_verbose(&format!(
                     "Request error ({e}); retry {retries}/{MAX_STALL_RETRIES} at offset {}",
-                    start + dec_pos as u64
+                    start + dec_pos
                 ));
                 thread::sleep(backoff(retries));
                 continue;
@@ -752,40 +822,58 @@ fn download_chunk(
         };
 
         let resume_from = dec_pos;
-        let mut dl_pos = dec_pos;
+        // Bytes at the front of `buf` received but not yet decrypted (less than one AES block).
+        let mut pending = 0_usize;
 
         let stall = loop {
-            match resp.read(&mut chunk[dl_pos..]) {
+            let want = ((buf.len() - pending) as u64).min(len - dec_pos - pending as u64) as usize;
+            match resp.read(&mut buf[pending..pending + want]) {
                 Ok(0) => {
-                    tracker
-                        .lock()
-                        .unwrap()
-                        .on_bytes_decrypted(start, resume_from, dec_pos);
-                    return ChunkOutcome::Done;
+                    return match tracker.lock().unwrap().on_bytes_decrypted(
+                        start,
+                        resume_from,
+                        dec_pos,
+                    ) {
+                        Ok(()) => ChunkOutcome::Done,
+                        Err(e) => ChunkOutcome::Failed(e.into()),
+                    };
                 }
-                Ok(n) => dl_pos += n,
+                Ok(n) => pending += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => break e,
             }
 
-            let prev_dec = dec_pos;
-            let (blocks, tail) = InOutBuf::from(&mut chunk[dec_pos..dl_pos]).into_chunks();
+            let whole = pending - pending % 16;
+            let (blocks, _) = InOutBuf::from(&mut buf[..whole]).into_chunks();
             dec.decrypt_blocks_inout(blocks);
-            dec_pos = dl_pos - tail.len();
-            progress.inc((dec_pos - prev_dec) as u64);
+            if let Err(e) = write_at(file, &buf[..whole], start + dec_pos) {
+                return ChunkOutcome::Failed(e.into());
+            }
+            buf.copy_within(whole..pending, 0);
+            pending -= whole;
 
-            tracker
+            let prev_dec = dec_pos;
+            dec_pos += whole as u64;
+            progress.inc(whole as u64);
+
+            if let Err(e) = tracker
                 .lock()
                 .unwrap()
-                .on_bytes_decrypted(start, prev_dec, dec_pos);
+                .on_bytes_decrypted(start, prev_dec, dec_pos)
+            {
+                return ChunkOutcome::Failed(e.into());
+            }
         };
 
-        if dec_pos == chunk.len() {
-            tracker
+        if dec_pos == len {
+            return match tracker
                 .lock()
                 .unwrap()
-                .on_bytes_decrypted(start, resume_from, dec_pos);
-            return ChunkOutcome::Done;
+                .on_bytes_decrypted(start, resume_from, dec_pos)
+            {
+                Ok(()) => ChunkOutcome::Done,
+                Err(e) => ChunkOutcome::Failed(e.into()),
+            };
         }
 
         if dec_pos > resume_from {
@@ -798,7 +886,7 @@ fn download_chunk(
         progress.println_verbose(&format!(
             "Download error ({stall}); retry {retries}/{MAX_STALL_RETRIES}, \
              resuming at offset {}",
-            start + dec_pos as u64
+            start + dec_pos
         ));
         thread::sleep(backoff(retries));
     }
@@ -918,15 +1006,19 @@ mod tests {
             );
 
             // Decrypt first 1 MiB (not complete block yet)
-            tracker.on_bytes_decrypted(0, 0, 1024 * 1024);
+            tracker.on_bytes_decrypted(0, 0, 1024 * 1024).unwrap();
             assert_eq!(tracker.footer[layout.bitfield_offset], 0);
 
             // Decrypt across 2 MiB boundary -> block 0 complete!
-            tracker.on_bytes_decrypted(0, 1024 * 1024, BLOCK_SIZE);
+            tracker
+                .on_bytes_decrypted(0, 1024 * 1024, BLOCK_SIZE as u64)
+                .unwrap();
             assert_eq!(tracker.footer[layout.bitfield_offset], 0b01);
 
             // Complete block 1
-            tracker.on_bytes_decrypted(BLOCK_SIZE as u64, 0, BLOCK_SIZE);
+            tracker
+                .on_bytes_decrypted(BLOCK_SIZE as u64, 0, BLOCK_SIZE as u64)
+                .unwrap();
             assert_eq!(tracker.footer[layout.bitfield_offset], 0b11);
         }
 
@@ -954,7 +1046,9 @@ mod tests {
                 layout.num_blocks,
                 client.info.size,
             );
-            tracker.on_bytes_decrypted(0, 0, 2 * BLOCK_SIZE);
+            tracker
+                .on_bytes_decrypted(0, 0, 2 * BLOCK_SIZE as u64)
+                .unwrap();
         }
 
         // Validate that footer is immediately valid and recognizes blocks 0 and 1
@@ -982,7 +1076,9 @@ mod tests {
                 layout.num_blocks,
                 client.info.size,
             );
-            tracker.on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE);
+            tracker
+                .on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE as u64)
+                .unwrap();
         }
 
         let mut cursor = Cursor::new(vec![0u8; 10 * 1024 * 1024]);
@@ -1000,5 +1096,75 @@ mod tests {
                 end: 10 * 1024 * 1024,
             }]
         );
+    }
+
+    #[test]
+    fn test_state_tracker_writes_through_to_file() {
+        let client = make_test_client(4 * 1024 * 1024); // 2 blocks
+        let layout = FooterLayout::new(&client);
+        let mut footer = vec![0u8; layout.footer_len];
+        layout.serialize_initial(&client, &mut footer);
+
+        let path =
+            std::env::temp_dir().join(format!("samloader-tracker-{}.part", std::process::id()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(client.info.size).unwrap();
+        write_at(&file, &footer, client.info.size).unwrap();
+
+        {
+            let mut tracker = StateTracker::new(
+                &mut footer,
+                layout.bitfield_offset,
+                layout.num_blocks,
+                client.info.size,
+            )
+            .with_sink(&file, client.info.size);
+            tracker.on_bytes_decrypted(0, 0, BLOCK_SIZE as u64).unwrap();
+        }
+
+        let mut reader = File::open(&path).unwrap();
+        let parsed = ParsedFooter::read_and_validate(&mut reader, &client)
+            .expect("Footer on disk must validate after a block completes");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(parsed.bitfield, vec![0b01]);
+    }
+
+    #[test]
+    fn test_positioned_io_round_trip() {
+        let path = std::env::temp_dir().join(format!("samloader-pio-{}.bin", std::process::id()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+
+        // Out of order and past the end of the file, as concurrent workers write.
+        let big = vec![0xAB; 3 * 1024 * 1024 + 7];
+        write_at(&file, b"world", 1_000_005).unwrap();
+        write_at(&file, b"hello", 1_000_000).unwrap();
+        write_at(&file, &big, 2_000_000).unwrap();
+
+        let mut words = [0u8; 10];
+        read_at(&file, &mut words, 1_000_000).unwrap();
+        let mut gap = [0xFFu8; 16];
+        read_at(&file, &mut gap, 500).unwrap();
+        let mut back = vec![0u8; big.len()];
+        read_at(&file, &mut back, 2_000_000).unwrap();
+        let end = 2_000_000 + big.len() as u64;
+        let past_end = read_at(&file, &mut [0u8; 4], end - 2).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(&words, b"helloworld");
+        assert_eq!(gap, [0u8; 16]);
+        assert!(back == big);
+        assert_eq!(past_end.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }
