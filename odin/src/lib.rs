@@ -28,6 +28,7 @@ mod device_info;
 mod error;
 mod firmware;
 mod flash;
+mod modem;
 mod progress;
 mod protocol;
 mod session;
@@ -37,17 +38,18 @@ mod usb;
 mod test_util;
 
 pub use compat::{MaybeSend, MaybeSync};
-pub use device::{query_device_info, reboot_download};
+pub use device::query_device_info;
 pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::verify_md5_footer;
 pub use flash::{FlashRequest, PreparedFlash};
+pub use modem::reboot_download;
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use session::{OdinConnection, OdinSession, RebootMode};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 
 #[cfg(target_arch = "wasm32")]
-pub use device::request_reboot_device;
+pub use modem::request_reboot_device;
 #[cfg(target_arch = "wasm32")]
 pub use usb::request_device;
 
