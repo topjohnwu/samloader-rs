@@ -848,31 +848,39 @@ mod tests {
 
     #[test]
     fn test_footer_validation_failures() {
-        let client = make_test_client(4 * 1024 * 1024);
+        let size = 4 * 1024 * 1024;
+        let client = make_test_client(size);
         let layout = FooterLayout::new(&client);
         let mut buf = vec![0u8; layout.footer_len];
         layout.serialize_initial(&client, &mut buf);
+
+        // Appends `footer` to the downloaded data and validates it
+        let validate = |footer: &[u8], client: &FusClient| {
+            let mut cursor = Cursor::new(vec![0u8; size as usize]);
+            cursor.seek(SeekFrom::End(0)).unwrap();
+            cursor.write_all(footer).unwrap();
+            ParsedFooter::read_and_validate(&mut cursor, client).is_some()
+        };
+
+        // The untampered footer is valid, so each failure below is caused by its change
+        assert!(validate(&buf, &client));
 
         // Tamper with magic
         let mut tampered = buf.clone();
         let len = tampered.len();
         tampered[len - 1] ^= 0xFF;
-        let mut cursor = Cursor::new(vec![0u8; 4 * 1024 * 1024]);
-        cursor.write_all(&tampered).unwrap();
-        assert!(ParsedFooter::read_and_validate(&mut cursor, &client).is_none());
+        assert!(!validate(&tampered, &client));
 
         // Tamper with checksum
         let mut tampered = buf.clone();
         tampered[len - 20] ^= 0xFF;
-        let mut cursor = Cursor::new(vec![0u8; 4 * 1024 * 1024]);
-        cursor.write_all(&tampered).unwrap();
-        assert!(ParsedFooter::read_and_validate(&mut cursor, &client).is_none());
+        assert!(!validate(&tampered, &client));
 
-        // Mismatched client info (e.g. different size)
-        let mut cursor = Cursor::new(vec![0u8; 4 * 1024 * 1024]);
-        cursor.write_all(&buf).unwrap();
-        let other_client = make_test_client(8 * 1024 * 1024);
-        assert!(ParsedFooter::read_and_validate(&mut cursor, &other_client).is_none());
+        // Mismatched client info: a different size, or the same size but another key
+        assert!(!validate(&buf, &make_test_client(2 * size)));
+        let mut other_client = make_test_client(size);
+        other_client.info.key = vec![0x43; 16];
+        assert!(!validate(&buf, &other_client));
     }
 
     #[test]
@@ -903,12 +911,25 @@ mod tests {
     }
 
     #[test]
-    fn test_state_tracker_block_completion() {
-        let client = make_test_client(4 * 1024 * 1024); // 2 blocks
+    fn test_state_tracker_interruption_and_resume() {
+        let size = 10 * 1024 * 1024; // 5 blocks
+        let client = make_test_client(size);
         let layout = FooterLayout::new(&client);
         let mut footer = vec![0u8; layout.footer_len];
         layout.serialize_initial(&client, &mut footer);
 
+        // The footer must be valid at any time, as downloads can stop abruptly
+        let validate = |footer: &[u8]| {
+            let mut cursor = Cursor::new(vec![0u8; size as usize]);
+            cursor.seek(SeekFrom::End(0)).unwrap();
+            cursor.write_all(footer).unwrap();
+            let parsed = ParsedFooter::read_and_validate(&mut cursor, &client)
+                .expect("Footer must validate immediately after block completion");
+            let uncompleted = extract_uncompleted_ranges(&parsed.bitfield, parsed.num_blocks, size);
+            (parsed.bitfield, uncompleted)
+        };
+
+        // First run: completes blocks 0 and 1, then abruptly stops (no manual flush)
         {
             let mut tracker = StateTracker::new(
                 &mut footer,
@@ -921,7 +942,7 @@ mod tests {
             tracker.on_bytes_decrypted(0, 0, 1024 * 1024);
             assert_eq!(tracker.footer[layout.bitfield_offset], 0);
 
-            // Decrypt across 2 MiB boundary -> block 0 complete!
+            // Decrypt across the 2 MiB boundary -> block 0 complete
             tracker.on_bytes_decrypted(0, 1024 * 1024, BLOCK_SIZE);
             assert_eq!(tracker.footer[layout.bitfield_offset], 0b01);
 
@@ -930,51 +951,13 @@ mod tests {
             assert_eq!(tracker.footer[layout.bitfield_offset], 0b11);
         }
 
-        // Verify checksum is valid immediately after block completion
-        let mut cursor = Cursor::new(vec![0u8; 4 * 1024 * 1024]);
-        cursor.seek(SeekFrom::End(0)).unwrap();
-        cursor.write_all(&footer).unwrap();
-        let parsed = ParsedFooter::read_and_validate(&mut cursor, &client)
-            .expect("Footer must validate immediately after block completion");
-        assert_eq!(parsed.bitfield, vec![0b11]);
-    }
+        let range = |start: usize| ByteRange {
+            start: (start * BLOCK_SIZE) as u64,
+            end: size,
+        };
+        assert_eq!(validate(&footer), (vec![0b11], vec![range(2)]));
 
-    #[test]
-    fn test_abrupt_interruption_and_resume() {
-        let client = make_test_client(10 * 1024 * 1024); // 5 blocks
-        let layout = FooterLayout::new(&client);
-        let mut footer = vec![0u8; layout.footer_len];
-        layout.serialize_initial(&client, &mut footer);
-
-        // First run: completes block 0 and 1, then abruptly stops (no manual flush)
-        {
-            let mut tracker = StateTracker::new(
-                &mut footer,
-                layout.bitfield_offset,
-                layout.num_blocks,
-                client.info.size,
-            );
-            tracker.on_bytes_decrypted(0, 0, 2 * BLOCK_SIZE);
-        }
-
-        // Validate that footer is immediately valid and recognizes blocks 0 and 1
-        let mut cursor = Cursor::new(vec![0u8; 10 * 1024 * 1024]);
-        cursor.seek(SeekFrom::End(0)).unwrap();
-        cursor.write_all(&footer).unwrap();
-        let parsed = ParsedFooter::read_and_validate(&mut cursor, &client)
-            .expect("Must be valid immediately after abrupt interruption");
-        assert_eq!(parsed.bitfield[0] & 0b11, 0b11);
-        let uncompleted =
-            extract_uncompleted_ranges(&parsed.bitfield, parsed.num_blocks, client.info.size);
-        assert_eq!(
-            uncompleted,
-            vec![ByteRange {
-                start: 2 * BLOCK_SIZE as u64,
-                end: 10 * 1024 * 1024,
-            }]
-        );
-
-        // Second run: resumes and completes block 2 abruptly
+        // Second run: resumes and completes block 2
         {
             let mut tracker = StateTracker::new(
                 &mut footer,
@@ -985,20 +968,6 @@ mod tests {
             tracker.on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE);
         }
 
-        let mut cursor = Cursor::new(vec![0u8; 10 * 1024 * 1024]);
-        cursor.seek(SeekFrom::End(0)).unwrap();
-        cursor.write_all(&footer).unwrap();
-        let parsed2 = ParsedFooter::read_and_validate(&mut cursor, &client)
-            .expect("Must be valid after second resume");
-        assert_eq!(parsed2.bitfield[0] & 0b111, 0b111);
-        let uncompleted2 =
-            extract_uncompleted_ranges(&parsed2.bitfield, parsed2.num_blocks, client.info.size);
-        assert_eq!(
-            uncompleted2,
-            vec![ByteRange {
-                start: 3 * BLOCK_SIZE as u64,
-                end: 10 * 1024 * 1024,
-            }]
-        );
+        assert_eq!(validate(&footer), (vec![0b111], vec![range(3)]));
     }
 }

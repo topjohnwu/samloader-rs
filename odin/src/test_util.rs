@@ -18,6 +18,7 @@ use crate::firmware::Lz4FrameHeader;
 use crate::session::{OdinConnection, OdinSession};
 use crate::usb::MockBackend;
 use futures::io::Cursor;
+use lz4_flex::frame::BlockSize;
 use samloader_pit::{PitData, PitEntry};
 
 /// PIT of an A/B device (SM-F968B).
@@ -72,12 +73,18 @@ pub(crate) fn build_tar(files: &[(&str, &[u8])]) -> Vec<u8> {
 /// Compresses `data` into an LZ4 frame with 1 MiB independent blocks, like Samsung
 /// firmware, returning the frame and its parsed header.
 pub(crate) fn lz4_compress(data: &[u8]) -> (Vec<u8>, Lz4FrameHeader) {
-    use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
+    lz4_compress_with(data, BlockSize::Max1MB)
+}
+
+/// Compresses `data` into an LZ4 frame with independent blocks of `block_size`,
+/// returning the frame and its parsed header.
+pub(crate) fn lz4_compress_with(data: &[u8], block_size: BlockSize) -> (Vec<u8>, Lz4FrameHeader) {
+    use lz4_flex::frame::{BlockMode, FrameEncoder, FrameInfo};
     use std::io::Write;
 
     let info = FrameInfo::new()
         .content_size(Some(data.len() as u64))
-        .block_size(BlockSize::Max1MB)
+        .block_size(block_size)
         .block_mode(BlockMode::Independent);
     let mut encoder = FrameEncoder::with_frame_info(info, Vec::new());
     encoder.write_all(data).unwrap();

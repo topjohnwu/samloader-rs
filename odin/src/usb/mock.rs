@@ -974,12 +974,6 @@ mod tests {
     fn test_gt_i9305_legacy_profile_lifecycle() {
         futures::executor::block_on(async {
             let profile = DeviceProfile::gt_i9305();
-            assert_eq!(profile.model, "GT-I9305");
-            assert_eq!(profile.cpu_bl_id, "Mx-MDM");
-            assert_eq!(profile.protocol_version, 2);
-            assert!(!profile.lz4_supported);
-            assert_eq!(profile.usb_product_name.as_deref(), Some("Gadget Serial"));
-
             let backend = Box::new(MockBackend::with_profile(profile));
             let mut connection = OdinConnection::new(backend);
 

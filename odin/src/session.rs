@@ -46,6 +46,12 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Timeout of trailing empty packets (ZLPs) and reads that may not happen.
 const EMPTY_PACKET_TIMEOUT: Duration = Duration::from_millis(100);
+/// Wait after a session begins, before it is configured.
+#[cfg(not(test))]
+const SESSION_SETUP_DELAY: Duration = Duration::from_secs(3);
+/// Unit tests only talk to the mock backend, so they skip the wait.
+#[cfg(test)]
+const SESSION_SETUP_DELAY: Duration = Duration::ZERO;
 
 impl OdinConnection {
     /// Opens a device in Download Mode with the selected backend. If `wait` is
@@ -200,7 +206,7 @@ impl OdinSession {
         };
 
         progress::on_event(FlashEvent::SessionSetup);
-        futures_timer::Delay::new(Duration::from_secs(3)).await;
+        futures_timer::Delay::new(SESSION_SETUP_DELAY).await;
 
         if session.bootloader_protocol_version >= 2 {
             session.lz4_supported = (session_response & 0x8000) != 0;
@@ -774,48 +780,6 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn test_odin_mock_multi_slice_transfer() {
-        futures::executor::block_on(async {
-            let mut session = mock_session(MockBackend::new()).await;
-
-            let pit_entry = PitEntry {
-                binary_type: samloader_pit::BinaryType::ApplicationProcessor,
-                device_type: samloader_pit::DeviceType::MMC,
-                partition_id: 20,
-                attributes: Default::default(),
-                update_attributes: Default::default(),
-                start_block: 0,
-                block_count: 0,
-                file_offset: 0,
-                file_size: 0,
-                partition_name: Default::default(),
-                flash_filename: Default::default(),
-                fota_filename: Default::default(),
-            };
-
-            // 2 slices of 128 KB each (matching MockBackend packet_size)
-            let seq1 = vec![0xAAu8; 0x20000];
-            let seq2 = vec![0xBBu8; 0x20000];
-            let slices =
-                futures::stream::iter(vec![Ok::<_, std::io::Error>(seq1.clone()), Ok(seq2)]);
-
-            assert!(session.send_partition(&pit_entry, slices).await.is_ok());
-
-            // Verify a mid-stream read error aborts the transfer as a source error
-            let failing_slices = futures::stream::iter(vec![
-                Ok(seq1),
-                Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
-            ]);
-            assert!(matches!(
-                session.send_partition(&pit_entry, failing_slices).await,
-                Err(SendPartitionError::Source(_))
-            ));
-
-            assert!(session.close().await.is_ok());
-        });
-    }
-
-    #[test]
     fn test_send_partition_reads_next_slice_while_sending() {
         futures::executor::block_on(async {
             let backend = MockBackend::new();
@@ -856,6 +820,16 @@ mod tests {
                 .collect();
             assert_eq!(last, [false, false, true]);
 
+            // A mid-stream read error aborts the transfer as a source error
+            let failing_slices = futures::stream::iter([
+                Ok(vec![0u8; packet_size]),
+                Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+            ]);
+            assert!(matches!(
+                session.send_partition(pit_entry, failing_slices).await,
+                Err(SendPartitionError::Source(_))
+            ));
+
             assert!(session.close().await.is_ok());
         });
     }
@@ -894,24 +868,16 @@ mod tests {
     }
 
     #[test]
-    fn test_odin_mock_set_sales_code() {
-        futures::executor::block_on(async {
-            let mut session = mock_session(MockBackend::new()).await;
+    fn test_sales_code_parse() {
+        let code: SalesCode = "TUR".parse().unwrap();
+        assert_eq!(code.to_string(), "TUR");
 
-            let code: SalesCode = "TUR".parse().unwrap();
-            assert_eq!(code.to_string(), "TUR");
-            assert!(session.set_sales_code(code).await.is_ok());
-
-            // Verify invalid formats are rejected
-            for invalid in ["TU", "TUR1", "T-R"] {
-                assert!(matches!(
-                    invalid.parse::<SalesCode>(),
-                    Err(OdinError::InvalidSalesCode(_))
-                ));
-            }
-
-            assert!(session.close().await.is_ok());
-        });
+        for invalid in ["TU", "TUR1", "T-R"] {
+            assert!(matches!(
+                invalid.parse::<SalesCode>(),
+                Err(OdinError::InvalidSalesCode(_))
+            ));
+        }
     }
 
     #[test]
@@ -1014,94 +980,59 @@ mod tests {
     }
 
     #[test]
-    fn test_gadget_serial_sends_empty_packets_after_control_requests() {
-        futures::executor::block_on(async {
-            let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
-            let spy = Box::new(SpyTransfer {
-                inner: spy_inner.clone(),
-                product: Some("Gadget Serial".to_string()),
-            });
+    fn test_empty_packets_after_control_requests() {
+        // Returns the lengths of the packets sent for a control request, a data
+        // chunk, and a reboot request
+        let sent_lengths = |product: &str| {
+            futures::executor::block_on(async {
+                let spy_inner =
+                    std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
+                let spy = Box::new(SpyTransfer {
+                    inner: spy_inner.clone(),
+                    product: Some(product.to_string()),
+                });
 
-            let conn = OdinConnection::new(spy);
+                let mut session = OdinSession {
+                    connection: OdinConnection::new(spy),
+                    packet_size: 0x20000,
+                    slice_timeout: COMMAND_TIMEOUT,
+                    lz4_supported: false,
+                    bootloader_protocol_version: 2,
+                };
 
-            let mut session = OdinSession {
-                connection: conn,
-                packet_size: 0x20000,
-                slice_timeout: COMMAND_TIMEOUT,
-                lz4_supported: false,
-                bootloader_protocol_version: 2,
-            };
+                let mut lengths = Vec::new();
+                let mut take = || {
+                    let sent = std::mem::take(&mut spy_inner.lock().unwrap().sent_data);
+                    lengths.push(sent.iter().map(Vec::len).collect::<Vec<_>>());
+                };
 
-            // 1. Control request packet -> must send 1024 bytes followed by 0 bytes (ZLP)
-            let req = Command::begin_session();
-            assert!(session.send_command(&req, HANDSHAKE_TIMEOUT).await.is_ok());
+                let req = Command::begin_session();
+                assert!(session.send_command(&req, HANDSHAKE_TIMEOUT).await.is_ok());
+                take();
 
-            {
-                let inner = spy_inner.lock().unwrap();
-                assert_eq!(inner.sent_data.len(), 2);
-                assert_eq!(inner.sent_data[0].len(), 1024);
-                assert_eq!(inner.sent_data[1].len(), 0); // ZLP
-            }
+                let chunk_data = vec![0xABu8; 1024];
+                let chunk = DataChunk::new(&chunk_data, chunk_data.len());
+                assert!(session.send_chunk(&chunk, HANDSHAKE_TIMEOUT).await.is_ok());
+                take();
 
-            // 2. Data chunk -> must send raw chunk bytes with NO ZLP
-            let chunk_data = vec![0xABu8; 1024];
-            let chunk = DataChunk::new(&chunk_data, chunk_data.len());
-            assert!(session.send_chunk(&chunk, HANDSHAKE_TIMEOUT).await.is_ok());
+                assert!(session.reboot_device().await.is_ok());
+                take();
 
-            {
-                let inner = spy_inner.lock().unwrap();
-                assert_eq!(inner.sent_data.len(), 3);
-                assert_eq!(inner.sent_data[2].len(), 1024);
-            }
+                lengths
+            })
+        };
 
-            // 3. Reboot device -> must send reboot packet with trailing ZLP
-            assert!(session.reboot_device().await.is_ok());
-            {
-                let inner = spy_inner.lock().unwrap();
-                assert_eq!(inner.sent_data.len(), 5);
-                assert_eq!(inner.sent_data[3].len(), 1024);
-                assert_eq!(inner.sent_data[4].len(), 0); // trailing ZLP for reboot on S10!
-            }
-        });
-    }
-
-    #[test]
-    fn test_non_gadget_serial_skips_empty_packets() {
-        futures::executor::block_on(async {
-            let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
-            let spy = Box::new(SpyTransfer {
-                inner: spy_inner.clone(),
-                product: Some("MSM8996".to_string()),
-            });
-
-            let conn = OdinConnection::new(spy);
-
-            let mut session = OdinSession {
-                connection: conn,
-                packet_size: 0x20000,
-                slice_timeout: COMMAND_TIMEOUT,
-                lz4_supported: false,
-                bootloader_protocol_version: 2,
-            };
-
-            // 1. Control request packet -> only sends 1024 bytes, no ZLP
-            let req = Command::begin_session();
-            assert!(session.send_command(&req, HANDSHAKE_TIMEOUT).await.is_ok());
-
-            {
-                let inner = spy_inner.lock().unwrap();
-                assert_eq!(inner.sent_data.len(), 1);
-                assert_eq!(inner.sent_data[0].len(), 1024);
-            }
-
-            // 2. Reboot device -> sends 1024 bytes, no ZLP
-            assert!(session.reboot_device().await.is_ok());
-            {
-                let inner = spy_inner.lock().unwrap();
-                assert_eq!(inner.sent_data.len(), 2);
-                assert_eq!(inner.sent_data[1].len(), 1024);
-            }
-        });
+        // Gadget Serial: requests are followed by an empty packet (ZLP), but data
+        // chunks are not. The trailing ZLP after reboot is required on the S10.
+        assert_eq!(
+            sent_lengths("Gadget Serial"),
+            [vec![1024, 0], vec![1024], vec![1024, 0]]
+        );
+        // Other bootloaders never get empty packets
+        assert_eq!(
+            sent_lengths("MSM8996"),
+            [vec![1024], vec![1024], vec![1024]]
+        );
     }
 
     #[test]

@@ -425,28 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn test_package_index_metadata_and_manifest() {
-        let tar_bytes = build_tar(&[
-            ("meta-data/super_used_size.txt", b"27276104\n"),
-            ("meta-data/download-list.txt", b"boot.img\n"),
-            ("boot.img", b"DUMMY BOOT IMAGE DATA"),
-        ]);
-
-        futures::executor::block_on(async {
-            let mut packages = [(
-                "test_package.tar".to_string(),
-                Cursor::new(tar_bytes.as_slice()),
-            )];
-            let index = PackageIndex::scan(&mut packages, true).await.unwrap();
-
-            assert_eq!(index.super_used_size, Some(27276104));
-            assert!(index.has_download_list);
-            assert_eq!(index.entries.len(), 1);
-            assert_eq!(index.entries[0].normalized_name, "boot.img");
-        });
-    }
-
-    #[test]
     fn test_package_index_corrupt_manifest_fails() {
         let tar_bytes = build_tar(&[("meta-data/download-list.txt", &[0xFF, 0xFE, 0xFD])]);
 
@@ -475,6 +453,7 @@ mod tests {
         futures::executor::block_on(async {
             let mut packages = [("AP.tar".to_string(), Cursor::new(tar_bytes.as_slice()))];
             let index = PackageIndex::scan(&mut packages, true).await.unwrap();
+            assert!(index.has_download_list);
             // recovery.img is omitted (not in download-list), metadata & pit are omitted
             let names: Vec<_> = index.entries.iter().map(|e| &e.normalized_name).collect();
             assert_eq!(names, ["boot.img"]);

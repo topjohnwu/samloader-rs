@@ -314,26 +314,19 @@ mod tests {
     #[test]
     fn test_lz4_decompressed_slices_reseek_and_truncation() {
         use futures::StreamExt;
-        use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
-        use std::io::Write;
+        use lz4_flex::frame::BlockSize;
 
         // 150 KB payload spanning 3 independent 64 KB LZ4 blocks (64K + 64K + 22K)
         let original: Vec<u8> = (0..150 * 1024).map(|i| (i % 251) as u8).collect();
-
-        let mut frame_info = FrameInfo::new();
-        frame_info.block_mode = BlockMode::Independent;
-        frame_info.block_size = BlockSize::Max64KB;
-        frame_info.content_size = Some(original.len() as u64);
-
-        let mut encoder = FrameEncoder::with_frame_info(frame_info, Vec::new());
-        encoder.write_all(&original).unwrap();
-        let compressed = encoder.finish().unwrap();
+        let (compressed, header) =
+            crate::test_util::lz4_compress_with(&original, BlockSize::Max64KB);
+        assert_eq!(header.content_size, original.len() as u64);
+        assert_eq!(header.block_max_size, 64 * 1024);
 
         futures::executor::block_on(async {
             let mut cursor = futures::io::Cursor::new(compressed.as_slice());
-            let header = Lz4FrameHeader::parse(&mut cursor).await.unwrap();
-            assert_eq!(header.content_size, original.len() as u64);
-            assert_eq!(header.block_max_size, 64 * 1024);
+            // Start away from the frame, so opening the image must seek back to it
+            cursor.seek(SeekFrom::End(0)).await.unwrap();
 
             let image = FirmwareImage {
                 source: ImageSource::Image {

@@ -100,7 +100,8 @@ pub(crate) mod tests {
         u32::from_be_bytes(data[start..start + 4].try_into().unwrap())
     }
 
-    fn boot_image(vbmeta_offset: u64) -> Vec<u8> {
+    /// Builds a boot image with its vbmeta at `vbmeta_offset`, located by an AVB footer.
+    pub(crate) fn boot_image(vbmeta_offset: u64) -> Vec<u8> {
         let mut data = vec![0u8; 64 * 1024];
         let start = vbmeta_offset as usize;
         data[start..start + 4].copy_from_slice(AVB_MAGIC);

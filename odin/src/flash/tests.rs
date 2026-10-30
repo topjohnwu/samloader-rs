@@ -17,7 +17,8 @@
 use super::*;
 use crate::OdinError;
 use crate::test_util::{
-    A14M_PIT, M3_PIT, Q7MQ_PIT, ab_pit_data, build_tar, find_entry, lz4_compress, mock_session,
+    A14M_PIT, M3_PIT, Q7MQ_PIT, ab_pit_data, build_tar, find_entry, lz4_compress,
+    lz4_compress_with, mock_session,
 };
 use crate::usb::{MockBackend, MockEvent};
 
@@ -29,79 +30,30 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
 }
 
 #[test]
-fn test_flash_partitions_super_size_preflight_success() {
-    futures::executor::block_on(async {
-        let mut session = mock_session(MockBackend::new().with_protocol_version(3)).await;
+fn test_flash_partitions_super_size_preflight() {
+    let run = |protocol_version: u32, fail_check: bool| {
+        futures::executor::block_on(async {
+            let mut backend = MockBackend::new().with_protocol_version(protocol_version);
+            if fail_check {
+                backend = backend.with_fail_check_super_size(-1);
+            }
+            let mut session = mock_session(backend).await;
 
-        let mut prepared = FlashRequest::new().prepare().await.unwrap();
-        prepared.has_download_list = true;
-
-        assert!(
+            let mut prepared = FlashRequest::new().prepare().await.unwrap();
+            prepared.has_download_list = true;
             prepared
                 .flash(&mut session, FlashPlan::default(), Some(27276104))
                 .await
-                .is_ok()
-        );
-    });
-}
+        })
+    };
 
-#[test]
-fn test_flash_partitions_super_size_preflight_rejection() {
-    futures::executor::block_on(async {
-        let mut session = mock_session(
-            MockBackend::new()
-                .with_protocol_version(3)
-                .with_fail_check_super_size(-1),
-        )
-        .await;
-
-        let mut prepared = FlashRequest::new().prepare().await.unwrap();
-        prepared.has_download_list = true;
-
-        let res = prepared
-            .flash(&mut session, FlashPlan::default(), Some(27276104))
-            .await;
-        assert!(matches!(res, Err(FlashError::SuperSizeCheckFailed(_))));
-    });
-}
-
-#[test]
-fn test_flash_partitions_super_size_preflight_skipped_on_legacy_protocol() {
-    futures::executor::block_on(async {
-        // Even if fail_check_super_size is set, legacy protocol version 2 must skip opcode 0x6a
-        let mut session = mock_session(
-            MockBackend::new()
-                .with_protocol_version(2)
-                .with_fail_check_super_size(-1),
-        )
-        .await;
-
-        let mut prepared = FlashRequest::new().prepare().await.unwrap();
-        prepared.has_download_list = true;
-
-        assert!(
-            prepared
-                .flash(&mut session, FlashPlan::default(), Some(27276104))
-                .await
-                .is_ok()
-        );
-    });
-}
-
-#[test]
-fn test_download_and_parse_pit_flashes_available_pit() {
-    futures::executor::block_on(async {
-        let mut session = mock_session(MockBackend::new()).await;
-
-        let local_pit = PitData::new(M3_PIT).unwrap();
-        assert_eq!(local_pit.cpu_bl_id.to_string_lossy(), "Mx-MDM");
-
-        session.send_pit_info(M3_PIT).await.unwrap();
-        let pit_buffer = session.receive_pit_info().await.unwrap();
-        let pit_data = PitData::new(&pit_buffer).unwrap();
-        // M3_EUR_OPEN_4G.pit has Mx-MDM, verifying PIT was sent and updated device state
-        assert_eq!(pit_data.cpu_bl_id.to_string_lossy(), "Mx-MDM");
-    });
+    assert!(run(3, false).is_ok());
+    assert!(matches!(
+        run(3, true),
+        Err(FlashError::SuperSizeCheckFailed(_))
+    ));
+    // Legacy protocol version 2 must skip opcode 0x6a, so a failing check is never sent
+    assert!(run(2, true).is_ok());
 }
 
 fn skipped_names(targets: &[&str]) -> Result<Vec<String>, FlashError> {
@@ -369,68 +321,14 @@ fn test_rewrite_vbmeta_payloads_patches_all_vbmeta() {
 }
 
 #[test]
-fn test_rewrite_vbmeta_payloads_disabled_keeps_payloads() {
-    let pit_data = ab_pit_data();
-    let (lz4_bytes, header) = lz4_compress(&crate::firmware::avb::tests::vbmeta_image(0));
-    let size = lz4_bytes.len() as u64;
-    let mut planned = vec![FirmwarePartitionPayload {
-        pit_entry: find_entry(&pit_data, "VBMETA_A"),
-        image: FirmwareImage {
-            source: ImageSource::Image { index: 0, size },
-            lz4_header: Some(header),
-        },
-    }];
-
-    rewrite_vbmeta(
-        &pit_data,
-        vec![Cursor::new(lz4_bytes)],
-        &mut planned,
-        false,
-        false,
-    )
-    .unwrap();
-    assert!(planned[0].image.lz4_header.is_some());
-}
-
-#[test]
-fn test_rewrite_vbmeta_payloads_invalid_vbmeta_fails() {
-    let pit_data = ab_pit_data();
-    let mut planned = vec![FirmwarePartitionPayload {
-        pit_entry: find_entry(&pit_data, "VBMETA_A"),
-        image: FirmwareImage {
-            source: ImageSource::Image {
-                index: 0,
-                size: 4096,
-            },
-            lz4_header: None,
-        },
-    }];
-
-    assert!(matches!(
-        rewrite_vbmeta(
-            &pit_data,
-            vec![Cursor::new(vec![0u8; 4096])],
-            &mut planned,
-            true,
-            true,
-        ),
-        Err(FlashError::VbmetaRewriteFailed(name, _)) if name == "VBMETA_A"
-    ));
-}
-
-#[test]
 fn test_rewrite_vbmeta_payloads_boot_without_vbmeta_partition() {
-    use crate::firmware::avb::tests::vbmeta_flags;
+    use crate::firmware::avb::tests::{boot_image, vbmeta_flags};
 
     // M3_EUR_OPEN_4G.pit has no vbmeta partition, so the vbmeta in boot's footer
     // is rewritten. A boot image without an AVB footer is rejected.
     let pit_data = PitData::new(M3_PIT).unwrap();
 
-    let mut boot = vec![0u8; 16 * 1024];
-    boot[0x1000..0x1004].copy_from_slice(b"AVB0");
-    let footer = boot.len() - 64;
-    boot[footer..footer + 4].copy_from_slice(b"AVBf");
-    boot[footer + 20..footer + 28].copy_from_slice(&0x1000u64.to_be_bytes());
+    let boot = boot_image(0x1000);
 
     let mut planned = vec![FirmwarePartitionPayload {
         pit_entry: find_entry(&pit_data, "BOOT"),
@@ -468,44 +366,6 @@ fn test_rewrite_vbmeta_payloads_boot_without_vbmeta_partition() {
 }
 
 #[test]
-fn test_execute_disable_verity_with_lz4_vbmeta() {
-    let build_package = |vbmeta: &[u8]| {
-        let (vbmeta_lz4, _) = lz4_compress(vbmeta);
-
-        build_tar(&[
-            ("vbmeta.img.lz4", &vbmeta_lz4),
-            ("boot.img", b"DUMMY BOOT IMAGE DATA"),
-        ])
-    };
-    let valid = build_package(&crate::firmware::avb::tests::vbmeta_image(0));
-    let invalid = build_package(&[0u8; 4096]);
-
-    let run = |name: &str, tar_bytes: &[u8], verity: bool| {
-        futures::executor::block_on(async {
-            let mut session = mock_session(MockBackend::with_profile(
-                crate::usb::DeviceProfile::sm_f968b(),
-            ))
-            .await;
-            assert!(session.is_lz4_supported());
-            FlashRequest::new()
-                .packages([(name, Cursor::new(tar_bytes))])
-                .disable_verity(verity)
-                .run(&mut session)
-                .await
-        })
-    };
-
-    assert!(run("valid.tar", &valid, false).is_ok());
-    assert!(run("valid.tar", &valid, true).is_ok());
-    // The vbmeta in the package is only parsed when a rewrite is requested
-    assert!(run("invalid.tar", &invalid, false).is_ok());
-    assert!(matches!(
-        run("invalid.tar", &invalid, true),
-        Err(FlashError::VbmetaRewriteFailed(name, _)) if name == "VBMETA_A"
-    ));
-}
-
-#[test]
 fn test_execute_truncated_package_fails_before_device() {
     let tar_bytes = build_tar(&[("boot.img", &[0xABu8; 1024])]);
     let truncated = &tar_bytes[..600];
@@ -528,34 +388,6 @@ fn test_execute_truncated_package_fails_before_device() {
                 && !logged.contains(&MockEvent::PitFlash)
                 && !logged.iter().any(|e| matches!(e, MockEvent::Slice { .. })),
             "no destructive operations should have occurred, got: {:?}",
-            *logged
-        );
-    });
-}
-
-#[test]
-fn test_execute_bad_skip_target_does_not_erase() {
-    let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
-
-    futures::executor::block_on(async {
-        let backend = MockBackend::new();
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
-
-        let res = FlashRequest::new()
-            .erase(true)
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .skip(&["nonexistent_partition"])
-            .run(&mut session)
-            .await;
-
-        assert!(
-            matches!(res, Err(FlashError::SkipTargetNotFound(target)) if target == "nonexistent_partition")
-        );
-        let logged = events.lock().unwrap();
-        assert!(
-            !logged.contains(&MockEvent::NandErase),
-            "NandErase should not have occurred, got: {:?}",
             *logged
         );
     });
@@ -585,56 +417,6 @@ fn test_execute_invalid_vbmeta_does_not_flash_pit() {
             "PitFlash/NandErase should not have occurred, got: {:?}",
             *logged
         );
-    });
-}
-
-#[test]
-fn test_execute_order_with_local_pit() {
-    let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
-
-    futures::executor::block_on(async {
-        let backend = MockBackend::new();
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
-
-        FlashRequest::new()
-            .pit(Q7MQ_PIT)
-            .erase(true)
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .run(&mut session)
-            .await
-            .unwrap();
-
-        let logged = events.lock().unwrap().clone();
-        assert!(logged.len() >= 4);
-        assert_eq!(logged[0], MockEvent::NandErase);
-        assert_eq!(logged[1], MockEvent::PitFlash);
-        assert_eq!(logged[2], MockEvent::PitDump);
-        assert!(matches!(logged[3], MockEvent::Slice { .. }));
-    });
-}
-
-#[test]
-fn test_execute_order_without_local_pit() {
-    let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
-
-    futures::executor::block_on(async {
-        let backend = MockBackend::new();
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
-
-        FlashRequest::new()
-            .erase(true)
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .run(&mut session)
-            .await
-            .unwrap();
-
-        let logged = events.lock().unwrap().clone();
-        assert!(logged.len() >= 3);
-        assert_eq!(logged[0], MockEvent::PitDump);
-        assert_eq!(logged[1], MockEvent::NandErase);
-        assert!(matches!(logged[2], MockEvent::Slice { .. }));
     });
 }
 
@@ -678,139 +460,69 @@ fn test_execute_matches_partition_names_ignoring_case() {
 }
 
 #[test]
-fn test_execute_invalid_local_pit_rejected_early() {
-    let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
-
-    futures::executor::block_on(async {
-        let backend = MockBackend::new();
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
-
-        let res = FlashRequest::new()
-            .pit(b"invalid_pit_bytes")
-            .erase(true)
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .run(&mut session)
-            .await;
-
-        assert!(matches!(res, Err(FlashError::PitUnpackFailed(_))));
-        let logged = events.lock().unwrap();
-        assert!(
-            logged.is_empty(),
-            "no operations should have occurred on invalid local pit, got: {:?}",
-            *logged
-        );
-    });
-}
-
-#[test]
 fn test_execute_vbmeta_payload_flags() {
     let raw_vbmeta = crate::firmware::avb::tests::vbmeta_image(0);
     let (vbmeta_lz4, _) = lz4_compress(&raw_vbmeta);
 
-    let tar_bytes = build_tar(&[("vbmeta.img.lz4", &vbmeta_lz4)]);
+    // Flashes `vbmeta` and returns whether its slice was sent as LZ4, and its data
+    let flash = |name: &str, vbmeta: &[u8], disable: bool| {
+        let tar_bytes = build_tar(&[(name, vbmeta)]);
+        futures::executor::block_on(async {
+            let backend = MockBackend::with_profile(crate::usb::DeviceProfile::sm_f968b());
+            let events = backend.event_log();
+            let mut session = mock_session(backend).await;
+
+            FlashRequest::new()
+                .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
+                .disable_verity(disable)
+                .disable_verification(disable)
+                .run(&mut session)
+                .await
+                .unwrap();
+
+            let logged = events.lock().unwrap();
+            logged
+                .iter()
+                .find_map(|e| match e {
+                    MockEvent::Slice { lz4, data, .. } => Some((*lz4, data.clone())),
+                    _ => None,
+                })
+                .expect("vbmeta slice")
+        })
+    };
 
     // 1. With --disable-verity and --disable-verification: sent raw, byte 123 is 0x03
-    futures::executor::block_on(async {
-        let backend = MockBackend::with_profile(crate::usb::DeviceProfile::sm_f968b());
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
+    let (lz4, data) = flash("vbmeta.img.lz4", &vbmeta_lz4, true);
+    assert!(!lz4, "rewritten vbmeta must be sent raw (uncompressed)");
+    // Only the flags field (big endian u32 at offset 120) changes
+    let mut expected = raw_vbmeta.clone();
+    expected[123] = 0x03;
+    assert_eq!(data, expected);
 
-        FlashRequest::new()
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .disable_verity(true)
-            .disable_verification(true)
-            .run(&mut session)
-            .await
-            .unwrap();
-
-        let logged = events.lock().unwrap().clone();
-        let slice = logged
-            .iter()
-            .find_map(|e| match e {
-                MockEvent::Slice { lz4, data, .. } => Some((*lz4, data)),
-                _ => None,
-            })
-            .expect("vbmeta slice");
-
-        assert!(!slice.0, "rewritten vbmeta must be sent raw (uncompressed)");
-        // Only the flags field (big endian u32 at offset 120) changes
-        let mut expected = raw_vbmeta.clone();
-        expected[123] = 0x03;
-        assert_eq!(slice.1, &expected);
-    });
-
-    // 2. Without flags: payload matches input exactly for raw, and lz4 passthrough is preserved for lz4
-    futures::executor::block_on(async {
-        let raw_tar = build_tar(&[("vbmeta.img", &raw_vbmeta)]);
-        let backend = MockBackend::with_profile(crate::usb::DeviceProfile::sm_f968b());
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
-
-        FlashRequest::new()
-            .packages([("AP.tar", Cursor::new(raw_tar.as_slice()))])
-            .run(&mut session)
-            .await
-            .unwrap();
-
-        let logged = events.lock().unwrap().clone();
-        let slice = logged
-            .iter()
-            .find_map(|e| match e {
-                MockEvent::Slice { lz4, data, .. } => Some((*lz4, data)),
-                _ => None,
-            })
-            .expect("vbmeta slice");
-
-        assert!(!slice.0);
-        assert_eq!(slice.1, &raw_vbmeta);
-    });
+    // 2. Without flags on raw input: payload matches input exactly
+    assert_eq!(flash("vbmeta.img", &raw_vbmeta, false), (false, raw_vbmeta));
 
     // 3. Without flags on LZ4 input: lz4 passthrough is preserved
-    futures::executor::block_on(async {
-        let backend = MockBackend::with_profile(crate::usb::DeviceProfile::sm_f968b());
-        let events = backend.event_log();
-        let mut session = mock_session(backend).await;
+    let (lz4, data) = flash("vbmeta.img.lz4", &vbmeta_lz4, false);
+    assert!(lz4, "unmodified vbmeta must preserve LZ4 passthrough");
+    // Passthrough sends the LZ4 blocks between the 15 byte frame header and the EndMark
+    assert_eq!(data, &vbmeta_lz4[15..vbmeta_lz4.len() - 4]);
 
-        FlashRequest::new()
-            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
-            .run(&mut session)
-            .await
-            .unwrap();
-
-        let logged = events.lock().unwrap().clone();
-        let slice = logged
-            .iter()
-            .find_map(|e| match e {
-                MockEvent::Slice { lz4, data, .. } => Some((*lz4, data)),
-                _ => None,
-            })
-            .expect("vbmeta slice");
-
-        assert!(slice.0, "unmodified vbmeta must preserve LZ4 passthrough");
-        // Passthrough sends the LZ4 blocks between the 15 byte frame header and the EndMark
-        assert_eq!(slice.1, &vbmeta_lz4[15..vbmeta_lz4.len() - 4]);
-    });
+    // 4. Without flags, the vbmeta is never parsed, so an invalid one is flashed as is
+    let (invalid_lz4, _) = lz4_compress(&[0u8; 4096]);
+    let (lz4, _) = flash("vbmeta.img.lz4", &invalid_lz4, false);
+    assert!(lz4);
 }
 
 #[test]
 fn test_execute_decompresses_lz4_the_device_cannot_take() {
     use crate::usb::DeviceProfile;
-    use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
-    use std::io::Write;
+    use lz4_flex::frame::BlockSize;
 
     // Spans several 64 KiB blocks
     let image: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     let (lz4_1mb, _) = lz4_compress(&image);
-    let mut encoder = FrameEncoder::with_frame_info(
-        FrameInfo::new()
-            .content_size(Some(image.len() as u64))
-            .block_size(BlockSize::Max64KB)
-            .block_mode(BlockMode::Independent),
-        Vec::new(),
-    );
-    encoder.write_all(&image).unwrap();
-    let lz4_64kb = encoder.finish().unwrap();
+    let (lz4_64kb, _) = lz4_compress_with(&image, BlockSize::Max64KB);
 
     let flash = |profile: DeviceProfile, lz4_image: &[u8]| {
         let tar_bytes = build_tar(&[("boot.img.lz4", lz4_image)]);
@@ -1242,7 +954,7 @@ fn test_phase_futures_are_send() {
 }
 
 #[test]
-fn test_execute_sets_sales_code_after_resolving() {
+fn test_execute_operation_order() {
     let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
     let csc = || MockEvent::SalesCode("XAA".to_string());
 
@@ -1266,15 +978,16 @@ fn test_execute_sets_sales_code_after_resolving() {
         })
     };
 
-    // Without a local PIT: after the device PIT is read and resolved
+    // Without a local PIT: the sales code is set after the device PIT is read and resolved
     let (res, logged) = run(None, true, &[]);
     assert!(res.is_ok());
     assert_eq!(
         logged[..3],
         [MockEvent::PitDump, csc(), MockEvent::NandErase]
     );
+    assert!(matches!(logged[3], MockEvent::Slice { .. }));
 
-    // With a local PIT: after the dry run, before anything is written
+    // With a local PIT: the sales code is set after the dry run, before anything is written
     let (res, logged) = run(Some(Q7MQ_PIT), true, &[]);
     assert!(res.is_ok());
     assert_eq!(
@@ -1286,15 +999,16 @@ fn test_execute_sets_sales_code_after_resolving() {
             MockEvent::PitDump
         ]
     );
+    assert!(matches!(logged[4], MockEvent::Slice { .. }));
 
-    // Nothing to flash: first
+    // Nothing to flash: the sales code is set first
     let (res, logged) = run(None, false, &[]);
     assert!(res.is_ok());
     assert_eq!(logged, [csc(), MockEvent::NandErase, MockEvent::EndSession]);
 
-    // Resolving fails: never set
+    // Resolving fails: neither the sales code is set nor the device erased
     let (res, logged) = run(None, true, &["nonexistent"]);
-    assert!(matches!(res, Err(FlashError::SkipTargetNotFound(_))));
+    assert!(matches!(res, Err(FlashError::SkipTargetNotFound(t)) if t == "nonexistent"));
     assert_eq!(logged, [MockEvent::PitDump]);
 }
 

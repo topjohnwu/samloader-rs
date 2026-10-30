@@ -461,32 +461,16 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mock_pit_entry(
-        binary_type: BinaryType,
-        device_type: DeviceType,
-        partition_id: u32,
-    ) -> PitEntry {
-        PitEntry {
-            binary_type,
-            device_type,
-            partition_id,
-            attributes: Default::default(),
-            update_attributes: Default::default(),
-            start_block: 0,
-            block_count: 0,
-            file_offset: 0,
-            file_size: 0,
-            partition_name: Default::default(),
-            flash_filename: Default::default(),
-            fota_filename: Default::default(),
-        }
-    }
+    use samloader_pit::PitData;
 
     #[test]
     fn test_slice_commit_layout_selection() {
-        let modem_entry = mock_pit_entry(BinaryType::CommunicationProcessor, DeviceType::UFS, 80);
-        let ap_entry = mock_pit_entry(BinaryType::ApplicationProcessor, DeviceType::MMC, 20);
+        // The test PITs only have AP partitions, so one of them stands in for a modem
+        let mut entries = PitData::new(crate::test_util::M3_PIT).unwrap().entries;
+        let ap_entry = entries.pop().unwrap();
+        let mut modem_entry = entries.pop().unwrap();
+        modem_entry.binary_type = BinaryType::CommunicationProcessor;
+        let (modem_id, ap_id) = (modem_entry.partition_id, ap_entry.partition_id);
 
         // Modern protocol (>= 3): CP/Modem uses Unified layout
         let modern_cp = SliceCommit::new(0x1E00000, &modem_entry, true, 3);
@@ -494,10 +478,10 @@ mod tests {
             modern_cp,
             SliceCommit::Unified {
                 slice_size: 0x1E00000,
-                partition_id: 80,
+                partition_id,
                 is_end_of_file: 1,
                 ..
-            }
+            } if partition_id == modem_id
         ));
 
         // Legacy protocol (< 3): CP/Modem uses LegacyModem layout
@@ -506,10 +490,10 @@ mod tests {
             legacy_cp,
             SliceCommit::LegacyModem {
                 slice_size: 0x100000,
-                partition_id: 80,
+                partition_id,
                 is_end_of_file: 1,
                 ..
-            }
+            } if partition_id == modem_id
         ));
 
         // ApplicationProcessor always uses Unified layout even on legacy protocol
@@ -517,10 +501,10 @@ mod tests {
         assert!(matches!(
             legacy_ap,
             SliceCommit::Unified {
-                partition_id: 20,
+                partition_id,
                 is_end_of_file: 0,
                 ..
-            }
+            } if partition_id == ap_id
         ));
     }
 
