@@ -156,6 +156,18 @@ impl OdinConnection {
     }
 }
 
+/// Specifies the device reboot behavior after a session ends.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum RebootMode {
+    /// Do not reboot the device; end the session and remain in download mode.
+    #[default]
+    None,
+    /// Reboot the device normally out of Download Mode.
+    Normal,
+    /// Reboot the device back into Download Mode.
+    Download,
+}
+
 /// An active flashing session coordinating Samsung Odin/Loke command transfers.
 pub struct OdinSession {
     connection: OdinConnection,
@@ -222,13 +234,35 @@ impl OdinSession {
         Ok(())
     }
 
+    /// Ends the session, then reboots the device as requested.
+    ///
+    /// Like Heimdall, the session is always ended before rebooting, so the
+    /// bootloader completes the session before the device goes down. The
+    /// reboot is attempted even if ending the session fails, and the first
+    /// error is returned.
+    pub async fn finish(&mut self, reboot_mode: RebootMode) -> Result<(), OdinError> {
+        let ended = self.end_session().await;
+        let rebooted = match reboot_mode {
+            RebootMode::Normal => self.reboot_device().await,
+            RebootMode::Download => self.reboot_to_download().await,
+            RebootMode::None => Ok(()),
+        };
+        ended.and(rebooted)
+    }
+
     /// Reboots the device normally out of Download Mode.
+    ///
+    /// This does not end the session first; use [`finish`](Self::finish) to
+    /// end the session and reboot.
     pub async fn reboot_device(&mut self) -> Result<(), OdinError> {
         self.reboot_with_command(&Command::reboot_device(), "Rebooting device...")
             .await
     }
 
     /// Reboots the device back into Download Mode.
+    ///
+    /// This does not end the session first; use [`finish`](Self::finish) to
+    /// end the session and reboot.
     pub async fn reboot_to_download(&mut self) -> Result<(), OdinError> {
         self.reboot_with_command(
             &Command::reboot_to_download(),
@@ -844,6 +878,19 @@ mod tests {
             ));
 
             assert!(session.close().await.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_finish_reboots_even_if_ending_fails() {
+        futures::executor::block_on(async {
+            let backend = MockBackend::new().with_fail_end_session(-1);
+            let log = backend.event_log();
+            let mut session = mock_session(backend).await;
+
+            let res = session.finish(RebootMode::Normal).await;
+            assert!(matches!(res, Err(OdinError::Loke(_))));
+            assert_eq!(*log.lock().unwrap(), [MockEvent::Reboot]);
         });
     }
 

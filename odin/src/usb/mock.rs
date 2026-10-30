@@ -85,6 +85,12 @@ pub enum MockEvent {
         /// The received payload data, truncated to the announced slice size.
         data: Vec<u8>,
     },
+    /// Session ended successfully (0x67, subcommand 0).
+    EndSession,
+    /// Reboot into normal mode requested (0x67, subcommand 1).
+    Reboot,
+    /// Reboot into Download Mode requested (0x67, subcommand 2).
+    RebootToDownload,
 }
 
 /// Target hardware, partition table, and protocol characteristics of a simulated Samsung device.
@@ -823,12 +829,20 @@ impl UsbTransfer for MockBackend {
                                         self.push_response(STATUS_FAIL, err as u32);
                                     } else {
                                         self.state = State::HandshakeComplete;
+                                        self.event_log.lock().unwrap().push(MockEvent::EndSession);
                                         self.push_response(CMD_CLOSE_CONNECTION, 0);
                                     }
                                 }
-                                CloseConnectionCommand::RebootDevice
-                                | CloseConnectionCommand::RebootDownload => {
+                                CloseConnectionCommand::RebootDevice => {
                                     self.state = State::Uninitialized;
+                                    self.event_log.lock().unwrap().push(MockEvent::Reboot);
+                                }
+                                CloseConnectionCommand::RebootDownload => {
+                                    self.state = State::Uninitialized;
+                                    self.event_log
+                                        .lock()
+                                        .unwrap()
+                                        .push(MockEvent::RebootToDownload);
                                 }
                             },
                             Command::DynamicPartition(dp_cmd) => {

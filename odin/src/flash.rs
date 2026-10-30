@@ -22,23 +22,11 @@ use crate::firmware::{
     verify_md5_footer,
 };
 use crate::progress::{self, FlashEvent};
-use crate::session::{MAX_SLICE_SIZE, OdinSession, parse_sales_code};
+use crate::session::{MAX_SLICE_SIZE, OdinSession, RebootMode, parse_sales_code};
 use futures::io::{AsyncRead, AsyncSeek, AsyncSeekExt, Cursor};
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
 use std::io::SeekFrom;
-
-/// Specifies the device reboot behavior after a flash session concludes.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum RebootMode {
-    /// Do not reboot the device; end the session and remain in download mode.
-    #[default]
-    None,
-    /// Reboot the device normally out of Download Mode.
-    Normal,
-    /// Reboot the device back into Download Mode.
-    Download,
-}
 
 /// Options carried from a [`FlashRequest`] into execution.
 #[derive(Default)]
@@ -487,11 +475,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
     pub async fn execute(mut self, session: &mut OdinSession) -> Result<(), FlashError> {
         if self.is_empty() {
             self.prepare_device(session).await?;
-            match self.options.reboot_mode {
-                RebootMode::Normal => session.reboot_device().await?,
-                RebootMode::Download => session.reboot_to_download().await?,
-                RebootMode::None => session.end_session().await?,
-            }
+            session.finish(self.options.reboot_mode).await?;
             return Ok(());
         }
 
@@ -776,18 +760,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
             progress::on_event(FlashEvent::PartitionEnd(&name));
         }
 
-        session.end_session().await?;
-
-        match self.options.reboot_mode {
-            RebootMode::Normal => {
-                session.reboot_device().await?;
-            }
-            RebootMode::Download => {
-                session.reboot_to_download().await?;
-            }
-            RebootMode::None => {}
-        }
-
+        session.finish(self.options.reboot_mode).await?;
         Ok(())
     }
 }

@@ -14,9 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use samloader_odin::{
-    OdinConnection, OdinError, OdinSession, RebootMode, UsbBackendOption, create_backend,
-};
+use samloader_odin::{OdinConnection, OdinError, OdinSession, UsbBackendOption, create_backend};
 
 /// Connects to a device in Download Mode and begins an Odin session.
 pub(crate) async fn connect(
@@ -27,21 +25,4 @@ pub(crate) async fn connect(
     let mut connection = OdinConnection::new(usb);
     connection.init().await?;
     connection.begin_session().await
-}
-
-/// Ends the session and reboots the device as requested.
-///
-/// The reboot is attempted even if ending the session fails, and the first
-/// error is returned.
-pub(crate) async fn finish(
-    session: &mut OdinSession,
-    reboot_mode: RebootMode,
-) -> Result<(), OdinError> {
-    let ended = session.end_session().await;
-    let rebooted = match reboot_mode {
-        RebootMode::Normal => session.reboot_device().await,
-        RebootMode::Download => session.reboot_to_download().await,
-        RebootMode::None => Ok(()),
-    };
-    ended.and(rebooted)
 }

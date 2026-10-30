@@ -41,9 +41,9 @@ pub use device::{create_backend, detect_device, query_device_info, reboot_downlo
 pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::verify_md5_footer;
-pub use flash::{FlashRequest, PreparedFlash, RebootMode};
+pub use flash::{FlashRequest, PreparedFlash};
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
-pub use session::{OdinConnection, OdinSession};
+pub use session::{OdinConnection, OdinSession, RebootMode};
 pub use usb::{UsbBackend, UsbBackendOption, UsbTransfer};
 
 #[cfg(target_arch = "wasm32")]

@@ -1270,10 +1270,50 @@ fn test_execute_sets_sales_code_after_resolving() {
     // Nothing to flash: first
     let (res, logged) = run(None, false, &[]);
     assert!(res.is_ok());
-    assert_eq!(logged, [csc(), MockEvent::NandErase]);
+    assert_eq!(logged, [csc(), MockEvent::NandErase, MockEvent::EndSession]);
 
     // Resolving fails: never set
     let (res, logged) = run(None, true, &["nonexistent"]);
     assert!(matches!(res, Err(FlashError::SkipTargetNotFound(_))));
     assert_eq!(logged, [MockEvent::PitDump]);
+}
+
+#[test]
+fn test_execute_ends_session_before_rebooting() {
+    let tar_bytes = build_tar(&[("boot.img", b"DUMMY BOOT IMAGE DATA")]);
+
+    let run = |packages: bool, reboot_mode: RebootMode| {
+        futures::executor::block_on(async {
+            let backend = MockBackend::new();
+            let events = backend.event_log();
+            let mut session = mock_session(backend).await;
+
+            let packages = packages.then(|| ("AP.tar", Cursor::new(tar_bytes.as_slice())));
+            let res = FlashRequest::new()
+                .sales_code(Some("XAA"))
+                .reboot_mode(reboot_mode)
+                .packages(packages)
+                .run(&mut session)
+                .await;
+            assert!(res.is_ok());
+            let logged = events.lock().unwrap().clone();
+            logged[logged.len().saturating_sub(2)..].to_vec()
+        })
+    };
+
+    // Both the settings-only path and a full flash end the session first
+    for packages in [false, true] {
+        assert_eq!(
+            run(packages, RebootMode::Normal),
+            [MockEvent::EndSession, MockEvent::Reboot]
+        );
+        assert_eq!(
+            run(packages, RebootMode::Download),
+            [MockEvent::EndSession, MockEvent::RebootToDownload]
+        );
+        assert_eq!(
+            run(packages, RebootMode::None).last(),
+            Some(&MockEvent::EndSession)
+        );
+    }
 }

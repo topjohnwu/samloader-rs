@@ -15,7 +15,7 @@
 
 use crate::cli::{DumpPitArgs, OdinArgs, PrintPitArgs};
 use crate::progress::CliProgress;
-use crate::session::{connect, finish};
+use crate::session::connect;
 use samloader_odin::{UsbBackendOption, futures::executor::block_on, set_progress};
 use samloader_pit::PitData;
 use std::error::Error;
@@ -92,7 +92,7 @@ fn with_device_pit(
             Err(e) => Err(e.into()),
         };
 
-        let finished = finish(&mut session, odin.reboot_mode()).await;
+        let finished = session.finish(odin.reboot_mode()).await;
         handled?;
         Ok(finished?)
     })
