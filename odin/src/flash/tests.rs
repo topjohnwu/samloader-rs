@@ -849,6 +849,26 @@ fn test_execute_decompresses_lz4_the_device_cannot_take() {
 }
 
 #[test]
+fn test_execute_reports_read_errors_while_sending() {
+    use crate::usb::DeviceProfile;
+
+    // The frame header is intact, so prepare succeeds, but the blocks are cut
+    // short, so decompressing fails while the partition is being sent
+    let image: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let (lz4_image, _) = lz4_compress(&image);
+    let tar_bytes = build_tar(&[("boot.img.lz4", &lz4_image[..lz4_image.len() / 2])]);
+
+    let res = futures::executor::block_on(async {
+        let mut session = mock_session(MockBackend::with_profile(DeviceProfile::gt_i9305())).await;
+        FlashRequest::new()
+            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
+            .run(&mut session)
+            .await
+    });
+    assert!(matches!(res, Err(FlashError::FileReadFailed(name, _)) if name == "boot.img.lz4"));
+}
+
+#[test]
 fn test_execute_with_local_pit_reports_once() {
     #[derive(Clone, Default)]
     struct Collector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);

@@ -102,10 +102,20 @@ pub enum OdinError {
     /// Invalid sales code provided (must be 3 ASCII alphanumeric characters).
     #[error("Invalid sales code \"{0}\": must be 3 alphanumeric ASCII characters (e.g. BTU, XAA)")]
     InvalidSalesCode(String),
+}
 
-    /// An I/O error occurred while reading or decompressing firmware data.
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+/// An error from flashing a partition from a stream of slices with
+/// [`OdinSession::send_partition`](crate::OdinSession::send_partition) or
+/// [`OdinSession::send_lz4_partition`](crate::OdinSession::send_lz4_partition).
+#[derive(Error, Debug)]
+pub enum SendPartitionError<E> {
+    /// The stream failed to produce the next slice.
+    #[error("Failed to read the next slice: {0}")]
+    Source(#[source] E),
+
+    /// The device or the transfer failed.
+    #[error(transparent)]
+    Session(#[from] OdinError),
 }
 
 /// An error from a USB or serial transport.

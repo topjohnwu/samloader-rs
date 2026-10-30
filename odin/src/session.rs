@@ -16,7 +16,7 @@
 //! The Odin protocol connection and session with a device in Download Mode.
 
 use crate::device_info::{DeviceInfo, SessionDeviceInfo};
-use crate::error::{LokeError, OdinError, TransportError};
+use crate::error::{LokeError, OdinError, SendPartitionError, TransportError};
 use crate::progress;
 use crate::protocol::{CMD_PIT, Command, DataChunk, Response, STREAMING_CHUNK_ACK};
 use crate::usb::{UsbBackendOption, UsbTransfer, create_backend};
@@ -559,17 +559,21 @@ impl OdinSession {
     /// sent. This only overlaps reading with the USB transfer if the stream
     /// returns `Pending` while its I/O is in progress; a stream that blocks is
     /// read to completion before the current slice is started.
-    pub async fn send_partition<S, Bytes>(
+    pub async fn send_partition<S, Bytes, E>(
         &mut self,
         pit_entry: &PitEntry,
         slices: S,
-    ) -> Result<(), OdinError>
+    ) -> Result<(), SendPartitionError<E>>
     where
         Bytes: AsRef<[u8]>,
-        S: Stream<Item = std::io::Result<Bytes>>,
+        S: Stream<Item = Result<Bytes, E>>,
     {
         let mut slices = std::pin::pin!(slices);
-        let mut current = slices.next().await.transpose()?;
+        let mut current = slices
+            .next()
+            .await
+            .transpose()
+            .map_err(SendPartitionError::Source)?;
         while let Some(slice_data) = current {
             let slice_data = slice_data.as_ref();
             check_slice_size(slice_data.len())?;
@@ -584,7 +588,7 @@ impl OdinSession {
             )
             .await;
             sent?;
-            let next = next.transpose()?;
+            let next = next.transpose().map_err(SendPartitionError::Source)?;
 
             // Whether this is the last slice is only needed once the data is sent
             let end_cmd = Command::commit_slice(
@@ -608,16 +612,20 @@ impl OdinSession {
     /// Only valid if [`accepts_lz4_blocks`](Self::accepts_lz4_blocks) holds
     /// for the frame the slices come from. Like [`send_partition`](Self::send_partition),
     /// the next slice is read while the current one is being sent.
-    pub async fn send_lz4_partition<S>(
+    pub async fn send_lz4_partition<S, E>(
         &mut self,
         pit_entry: &PitEntry,
         slices: S,
-    ) -> Result<(), OdinError>
+    ) -> Result<(), SendPartitionError<E>>
     where
-        S: Stream<Item = std::io::Result<(usize, Vec<u8>)>>,
+        S: Stream<Item = Result<(usize, Vec<u8>), E>>,
     {
         let mut slices = std::pin::pin!(slices);
-        let mut current = slices.next().await.transpose()?;
+        let mut current = slices
+            .next()
+            .await
+            .transpose()
+            .map_err(SendPartitionError::Source)?;
         while let Some((decompressed_size, slice_data)) = current {
             check_slice_size(decompressed_size)?;
             let init_cmd = Command::transmit_flash(true);
@@ -634,7 +642,7 @@ impl OdinSession {
             )
             .await;
             sent?;
-            let next = next.transpose()?;
+            let next = next.transpose().map_err(SendPartitionError::Source)?;
 
             // Whether this is the last slice is only needed once the data is sent
             let end_cmd = Command::commit_slice(
@@ -790,18 +798,19 @@ mod tests {
             // 2 slices of 128 KB each (matching MockBackend packet_size)
             let seq1 = vec![0xAAu8; 0x20000];
             let seq2 = vec![0xBBu8; 0x20000];
-            let slices = futures::stream::iter(vec![Ok(seq1.clone()), Ok(seq2)]);
+            let slices =
+                futures::stream::iter(vec![Ok::<_, std::io::Error>(seq1.clone()), Ok(seq2)]);
 
             assert!(session.send_partition(&pit_entry, slices).await.is_ok());
 
-            // Verify a mid-stream I/O error aborts the transfer with OdinError::Io
+            // Verify a mid-stream read error aborts the transfer as a source error
             let failing_slices = futures::stream::iter(vec![
                 Ok(seq1),
                 Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
             ]);
             assert!(matches!(
                 session.send_partition(&pit_entry, failing_slices).await,
-                Err(OdinError::Io(_))
+                Err(SendPartitionError::Source(_))
             ));
 
             assert!(session.close().await.is_ok());
@@ -833,7 +842,7 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push((chunks.load(Ordering::Relaxed), committed));
-                    Ok(vec![idx; 2 * packet_size])
+                    Ok::<_, std::io::Error>(vec![idx; 2 * packet_size])
                 }
             });
             assert!(session.send_partition(pit_entry, slices).await.is_ok());
@@ -869,13 +878,16 @@ mod tests {
             ])]);
             assert!(matches!(
                 session.send_partition(pit_entry, slices).await,
-                Err(OdinError::SliceTooLarge { .. })
+                Err(SendPartitionError::Session(OdinError::SliceTooLarge { .. }))
             ));
 
-            let slices = futures::stream::iter([Ok((OdinSession::MAX_SLICE_SIZE + 1, vec![0u8]))]);
+            let slices = futures::stream::iter([Ok::<_, std::io::Error>((
+                OdinSession::MAX_SLICE_SIZE + 1,
+                vec![0u8],
+            ))]);
             assert!(matches!(
                 session.send_lz4_partition(pit_entry, slices).await,
-                Err(OdinError::SliceTooLarge { .. })
+                Err(SendPartitionError::Session(OdinError::SliceTooLarge { .. }))
             ));
 
             // Nothing reached the device

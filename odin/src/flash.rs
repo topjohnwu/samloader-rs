@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use crate::FlashError;
-use crate::error::OdinError;
+use crate::error::SendPartitionError;
 use crate::firmware::avb;
 use crate::firmware::{
     FirmwareImage, FirmwareReaders, ImageSource, PackageIndex, normalize_basename,
@@ -430,19 +430,22 @@ struct FirmwarePartitionPayload<'a> {
 
 impl FirmwarePartitionPayload<'_> {
     /// Streams the image to its partition, passing LZ4 blocks through when the
-    /// device accepts them and decompressing them on the fly otherwise.
+    /// device accepts them and decompressing them on the fly otherwise. Read
+    /// errors are reported with `display_name`.
     async fn send<P, I>(
         &self,
         session: &mut OdinSession,
         readers: &mut FirmwareReaders<P, I>,
-    ) -> Result<(), OdinError>
+        display_name: &str,
+    ) -> Result<(), FlashError>
     where
         P: AsyncRead + AsyncSeek + Unpin,
         I: AsyncRead + AsyncSeek + Unpin,
     {
+        let read_error = |e| FlashError::FileReadFailed(display_name.to_string(), e);
         let image = &self.image;
-        let mut reader = image.open(readers).await?;
-        match &image.lz4_header {
+        let mut reader = image.open(readers).await.map_err(read_error)?;
+        let sent = match &image.lz4_header {
             None => {
                 progress::set_length(image.size());
                 let slices = image.slices(&mut reader, OdinSession::MAX_SLICE_SIZE);
@@ -458,7 +461,11 @@ impl FirmwarePartitionPayload<'_> {
                 let slices = image.decompressed_slices(&mut reader, OdinSession::MAX_SLICE_SIZE);
                 session.send_partition(self.pit_entry, slices).await
             }
-        }
+        };
+        sent.map_err(|e| match e {
+            SendPartitionError::Source(e) => read_error(e),
+            SendPartitionError::Session(e) => FlashError::Odin(e),
+        })
     }
 }
 
@@ -750,8 +757,9 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
                 .map_err(FlashError::SuperSizeCheckFailed)?;
         }
 
-        for planned in plan.payloads {
+        for (planned, index) in plan.payloads.into_iter().zip(plan.image_indices) {
             let name = planned.pit_entry.partition_name.to_string_lossy();
+            let display_name = &self.images[index].display_name;
             let partition_size = planned.image.uncompressed_size();
 
             progress::on_event(FlashEvent::PartitionStart {
@@ -759,9 +767,9 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
                 size: partition_size,
             });
 
-            if let Err(e) = planned.send(session, &mut self.readers).await {
+            if let Err(e) = planned.send(session, &mut self.readers, display_name).await {
                 progress::on_event(FlashEvent::PartitionFail(&name));
-                return Err(FlashError::Odin(e));
+                return Err(e);
             }
 
             progress::on_event(FlashEvent::PartitionEnd(&name));
