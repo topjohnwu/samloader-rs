@@ -360,7 +360,8 @@ struct PlannedImage {
     target: Target,
     display_name: String,
     image: FirmwareImage,
-    /// LP metadata size of the image, if it targets the super partition.
+    /// Samsung DDP `super_used_size` read from the image's header, if it
+    /// targets the super partition.
     super_used_size: Option<u32>,
 }
 

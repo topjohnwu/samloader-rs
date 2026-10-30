@@ -171,8 +171,8 @@ impl FirmwareImage {
         readers.open(&self.source).await
     }
 
-    /// Parses the LP metadata of a super image to determine its used size in sectors,
-    /// returning `None` if it cannot be read.
+    /// Reads Samsung's DDP `super_used_size` (in 512-byte sectors) from the
+    /// header of a super image, returning `None` if it is absent or cannot be read.
     pub(crate) async fn super_used_size<P, I>(
         &self,
         readers: &mut FirmwareReaders<P, I>,
