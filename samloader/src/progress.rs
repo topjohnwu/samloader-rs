@@ -80,6 +80,23 @@ impl FlashProgress for CliProgress {
 
     fn on_event(&self, event: FlashEvent<'_>) {
         match event {
+            FlashEvent::HandshakeStart => self.println("Initializing protocol..."),
+            FlashEvent::HandshakeEnd => self.println("Protocol initialization successful.\n"),
+            FlashEvent::SessionStart => self.println("Beginning session..."),
+            FlashEvent::SessionSetup => self.println(
+                "\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n",
+            ),
+            FlashEvent::SessionReady => self.println("Session begun.\n"),
+            FlashEvent::SessionEnd => self.println("Ending session..."),
+            FlashEvent::Reboot { download: false } => self.println("Rebooting device..."),
+            FlashEvent::Reboot { download: true } => {
+                self.println("Rebooting device to Download Mode...")
+            }
+            FlashEvent::EraseStart => self.println("Erasing storage (USERDATA)..."),
+            FlashEvent::EraseEnd { sectors } => self.println(&format!(
+                "Storage erased successfully ({} sectors)\n",
+                sectors
+            )),
             FlashEvent::PartitionStart { name, size } => {
                 let pb = ProgressBar::no_length()
                     .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
@@ -127,6 +144,7 @@ impl FlashProgress for CliProgress {
                     pb.abandon_with_message(format!("{} MD5 verification failed", name));
                 }
             }
+            _ => {}
         }
     }
 }

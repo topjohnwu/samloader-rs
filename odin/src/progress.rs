@@ -14,9 +14,39 @@
 
 use crate::compat::{MaybeSend, MaybeSync};
 
-/// Events emitted during firmware flashing and verification.
+/// Events reported by the crate, from connecting to a device to flashing and
+/// verifying firmware.
+///
+/// Lower layers report their progress as events rather than messages, so
+/// frontends decide how to present it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum FlashEvent<'a> {
+    /// The Odin handshake with the device has started.
+    HandshakeStart,
+    /// The Odin handshake has succeeded.
+    HandshakeEnd,
+    /// An Odin session is being requested from the device.
+    SessionStart,
+    /// The device accepted the session, which is now being set up. Some
+    /// devices take up to 2 minutes to respond from here on.
+    SessionSetup,
+    /// The session is ready for commands.
+    SessionReady,
+    /// The session is being ended.
+    SessionEnd,
+    /// The device is being rebooted.
+    Reboot {
+        /// Whether the device reboots into Download Mode rather than normally.
+        download: bool,
+    },
+    /// The USERDATA partition is being erased.
+    EraseStart,
+    /// The USERDATA partition has been erased.
+    EraseEnd {
+        /// The number of erased sectors reported by the device.
+        sectors: u32,
+    },
     /// Partition flashing has started.
     PartitionStart {
         /// Name of the partition being flashed.

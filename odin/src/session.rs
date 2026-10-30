@@ -17,7 +17,7 @@
 
 use crate::device_info::{DeviceInfo, SessionDeviceInfo};
 use crate::error::{LokeError, OdinError, SendPartitionError, TransportError};
-use crate::progress;
+use crate::progress::{self, FlashEvent};
 use crate::protocol::{CMD_PIT, Command, DataChunk, Response, STREAMING_CHUNK_ACK};
 use crate::usb::{UsbBackendOption, UsbTransfer, create_backend};
 use futures::StreamExt;
@@ -61,7 +61,7 @@ impl OdinConnection {
 
     /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
     pub async fn init(&mut self) -> Result<(), OdinError> {
-        progress::println("Initializing protocol...");
+        progress::on_event(FlashEvent::HandshakeStart);
 
         self.usb.reset().await;
 
@@ -85,7 +85,7 @@ impl OdinConnection {
         }
 
         if response == "LOKE" {
-            progress::println("Protocol initialization successful.\n");
+            progress::on_event(FlashEvent::HandshakeEnd);
             Ok(())
         } else {
             Err(OdinError::HandshakeMismatch {
@@ -180,7 +180,7 @@ impl OdinSession {
     }
 
     async fn begin(connection: OdinConnection) -> Result<Self, OdinError> {
-        progress::println("Beginning session...");
+        progress::on_event(FlashEvent::SessionStart);
 
         let mut session = Self {
             connection,
@@ -199,9 +199,7 @@ impl OdinSession {
             session_response >> 16
         };
 
-        progress::println(
-            "\nSome devices may take up to 2 minutes to respond.\nPlease be patient!\n",
-        );
+        progress::on_event(FlashEvent::SessionSetup);
         futures_timer::Delay::new(Duration::from_secs(3)).await;
 
         if session.bootloader_protocol_version >= 2 {
@@ -213,13 +211,13 @@ impl OdinSession {
             session.request_ok(&cmd, COMMAND_TIMEOUT).await?;
         }
 
-        progress::println("Session begun.\n");
+        progress::on_event(FlashEvent::SessionReady);
         Ok(session)
     }
 
     /// Ends the active flashing session on the device.
     pub async fn end_session(&mut self) -> Result<(), OdinError> {
-        progress::println("Ending session...");
+        progress::on_event(FlashEvent::SessionEnd);
 
         let cmd = Command::close_connection();
         self.request_ok(&cmd, COMMAND_TIMEOUT).await
@@ -246,7 +244,7 @@ impl OdinSession {
     /// This does not end the session first; use [`finish`](Self::finish) to
     /// end the session and reboot.
     pub async fn reboot_device(&mut self) -> Result<(), OdinError> {
-        self.reboot_with_command(&Command::reboot_device(), "Rebooting device...")
+        self.reboot_with_command(&Command::reboot_device(), false)
             .await
     }
 
@@ -255,15 +253,16 @@ impl OdinSession {
     /// This does not end the session first; use [`finish`](Self::finish) to
     /// end the session and reboot.
     pub async fn reboot_to_download(&mut self) -> Result<(), OdinError> {
-        self.reboot_with_command(
-            &Command::reboot_to_download(),
-            "Rebooting device to Download Mode...",
-        )
-        .await
+        self.reboot_with_command(&Command::reboot_to_download(), true)
+            .await
     }
 
-    async fn reboot_with_command(&mut self, cmd: &Command, msg: &str) -> Result<(), OdinError> {
-        progress::println(msg);
+    async fn reboot_with_command(
+        &mut self,
+        cmd: &Command,
+        download: bool,
+    ) -> Result<(), OdinError> {
+        progress::on_event(FlashEvent::Reboot { download });
 
         // Send reboot command using standard send_command, which automatically
         // appends an empty packet (ZLP) for "Gadget Serial" devices (e.g. S10).
@@ -511,15 +510,14 @@ impl OdinSession {
     /// `USERDATA` partition range via the UEFI `EraseBlock` protocol, erasing dynamic partition
     /// metadata and user data, and returns the device erase sector size.
     pub async fn nand_erase(&mut self) -> Result<u32, OdinError> {
-        progress::println("Erasing storage (USERDATA)...");
+        progress::on_event(FlashEvent::EraseStart);
         let cmd = Command::nand_erase();
         let erased_sectors = self
             .request_and_response(&cmd, Duration::from_secs(60))
             .await?;
-        progress::println(&format!(
-            "Storage erased successfully ({} sectors)\n",
-            erased_sectors
-        ));
+        progress::on_event(FlashEvent::EraseEnd {
+            sectors: erased_sectors,
+        });
         Ok(erased_sectors)
     }
 
@@ -914,6 +912,54 @@ mod tests {
 
             assert!(session.close().await.is_ok());
         });
+    }
+
+    #[test]
+    fn test_session_reports_lifecycle_events() {
+        // Other tests may report events at the same time, so only events
+        // from this test's thread are recorded
+        #[derive(Clone)]
+        struct Recorder(
+            std::thread::ThreadId,
+            std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        );
+
+        impl crate::FlashProgress for Recorder {
+            fn on_event(&self, event: FlashEvent<'_>) {
+                if std::thread::current().id() == self.0 {
+                    self.1.lock().unwrap().push(format!("{event:?}"));
+                }
+            }
+        }
+
+        let _guard = crate::progress::TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let recorder = Recorder(std::thread::current().id(), Default::default());
+        crate::progress::set_progress(recorder.clone());
+        let res = futures::executor::block_on(async {
+            let mut session = mock_session(MockBackend::new()).await;
+            session.nand_erase().await?;
+            session.finish(RebootMode::Download).await
+        });
+        crate::progress::clear_progress();
+        res.unwrap();
+
+        assert_eq!(
+            *recorder.1.lock().unwrap(),
+            [
+                "HandshakeStart",
+                "HandshakeEnd",
+                "SessionStart",
+                "SessionSetup",
+                "SessionReady",
+                "EraseStart",
+                "EraseEnd { sectors: 524288 }",
+                "SessionEnd",
+                "Reboot { download: true }",
+            ]
+        );
     }
 
     #[test]
