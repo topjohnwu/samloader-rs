@@ -27,9 +27,9 @@ use std::time::Duration;
 
 /// Manages the initial connection to a Samsung device in Download Mode.
 ///
-/// At this stage, communication is restricted to raw string commands (e.g. handshake
-/// strings or AT commands). Complex command I/O requires transitioning to an [`OdinSession`]
-/// via [`begin_session`](Self::begin_session).
+/// At this stage, only the handshake ([`init`](Self::init)) and the DVIF query
+/// ([`query_device_info`](Self::query_device_info)) are available. Other commands
+/// require transitioning to an [`OdinSession`] via [`begin_session`](Self::begin_session).
 pub struct OdinConnection {
     usb: Box<dyn UsbTransfer>,
     skip_empty_send: bool,
@@ -103,7 +103,7 @@ impl OdinConnection {
     }
 
     /// Sends a raw string message over the transport connection.
-    pub async fn send_string(&mut self, s: &str, timeout: i32) -> Result<(), OdinError> {
+    async fn send_string(&mut self, s: &str, timeout: i32) -> Result<(), OdinError> {
         progress::println_verbose(&format!("Sending string: {:?}", s));
         if !self.usb.send_data(s.as_bytes(), timeout).await {
             return Err(OdinError::SendCommandFailed);
@@ -112,7 +112,7 @@ impl OdinConnection {
     }
 
     /// Receives a raw string message from the transport connection.
-    pub async fn receive_string(&mut self, timeout: i32) -> Result<String, OdinError> {
+    async fn receive_string(&mut self, timeout: i32) -> Result<String, OdinError> {
         let mut buffer = [0u8; 1024];
         let received_size = self.usb.receive_data(&mut buffer, timeout).await;
 
