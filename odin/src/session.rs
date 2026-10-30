@@ -534,6 +534,16 @@ impl OdinSession {
         self.bootloader_protocol_version
     }
 
+    /// Returns whether the bootloader protocol version allows the dynamic
+    /// partition size check ([`check_super_size`](Self::check_super_size)).
+    ///
+    /// Bootloaders without Samsung's Data Dynamic Partition (DDP) feature
+    /// reject the check even then, so it should only be sent for super images
+    /// with a DDP `super_used_size`.
+    pub fn supports_super_size_check(&self) -> bool {
+        self.bootloader_protocol_version >= 3
+    }
+
     /// Returns whether the device accepts LZ4 frames with the given maximum
     /// block size without decompressing them first.
     pub(crate) fn accepts_lz4_blocks(&self, block_max_size: u64) -> bool {

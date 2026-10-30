@@ -730,7 +730,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
 
         if let Some(super_used_size) = super_used_size
             && super_used_size > 0
-            && session.bootloader_protocol_version() >= 3
+            && session.supports_super_size_check()
         {
             let check_size = if self.has_download_list || self.readers.packages.is_empty() {
                 super_used_size
