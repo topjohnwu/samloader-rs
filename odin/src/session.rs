@@ -32,7 +32,6 @@ use std::time::Duration;
 /// require transitioning to an [`OdinSession`] via [`begin_session`](Self::begin_session).
 pub struct OdinConnection {
     usb: Box<dyn UsbTransfer>,
-    skip_empty_send: bool,
 }
 
 /// Maximum size of a slice, which the bootloader stages in memory before
@@ -59,28 +58,8 @@ impl OdinConnection {
     }
 
     /// Creates a new `OdinConnection` instance with a given transport.
-    ///
-    /// Following official `odin4` behavior, empty packets (ZLPs) after 1024-byte
-    /// request packets are skipped on Qualcomm and modern bootloaders, but are sent
-    /// on older Exynos bootloaders that advertise the "Gadget Serial" USB product string.
     pub fn new(usb: Box<dyn UsbTransfer>) -> Self {
-        let skip_empty_send = !usb
-            .product_name()
-            .is_some_and(|name| name.starts_with("Gadget Serial"));
-        Self {
-            usb,
-            skip_empty_send,
-        }
-    }
-
-    /// Returns whether empty packets are skipped after request packets.
-    pub fn skip_empty_send(&self) -> bool {
-        self.skip_empty_send
-    }
-
-    /// Overrides whether empty packets are skipped after request packets.
-    pub fn set_skip_empty_send(&mut self, skip: bool) {
-        self.skip_empty_send = skip;
+        Self { usb }
     }
 
     /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
@@ -320,7 +299,7 @@ impl OdinSession {
             .send(&cmd_bytes, timeout)
             .await
             .map_err(OdinError::SendCommandFailed)?;
-        if !self.connection.skip_empty_send {
+        if self.connection.usb.empty_packet_after_request() {
             // The command itself was sent, so a failed empty packet is not an error
             let _ = self.connection.usb.send(&[], EMPTY_PACKET_TIMEOUT).await;
         }
@@ -870,33 +849,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_skip_empty_send_detection() {
-        let gadget = Box::new(MockBackend::new().with_product_name("Gadget Serial"));
-        let conn_gadget = OdinConnection::new(gadget);
-        assert!(!conn_gadget.skip_empty_send());
-
-        let gadget_prefix = Box::new(MockBackend::new().with_product_name("Gadget Serial v2"));
-        let conn_gadget_prefix = OdinConnection::new(gadget_prefix);
-        assert!(!conn_gadget_prefix.skip_empty_send());
-
-        let msm = Box::new(MockBackend::new().with_product_name("MSM8996"));
-        let conn_msm = OdinConnection::new(msm);
-        assert!(conn_msm.skip_empty_send());
-
-        let apq = Box::new(MockBackend::new().with_product_name("APQ8084"));
-        let conn_apq = OdinConnection::new(apq);
-        assert!(conn_apq.skip_empty_send());
-
-        let generic = Box::new(MockBackend::new().with_product_name("SAMSUNG_Android"));
-        let conn_generic = OdinConnection::new(generic);
-        assert!(conn_generic.skip_empty_send());
-
-        let none = Box::new(MockBackend::new());
-        let conn_none = OdinConnection::new(none);
-        assert!(conn_none.skip_empty_send());
-    }
-
     #[derive(Default)]
     struct SpyTransferInner {
         sent_data: Vec<Vec<u8>>,
@@ -945,7 +897,6 @@ mod tests {
             });
 
             let conn = OdinConnection::new(spy);
-            assert!(!conn.skip_empty_send());
 
             let mut session = OdinSession {
                 connection: conn,
@@ -998,7 +949,6 @@ mod tests {
             });
 
             let conn = OdinConnection::new(spy);
-            assert!(conn.skip_empty_send());
 
             let mut session = OdinSession {
                 connection: conn,

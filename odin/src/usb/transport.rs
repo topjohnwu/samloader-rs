@@ -44,6 +44,17 @@ pub trait UsbTransfer: MaybeSend {
     fn product_name(&self) -> Option<&str> {
         None
     }
+
+    /// Returns whether each Odin request packet must be followed by an empty
+    /// packet (ZLP).
+    ///
+    /// Following official `odin4` behavior, empty packets are skipped on
+    /// Qualcomm and modern bootloaders, but are sent on older Exynos
+    /// bootloaders that advertise the "Gadget Serial" USB product string.
+    fn empty_packet_after_request(&self) -> bool {
+        self.product_name()
+            .is_some_and(|name| name.starts_with("Gadget Serial"))
+    }
 }
 
 /// Trait representing a backend factory and device locator for USB or serial transports.
@@ -59,4 +70,21 @@ pub trait UsbBackend: Sized + UsbTransfer {
     async fn find_device<'a, F>(predicate: F) -> Result<Self::UsbDevice, OdinError>
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usb::MockBackend;
+
+    #[test]
+    fn test_empty_packet_after_request_detection() {
+        let with_product = |name| MockBackend::new().with_product_name(name);
+        assert!(with_product("Gadget Serial").empty_packet_after_request());
+        assert!(with_product("Gadget Serial v2").empty_packet_after_request());
+        assert!(!with_product("MSM8996").empty_packet_after_request());
+        assert!(!with_product("APQ8084").empty_packet_after_request());
+        assert!(!with_product("SAMSUNG_Android").empty_packet_after_request());
+        assert!(!MockBackend::new().empty_packet_after_request());
+    }
 }
