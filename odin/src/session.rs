@@ -34,9 +34,6 @@ pub struct OdinConnection {
     usb: Box<dyn UsbTransfer>,
 }
 
-/// Maximum size of a slice, which the bootloader stages in memory before
-/// committing it (30 MiB, 0x1E00000, as in odin4).
-pub(crate) const MAX_SLICE_SIZE: usize = 30 * 1024 * 1024;
 /// The only LZ4 block size the bootloader accepts compressed slices with.
 const LZ4_PASSTHROUGH_BLOCK_SIZE: u64 = 1024 * 1024;
 const PACKET_SIZE_DEFAULT: usize = 0x20000; // 128 KB default before negotiation
@@ -168,6 +165,11 @@ pub struct OdinSession {
 }
 
 impl OdinSession {
+    /// Maximum size of a slice, which the bootloader stages in memory before
+    /// committing it (30 MiB, 0x1E00000, as in odin4). For LZ4-compressed
+    /// slices, this limits the decompressed size.
+    pub const MAX_SLICE_SIZE: usize = 30 * 1024 * 1024;
+
     /// Opens a device in Download Mode with the selected backend, performs the
     /// handshake and begins a session. If `wait` is set, waits until such a
     /// device is connected.
@@ -545,18 +547,20 @@ impl OdinSession {
     }
 
     /// Returns whether the device accepts LZ4 frames with the given maximum
-    /// block size without decompressing them first.
-    pub(crate) fn accepts_lz4_blocks(&self, block_max_size: u64) -> bool {
+    /// block size without decompressing them first, i.e. whether their slices
+    /// can be sent with [`send_lz4_partition`](Self::send_lz4_partition).
+    pub fn accepts_lz4_blocks(&self, block_max_size: u64) -> bool {
         self.lz4_supported && block_max_size == LZ4_PASSTHROUGH_BLOCK_SIZE
     }
 
-    /// Transmits a partition image as a stream of raw slices.
+    /// Flashes a partition image, given as a stream of raw slices of at most
+    /// [`MAX_SLICE_SIZE`](Self::MAX_SLICE_SIZE) bytes each.
     ///
     /// The next slice is read from `slices` while the current one is being
     /// sent. This only overlaps reading with the USB transfer if the stream
     /// returns `Pending` while its I/O is in progress; a stream that blocks is
     /// read to completion before the current slice is started.
-    pub(crate) async fn send_slices<S, Bytes>(
+    pub async fn send_partition<S, Bytes>(
         &mut self,
         pit_entry: &PitEntry,
         slices: S,
@@ -569,6 +573,7 @@ impl OdinSession {
         let mut current = slices.next().await.transpose()?;
         while let Some(slice_data) = current {
             let slice_data = slice_data.as_ref();
+            check_slice_size(slice_data.len())?;
             let init_cmd = Command::transmit_flash(false);
             let start_cmd = Command::start_slice_transmission(slice_data.len() as u32);
 
@@ -597,13 +602,14 @@ impl OdinSession {
         Ok(())
     }
 
-    /// Transmits a partition image as a stream of LZ4-compressed slices, each
-    /// paired with its decompressed size.
+    /// Flashes a partition image, given as a stream of LZ4-compressed slices,
+    /// each paired with its decompressed size of at most
+    /// [`MAX_SLICE_SIZE`](Self::MAX_SLICE_SIZE) bytes.
     ///
     /// Only valid if [`accepts_lz4_blocks`](Self::accepts_lz4_blocks) holds
-    /// for the frame the slices come from. Like [`send_slices`](Self::send_slices),
+    /// for the frame the slices come from. Like [`send_partition`](Self::send_partition),
     /// the next slice is read while the current one is being sent.
-    pub(crate) async fn send_lz4_slices<S>(
+    pub async fn send_lz4_partition<S>(
         &mut self,
         pit_entry: &PitEntry,
         slices: S,
@@ -614,6 +620,7 @@ impl OdinSession {
         let mut slices = std::pin::pin!(slices);
         let mut current = slices.next().await.transpose()?;
         while let Some((decompressed_size, slice_data)) = current {
+            check_slice_size(decompressed_size)?;
             let init_cmd = Command::transmit_flash(true);
             let start_cmd = Command::start_lz4_slice_transmission(
                 slice_data.len() as u32,
@@ -719,6 +726,17 @@ impl OdinSession {
     }
 }
 
+/// Checks that a slice fits in the bootloader's staging buffer.
+fn check_slice_size(size: usize) -> Result<(), OdinError> {
+    if size > OdinSession::MAX_SLICE_SIZE {
+        return Err(OdinError::SliceTooLarge {
+            size,
+            max: OdinSession::MAX_SLICE_SIZE,
+        });
+    }
+    Ok(())
+}
+
 /// Validates a CSC / sales code, which must be 3 alphanumeric ASCII characters.
 pub(crate) fn parse_sales_code(sales_code: &str) -> Result<[u8; 3], OdinError> {
     match *sales_code.as_bytes() {
@@ -760,7 +778,7 @@ mod tests {
             let seq2 = vec![0xBBu8; 0x20000];
             let slices = futures::stream::iter(vec![Ok(seq1.clone()), Ok(seq2)]);
 
-            assert!(session.send_slices(&pit_entry, slices).await.is_ok());
+            assert!(session.send_partition(&pit_entry, slices).await.is_ok());
 
             // Verify a mid-stream I/O error aborts the transfer with OdinError::Io
             let failing_slices = futures::stream::iter(vec![
@@ -768,7 +786,7 @@ mod tests {
                 Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
             ]);
             assert!(matches!(
-                session.send_slices(&pit_entry, failing_slices).await,
+                session.send_partition(&pit_entry, failing_slices).await,
                 Err(OdinError::Io(_))
             ));
 
@@ -777,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn test_send_slices_reads_next_slice_while_sending() {
+    fn test_send_partition_reads_next_slice_while_sending() {
         futures::executor::block_on(async {
             let backend = MockBackend::new();
             let log = backend.event_log();
@@ -804,7 +822,7 @@ mod tests {
                     Ok(vec![idx; 2 * packet_size])
                 }
             });
-            assert!(session.send_slices(pit_entry, slices).await.is_ok());
+            assert!(session.send_partition(pit_entry, slices).await.is_ok());
 
             // Each slice is read while the previous one is sent, and is ready
             // before the previous one is committed
@@ -818,6 +836,36 @@ mod tests {
             assert_eq!(last, [false, false, true]);
 
             assert!(session.close().await.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_send_partition_rejects_oversized_slices() {
+        futures::executor::block_on(async {
+            let backend = MockBackend::new();
+            let log = backend.event_log();
+            let mut session = mock_session(backend).await;
+            let pit_data = crate::test_util::ab_pit_data();
+            let pit_entry = crate::test_util::find_entry(&pit_data, "BOOT_A");
+
+            let slices = futures::stream::iter([Ok::<_, std::io::Error>(vec![
+                0u8;
+                OdinSession::MAX_SLICE_SIZE
+                    + 1
+            ])]);
+            assert!(matches!(
+                session.send_partition(pit_entry, slices).await,
+                Err(OdinError::SliceTooLarge { .. })
+            ));
+
+            let slices = futures::stream::iter([Ok((OdinSession::MAX_SLICE_SIZE + 1, vec![0u8]))]);
+            assert!(matches!(
+                session.send_lz4_partition(pit_entry, slices).await,
+                Err(OdinError::SliceTooLarge { .. })
+            ));
+
+            // Nothing reached the device
+            assert!(log.lock().unwrap().is_empty());
         });
     }
 

@@ -22,7 +22,7 @@ use crate::firmware::{
     verify_md5_footer,
 };
 use crate::progress::{self, FlashEvent};
-use crate::session::{MAX_SLICE_SIZE, OdinSession, RebootMode, parse_sales_code};
+use crate::session::{OdinSession, RebootMode, parse_sales_code};
 use futures::io::{AsyncRead, AsyncSeek, AsyncSeekExt, Cursor};
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -439,18 +439,18 @@ impl FirmwarePartitionPayload<'_> {
         match &image.lz4_header {
             None => {
                 progress::set_length(image.size());
-                let slices = image.slices(&mut reader, MAX_SLICE_SIZE);
-                session.send_slices(self.pit_entry, slices).await
+                let slices = image.slices(&mut reader, OdinSession::MAX_SLICE_SIZE);
+                session.send_partition(self.pit_entry, slices).await
             }
             Some(header) if session.accepts_lz4_blocks(header.block_max_size) => {
                 progress::set_length(image.size());
-                let slices = image.compressed_slices(&mut reader, MAX_SLICE_SIZE);
-                session.send_lz4_slices(self.pit_entry, slices).await
+                let slices = image.compressed_slices(&mut reader, OdinSession::MAX_SLICE_SIZE);
+                session.send_lz4_partition(self.pit_entry, slices).await
             }
             Some(header) => {
                 progress::set_length(header.content_size);
-                let slices = image.decompressed_slices(&mut reader, MAX_SLICE_SIZE);
-                session.send_slices(self.pit_entry, slices).await
+                let slices = image.decompressed_slices(&mut reader, OdinSession::MAX_SLICE_SIZE);
+                session.send_partition(self.pit_entry, slices).await
             }
         }
     }

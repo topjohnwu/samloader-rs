@@ -117,6 +117,15 @@ pub enum OdinError {
     #[error("USB transport error: {0}")]
     Transport(#[from] TransportError),
 
+    /// A slice is larger than the bootloader can stage in memory.
+    #[error("Slice of {size} bytes exceeds the maximum of {max} bytes")]
+    SliceTooLarge {
+        /// The (decompressed) size of the slice in bytes.
+        size: usize,
+        /// The maximum slice size in bytes.
+        max: usize,
+    },
+
     /// A response packet from the device is malformed.
     #[error("{0}")]
     InvalidResponse(String),
