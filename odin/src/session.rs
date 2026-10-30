@@ -210,11 +210,7 @@ impl OdinSession {
             session.packet_size = 0x100000;
 
             let cmd = Command::packet_size(session.packet_size as u32);
-            let value = session.request_and_response(&cmd, 3000).await?;
-
-            if value != 0 {
-                return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-            }
+            session.request_ok(&cmd, 3000).await?;
         }
 
         progress::println("Session begun.\n");
@@ -226,12 +222,7 @@ impl OdinSession {
         progress::println("Ending session...");
 
         let cmd = Command::close_connection();
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
-
-        Ok(())
+        self.request_ok(&cmd, 3000).await
     }
 
     /// Ends the session, then reboots the device as requested.
@@ -372,23 +363,26 @@ impl OdinSession {
         Ok(response.value)
     }
 
+    /// Sends a command whose response value must be 0, and reports any
+    /// other value as a LOKE error.
+    async fn request_ok(&mut self, cmd: &Command, timeout: i32) -> Result<(), OdinError> {
+        match self.request_and_response(cmd, timeout).await? {
+            0 => Ok(()),
+            value => Err(OdinError::Loke(LokeError::from_status(value as i32))),
+        }
+    }
+
     /// Flashes/uploads raw PIT data to the device.
     pub async fn send_pit_info(&mut self, pit_buffer: &[u8]) -> Result<(), OdinError> {
         let pit_buffer_size = pit_buffer.len() as u32;
 
         // Start file transfer
         let cmd = Command::pit_flash();
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
+        self.request_ok(&cmd, 3000).await?;
 
         // Transfer file size
         let cmd = Command::flash_pit_slice(pit_buffer_size);
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
+        self.request_ok(&cmd, 3000).await?;
 
         // Flash pit file
         let chunk = DataChunk::new(pit_buffer, pit_buffer_size as usize);
@@ -419,12 +413,7 @@ impl OdinSession {
 
         // End pit file transfer
         let cmd = Command::end_pit_transfer(pit_buffer_size);
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
-
-        Ok(())
+        self.request_ok(&cmd, 3000).await
     }
 
     /// Downloads/dumps the active Partition Information Table (PIT) file from the device.
@@ -463,10 +452,7 @@ impl OdinSession {
 
         // End file transfer
         let cmd = Command::pit_end();
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
+        self.request_ok(&cmd, 3000).await?;
 
         Ok(buffer)
     }
@@ -505,10 +491,7 @@ impl OdinSession {
         }
 
         let cmd = Command::end_device_info();
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
+        self.request_ok(&cmd, 3000).await?;
 
         SessionDeviceInfo::parse(&buffer)
     }
@@ -517,11 +500,7 @@ impl OdinSession {
     pub async fn set_sales_code(&mut self, sales_code: &str) -> Result<(), OdinError> {
         let code = parse_sales_code(sales_code)?;
         let cmd = Command::session_sales_code(code);
-        let value = self.request_and_response(&cmd, 3000).await?;
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
-        Ok(())
+        self.request_ok(&cmd, 3000).await
     }
 
     /// Dispatches a low-level hardware NAND Erase for the USERDATA partition (Opcode 0x64, Subcmd 7).
@@ -661,15 +640,9 @@ impl OdinSession {
         start_cmd: &Command,
         slice_data: &[u8],
     ) -> Result<(), OdinError> {
-        let init_val = self.request_and_response(init_cmd, 3000).await?;
-        if init_val != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(init_val as i32)));
-        }
+        self.request_ok(init_cmd, 3000).await?;
 
-        let start_val = self.request_and_response(start_cmd, 3000).await?;
-        if start_val != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(start_val as i32)));
-        }
+        self.request_ok(start_cmd, 3000).await?;
 
         for (chunk_index, chunk_buffer) in slice_data.chunks(self.packet_size).enumerate() {
             let chunk = DataChunk::new(chunk_buffer, self.packet_size);
@@ -718,39 +691,20 @@ impl OdinSession {
     /// Commits a slice whose data was sent with
     /// [`transmit_slice_data`](Self::transmit_slice_data).
     async fn commit_slice(&mut self, end_cmd: &Command) -> Result<(), OdinError> {
-        let end_val = self
-            .request_and_response(end_cmd, self.slice_timeout as i32)
-            .await?;
-        if end_val != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(end_val as i32)));
-        }
-
-        Ok(())
+        self.request_ok(end_cmd, self.slice_timeout as i32).await
     }
 
     /// Sets the total expected session bytes to be flashed, allowing the device
     /// to update its progress indicator.
     pub async fn set_total_bytes(&mut self, total_bytes: u64) -> Result<(), OdinError> {
         let cmd = Command::total_bytes(total_bytes);
-        let value = self.request_and_response(&cmd, 3000).await?;
-
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
-
-        Ok(())
+        self.request_ok(&cmd, 3000).await
     }
 
     /// Performs a pre-flight dynamic partition size check on modern LOKE bootloaders.
     pub async fn check_super_size(&mut self, super_used_size: u32) -> Result<(), OdinError> {
         let cmd = Command::check_super_size(super_used_size);
-        let value = self.request_and_response(&cmd, 3000).await?;
-
-        if value != 0 {
-            return Err(OdinError::Loke(LokeError::from_status(value as i32)));
-        }
-
-        Ok(())
+        self.request_ok(&cmd, 3000).await
     }
 }
 
