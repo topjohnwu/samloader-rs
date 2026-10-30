@@ -208,6 +208,7 @@ pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), OdinErr
 mod tests {
     use super::*;
     use crate::compat::MaybeSend;
+    use crate::error::TransportError;
     use std::cell::RefCell;
 
     const PID_NORMAL: u16 = 0x6860;
@@ -234,11 +235,15 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl UsbTransfer for FakeBackend {
         async fn reset(&mut self) {}
-        async fn send_data(&mut self, _data: &[u8], _timeout: i32) -> bool {
-            true
+        async fn send(&mut self, _data: &[u8], _timeout: Duration) -> Result<(), TransportError> {
+            Ok(())
         }
-        async fn receive_data(&mut self, _data: &mut [u8], _timeout: i32) -> i32 {
-            0
+        async fn receive(
+            &mut self,
+            _data: &mut [u8],
+            _timeout: Duration,
+        ) -> Result<usize, TransportError> {
+            Ok(0)
         }
     }
 

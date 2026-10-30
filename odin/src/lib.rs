@@ -38,7 +38,7 @@ mod test_util;
 
 pub use compat::{MaybeSend, MaybeSync};
 pub use device_info::{DeviceInfo, SessionDeviceInfo};
-pub use error::{FlashError, LokeError, OdinError};
+pub use error::{FlashError, LokeError, OdinError, TransportError};
 pub use firmware::verify_md5_footer;
 pub use flash::{FlashRequest, PreparedFlash};
 pub use modem::reboot_download;

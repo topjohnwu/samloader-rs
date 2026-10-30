@@ -16,9 +16,17 @@
 use super::USB_CLASS_CDC_DATA;
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::OdinError;
+use crate::error::{OdinError, TransportError};
 use ::rusb::{Context, DeviceHandle, UsbContext};
 use std::time::Duration;
+
+/// Maps a libusb transfer error.
+fn transfer_error(e: ::rusb::Error) -> TransportError {
+    match e {
+        ::rusb::Error::Timeout => TransportError::Timeout,
+        e => TransportError::backend(e),
+    }
+}
 
 /// USB communication backend using `libusb` / `rusb`.
 pub struct RusbBackend {
@@ -181,8 +189,9 @@ impl UsbBackend for RusbBackend {
     where
         F: FnMut(u16, u16) -> bool + MaybeSend + 'a,
     {
-        let context = Context::new()
-            .map_err(|e| OdinError::Transport(format!("Failed to create libusb context: {}", e)))?;
+        let context = Context::new().map_err(|e| {
+            TransportError::Setup("Failed to create libusb context".into(), Box::new(e))
+        })?;
 
         if let Ok(devices) = context.devices() {
             for device in devices.iter() {
@@ -220,32 +229,28 @@ impl UsbTransfer for RusbBackend {
         }
     }
 
-    async fn send_data(&mut self, data: &[u8], timeout: i32) -> bool {
-        match self.handle.write_bulk(
-            self.out_endpoint,
-            data,
-            Duration::from_millis(timeout as u64),
-        ) {
-            Ok(transferred) => transferred == data.len(),
-            Err(e) => {
-                print_warning!("libusb error {} whilst sending bulk transfer.", e);
-                false
-            }
+    async fn send(&mut self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
+        let sent = self
+            .handle
+            .write_bulk(self.out_endpoint, data, timeout)
+            .map_err(transfer_error)?;
+        if sent != data.len() {
+            return Err(TransportError::ShortWrite {
+                sent,
+                expected: data.len(),
+            });
         }
+        Ok(())
     }
 
-    async fn receive_data(&mut self, data: &mut [u8], timeout: i32) -> i32 {
-        match self.handle.read_bulk(
-            self.in_endpoint,
-            data,
-            Duration::from_millis(timeout as u64),
-        ) {
-            Ok(transferred) => transferred as i32,
-            Err(e) => {
-                print_warning!("libusb error {} whilst receiving bulk transfer.", e);
-                -1
-            }
-        }
+    async fn receive(
+        &mut self,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, TransportError> {
+        self.handle
+            .read_bulk(self.in_endpoint, data, timeout)
+            .map_err(transfer_error)
     }
 
     fn product_name(&self) -> Option<&str> {

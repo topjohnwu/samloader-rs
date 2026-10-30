@@ -15,9 +15,17 @@
 
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::OdinError;
+use crate::error::{OdinError, TransportError};
 use std::io::{Read, Write};
 use std::time::Duration;
+
+/// Maps a serial port I/O error.
+fn io_error(e: std::io::Error) -> TransportError {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => TransportError::Timeout,
+        _ => TransportError::backend(e),
+    }
+}
 
 /// Serial VCOM communication backend using virtual serial ports.
 pub struct SerialBackend {
@@ -58,7 +66,10 @@ impl UsbBackend for SerialBackend {
             .timeout(Duration::from_millis(1000))
             .open()
             .map_err(|e| {
-                OdinError::Transport(format!("Failed to open port {}: {}", device.port_name, e))
+                TransportError::Setup(
+                    format!("Failed to open port {}", device.port_name),
+                    Box::new(e),
+                )
             })?;
 
         Ok(Self { port, product })
@@ -90,8 +101,8 @@ impl UsbTransfer for SerialBackend {
         }
     }
 
-    async fn send_data(&mut self, data: &[u8], timeout: i32) -> bool {
-        if let Err(e) = self.port.set_timeout(Duration::from_millis(timeout as u64)) {
+    async fn send(&mut self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
+        if let Err(e) = self.port.set_timeout(timeout) {
             print_warning!("Failed to set serial port timeout: {}", e);
         }
 
@@ -99,8 +110,10 @@ impl UsbTransfer for SerialBackend {
         while written < data.len() {
             match self.port.write(&data[written..]) {
                 Ok(0) => {
-                    print_warning!("Serial write returned 0 bytes written");
-                    return false;
+                    return Err(TransportError::ShortWrite {
+                        sent: written,
+                        expected: data.len(),
+                    });
                 }
                 Ok(n) => {
                     written += n;
@@ -108,31 +121,24 @@ impl UsbTransfer for SerialBackend {
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
                     continue;
                 }
-                Err(e) => {
-                    print_warning!("Serial error whilst sending transfer: {}", e);
-                    return false;
-                }
+                Err(e) => return Err(io_error(e)),
             }
         }
 
         let _ = self.port.flush();
-        true
+        Ok(())
     }
 
-    async fn receive_data(&mut self, data: &mut [u8], timeout: i32) -> i32 {
-        if let Err(e) = self.port.set_timeout(Duration::from_millis(timeout as u64)) {
+    async fn receive(
+        &mut self,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, TransportError> {
+        if let Err(e) = self.port.set_timeout(timeout) {
             print_warning!("Failed to set serial port timeout: {}", e);
         }
 
-        match self.port.read(data) {
-            Ok(bytes_read) => bytes_read as i32,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::TimedOut {
-                    print_warning!("Serial error whilst receiving transfer: {}", e);
-                }
-                -1
-            }
-        }
+        self.port.read(data).map_err(io_error)
     }
 
     fn product_name(&self) -> Option<&str> {

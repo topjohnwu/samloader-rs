@@ -16,7 +16,7 @@
 //! backed by reverse-engineered ground truth from real device bootloaders.
 
 use crate::compat::MaybeSend;
-use crate::error::OdinError;
+use crate::error::{OdinError, TransportError};
 use crate::protocol::{
     CMD_CLOSE_CONNECTION, CMD_DDP, CMD_DEVINFO, CMD_PIT, CMD_SESSION_INIT, CMD_TRANSMIT,
     CloseConnectionCommand, Command, DeviceInfoCommand, DynamicPartitionCommand, PitCommand,
@@ -32,6 +32,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 /// Returns `Pending` once before completing, waking itself immediately, like
 /// an I/O operation that completes right away.
@@ -602,11 +603,11 @@ impl UsbTransfer for MockBackend {
         self.current_slice_data.clear();
     }
 
-    async fn send_data(&mut self, data: &[u8], _timeout: i32) -> bool {
+    async fn send(&mut self, data: &[u8], _timeout: Duration) -> Result<(), TransportError> {
         yield_now().await;
         if data.is_empty() {
             self.empty_send_count += 1;
-            return true;
+            return Ok(());
         }
 
         self.incoming_buffer.extend_from_slice(data);
@@ -658,7 +659,7 @@ impl UsbTransfer for MockBackend {
                         self.received_chunks.fetch_add(1, Ordering::Relaxed);
                     }
                     self.incoming_buffer.drain(..chunk_size);
-                    return true;
+                    return Ok(());
                 }
 
                 // If we are receiving uploaded PIT bytes
@@ -671,7 +672,7 @@ impl UsbTransfer for MockBackend {
                                 Command::Pit(PitCommand::Slice { .. }) => {
                                     self.push_response(CMD_PIT, 0);
                                     self.incoming_buffer.drain(..1024);
-                                    return true;
+                                    return Ok(());
                                 }
                                 Command::Pit(PitCommand::End { .. }) => {
                                     if !self.active_pit_data.is_empty() {
@@ -680,7 +681,7 @@ impl UsbTransfer for MockBackend {
                                     self.state = State::SessionBegun;
                                     self.push_response(CMD_PIT, 0);
                                     self.incoming_buffer.drain(..1024);
-                                    return true;
+                                    return Ok(());
                                 }
                                 _ => {}
                             }
@@ -691,7 +692,7 @@ impl UsbTransfer for MockBackend {
                     let raw_bytes = std::mem::take(&mut self.incoming_buffer);
                     self.active_pit_data.extend_from_slice(&raw_bytes);
                     self.push_response(CMD_PIT, 0);
-                    return true;
+                    return Ok(());
                 }
 
                 // Parse standard 1024-byte control packets
@@ -897,19 +898,20 @@ impl UsbTransfer for MockBackend {
                 }
             }
         }
-        true
+        Ok(())
     }
 
-    async fn receive_data(&mut self, data: &mut [u8], _timeout: i32) -> i32 {
+    async fn receive(
+        &mut self,
+        data: &mut [u8],
+        _timeout: Duration,
+    ) -> Result<usize, TransportError> {
         yield_now().await;
-        if self.outgoing_queue.is_empty() {
-            return 0;
-        }
         let size = std::cmp::min(data.len(), self.outgoing_queue.len());
         for item in data.iter_mut().take(size) {
             *item = self.outgoing_queue.pop_front().unwrap();
         }
-        size as i32
+        Ok(size)
     }
 
     fn product_name(&self) -> Option<&str> {

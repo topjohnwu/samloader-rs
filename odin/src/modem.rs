@@ -21,6 +21,7 @@ use crate::error::OdinError;
 #[cfg(target_arch = "wasm32")]
 use crate::usb::VID_SAMSUNG;
 use crate::usb::{DeviceMode, UsbBackendOption};
+use std::time::Duration;
 
 /// Helper function to prompt user pairing for a Samsung device in normal mode
 /// on WASM, which is required before calling [`reboot_download`].
@@ -77,11 +78,6 @@ pub async fn reboot_download(usb_backend: UsbBackendOption) -> Result<(), OdinEr
 
     let cmd: &[u8] = b"AT+SUDDLMOD=0,0\r";
 
-    if !backend.send_data(cmd, 1000).await {
-        return Err(OdinError::Transport(
-            "Failed to send the reboot command".to_string(),
-        ));
-    }
-
+    backend.send(cmd, Duration::from_secs(1)).await?;
     Ok(())
 }

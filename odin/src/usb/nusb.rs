@@ -16,7 +16,7 @@
 use super::USB_CLASS_CDC_DATA;
 use super::{UsbBackend, UsbTransfer};
 use crate::compat::MaybeSend;
-use crate::error::OdinError;
+use crate::error::{OdinError, TransportError};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -158,6 +158,15 @@ async fn transfer_async<EpType: BulkOrInterrupt, Dir: EndpointDirection>(
     }
 }
 
+/// Maps an `nusb` transfer error. Transfers are only cancelled when they time
+/// out, or when an earlier transfer could not be drained in time.
+fn transfer_error(e: ::nusb::transfer::TransferError) -> TransportError {
+    match e {
+        ::nusb::transfer::TransferError::Cancelled => TransportError::Timeout,
+        e => TransportError::backend(e),
+    }
+}
+
 /// USB communication backend using `nusb`.
 pub struct NusbBackend {
     ep_in: ::nusb::Endpoint<::nusb::transfer::Bulk, ::nusb::transfer::In>,
@@ -251,10 +260,12 @@ impl UsbBackend for NusbBackend {
 
         let ep_in = interface
             .endpoint::<::nusb::transfer::Bulk, ::nusb::transfer::In>(in_endpoint)
-            .map_err(|e| OdinError::Transport(format!("Failed to open IN endpoint: {}", e)))?;
+            .map_err(|e| TransportError::Setup("Failed to open IN endpoint".into(), Box::new(e)))?;
         let ep_out = interface
             .endpoint::<::nusb::transfer::Bulk, ::nusb::transfer::Out>(out_endpoint)
-            .map_err(|e| OdinError::Transport(format!("Failed to open OUT endpoint: {}", e)))?;
+            .map_err(|e| {
+                TransportError::Setup("Failed to open OUT endpoint".into(), Box::new(e))
+            })?;
 
         let product = device.product_string().map(|s| s.to_string());
 
@@ -321,22 +332,31 @@ impl UsbTransfer for NusbBackend {
         }
     }
 
-    async fn send_data(&mut self, data: &[u8], timeout: i32) -> bool {
-        let timeout_duration = Duration::from_millis(timeout as u64);
+    async fn send(&mut self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
         #[cfg(target_arch = "wasm32")]
         if self.ep_out.pending() > 0 {
-            let _ = wait_pending(&mut self.ep_out, timeout_duration).await;
+            let _ = wait_pending(&mut self.ep_out, timeout).await;
             if self.ep_out.pending() > 0 {
-                return false;
+                return Err(TransportError::Timeout);
             }
         }
         let buf = Buffer::from(data.to_vec());
-        let completion = transfer_async(&mut self.ep_out, buf, timeout_duration).await;
-        completion.status.is_ok() && completion.actual_len == data.len()
+        let completion = transfer_async(&mut self.ep_out, buf, timeout).await;
+        completion.status.map_err(transfer_error)?;
+        if completion.actual_len != data.len() {
+            return Err(TransportError::ShortWrite {
+                sent: completion.actual_len,
+                expected: data.len(),
+            });
+        }
+        Ok(())
     }
 
-    async fn receive_data(&mut self, data: &mut [u8], timeout: i32) -> i32 {
-        let timeout_duration = Duration::from_millis(timeout as u64);
+    async fn receive(
+        &mut self,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, TransportError> {
         let max_packet_size = self.ep_in.max_packet_size().max(1);
         let requested_len = data.len().max(1).next_multiple_of(max_packet_size);
         let mut total_copied = 0;
@@ -344,14 +364,14 @@ impl UsbTransfer for NusbBackend {
         loop {
             let rem_req_len = (requested_len - total_copied).max(max_packet_size);
             let buf = Buffer::new(rem_req_len);
-            let completion = transfer_async(&mut self.ep_in, buf, timeout_duration).await;
-            let Ok(()) = completion.status else {
+            let completion = transfer_async(&mut self.ep_in, buf, timeout).await;
+            if let Err(e) = completion.status {
                 return if total_copied > 0 {
-                    total_copied as i32
+                    Ok(total_copied)
                 } else {
-                    -1
+                    Err(transfer_error(e))
                 };
-            };
+            }
             let to_copy = std::cmp::min(completion.actual_len, data.len() - total_copied);
             data[total_copied..total_copied + to_copy]
                 .copy_from_slice(&completion.buffer[..to_copy]);
@@ -365,7 +385,7 @@ impl UsbTransfer for NusbBackend {
                 continue;
             }
 
-            return total_copied as i32;
+            return Ok(total_copied);
         }
     }
 

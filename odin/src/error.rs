@@ -59,12 +59,12 @@ pub enum OdinError {
     InterfaceSetupFailed,
 
     /// Failed to send the handshake query.
-    #[error("Failed to send handshake!")]
-    HandshakeSendFailed,
+    #[error("Failed to send handshake: {0}")]
+    HandshakeSendFailed(#[source] TransportError),
 
     /// Failed to receive the handshake response.
-    #[error("Unexpected handshake response!\nFailed to receive handshake response.")]
-    HandshakeReceiveFailed,
+    #[error("Failed to receive handshake response: {0}")]
+    HandshakeReceiveFailed(#[source] TransportError),
 
     /// Handshake response did not match the expected greeting.
     #[error("Unexpected handshake response!\nExpected: \"{expected}\"\nReceived: \"{received}\"")]
@@ -80,12 +80,12 @@ pub enum OdinError {
     UnexpectedHandshake,
 
     /// Failed to receive a protocol packet.
-    #[error("Failed to receive packet!")]
-    ReceivePacketFailed,
+    #[error("Failed to receive packet: {0}")]
+    ReceivePacketFailed(#[source] TransportError),
 
     /// Failed to send a protocol command.
-    #[error("Failed to send command!")]
-    SendCommandFailed,
+    #[error("Failed to send command: {0}")]
+    SendCommandFailed(#[source] TransportError),
 
     /// Packet response type was not what was expected.
     #[error("Response type mismatch! Expected: {expected}, Received: {received}")]
@@ -106,8 +106,8 @@ pub enum OdinError {
     },
 
     /// Failed to receive response for a sent chunk.
-    #[error("Failed to receive chunk response!")]
-    ChunkResponseReceiveFailed,
+    #[error("Failed to receive chunk response: {0}")]
+    ChunkResponseReceiveFailed(#[source] Box<OdinError>),
 
     /// An error reported by the Samsung LOKE bootloader.
     #[error("{0}")]
@@ -115,7 +115,7 @@ pub enum OdinError {
 
     /// The USB or serial transport could not be set up or failed to transfer data.
     #[error("USB transport error: {0}")]
-    Transport(String),
+    Transport(#[from] TransportError),
 
     /// A response packet from the device is malformed.
     #[error("{0}")]
@@ -140,6 +140,39 @@ pub enum OdinError {
     /// An I/O error occurred while reading or decompressing firmware data.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// An error from a USB or serial transport.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum TransportError {
+    /// The transfer did not complete before its timeout.
+    #[error("Transfer timed out")]
+    Timeout,
+
+    /// The transport accepted fewer bytes than were sent.
+    #[error("Short write: sent {sent} of {expected} bytes")]
+    ShortWrite {
+        /// The number of bytes the transport accepted.
+        sent: usize,
+        /// The number of bytes that were to be sent.
+        expected: usize,
+    },
+
+    /// The transport could not be set up.
+    #[error("{0}: {1}")]
+    Setup(String, #[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The backend library reported an error.
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl TransportError {
+    /// Wraps an error from the backend library.
+    pub(crate) fn backend(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(e))
+    }
 }
 
 /// Detailed error status reported by the Samsung LOKE bootloader.

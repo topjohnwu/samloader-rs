@@ -16,7 +16,8 @@
 //! Transport abstractions implemented by every USB and serial backend.
 
 use crate::compat::MaybeSend;
-use crate::error::OdinError;
+use crate::error::{OdinError, TransportError};
+use std::time::Duration;
 
 /// USB interface class code of CDC data interfaces, which carry the Odin
 /// protocol in Download Mode and AT commands in normal mode.
@@ -29,10 +30,16 @@ pub(crate) const USB_CLASS_CDC_DATA: u8 = 0x0A;
 pub trait UsbTransfer: MaybeSend {
     /// Resets the transport connection state and buffers.
     async fn reset(&mut self);
-    /// Sends a buffer of data across the transport with a timeout.
-    async fn send_data(&mut self, data: &[u8], timeout: i32) -> bool;
-    /// Receives data from the transport into a buffer, returning the number of bytes read.
-    async fn receive_data(&mut self, data: &mut [u8], timeout: i32) -> i32;
+    /// Sends all of `data` across the transport, failing if it cannot be sent
+    /// within `timeout`. An empty `data` sends a zero-length packet.
+    async fn send(&mut self, data: &[u8], timeout: Duration) -> Result<(), TransportError>;
+    /// Receives data from the transport into `data` within `timeout`,
+    /// returning the number of bytes read. A zero-length packet reads 0 bytes.
+    async fn receive(
+        &mut self,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, TransportError>;
     /// Returns the USB Product descriptor string if available.
     fn product_name(&self) -> Option<&str> {
         None
