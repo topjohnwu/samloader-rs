@@ -22,7 +22,7 @@ use crate::firmware::{
     verify_md5_footer,
 };
 use crate::progress::{self, FlashEvent};
-use crate::session::{OdinSession, RebootMode, parse_sales_code};
+use crate::session::{OdinSession, RebootMode, SalesCode};
 use futures::io::{AsyncRead, AsyncSeek, AsyncSeekExt, Cursor};
 use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
@@ -240,14 +240,17 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
             mut readers,
         } = self;
 
-        if let Some(sales_code) = &options.sales_code {
-            parse_sales_code(sales_code)?;
-        }
+        let sales_code = options
+            .sales_code
+            .as_deref()
+            .map(str::parse::<SalesCode>)
+            .transpose()?;
 
         if readers.is_empty() && pit.is_none() {
             options.warn_unused();
             return Ok(PreparedFlash {
                 options,
+                sales_code,
                 pit,
                 readers,
                 images: Vec::new(),
@@ -324,6 +327,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
 
         Ok(PreparedFlash {
             options,
+            sales_code,
             pit,
             readers,
             images,
@@ -376,6 +380,8 @@ impl PlannedImage {
 /// determined without a device or PIT. Created by [`FlashRequest::prepare`].
 pub struct PreparedFlash<P = Cursor<&'static [u8]>, I = Cursor<&'static [u8]>> {
     options: FlashOptions,
+    /// The validated sales code to set, if any.
+    sales_code: Option<SalesCode>,
     /// PIT to flash, given explicitly or found in a package.
     pit: Option<Vec<u8>>,
     readers: FirmwareReaders<P, I>,
@@ -509,7 +515,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
     /// Sets the CSC and erases the device as configured. These are the first writes
     /// to the device.
     async fn prepare_device(&self, session: &mut OdinSession) -> Result<(), FlashError> {
-        if let Some(sales_code) = &self.options.sales_code {
+        if let Some(sales_code) = self.sales_code {
             progress::println(&format!("Setting device sales code to {}...", sales_code));
             session.set_sales_code(sales_code).await?;
         }

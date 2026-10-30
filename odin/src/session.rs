@@ -500,9 +500,8 @@ impl OdinSession {
     }
 
     /// Sets the device CSC / Sales Code in bootloader parameter storage (Opcode 0x64, Subcmd 9).
-    pub async fn set_sales_code(&mut self, sales_code: &str) -> Result<(), OdinError> {
-        let code = parse_sales_code(sales_code)?;
-        let cmd = Command::session_sales_code(code);
+    pub async fn set_sales_code(&mut self, sales_code: SalesCode) -> Result<(), OdinError> {
+        let cmd = Command::session_sales_code(sales_code.0);
         self.request_ok(&cmd, COMMAND_TIMEOUT).await
     }
 
@@ -737,11 +736,26 @@ fn check_slice_size(size: usize) -> Result<(), OdinError> {
     Ok(())
 }
 
-/// Validates a CSC / sales code, which must be 3 alphanumeric ASCII characters.
-pub(crate) fn parse_sales_code(sales_code: &str) -> Result<[u8; 3], OdinError> {
-    match *sales_code.as_bytes() {
-        [a, b, c] if [a, b, c].iter().all(u8::is_ascii_alphanumeric) => Ok([a, b, c]),
-        _ => Err(OdinError::InvalidSalesCode(sales_code.to_string())),
+/// A CSC / sales code (e.g. `XAA`), which consists of 3 alphanumeric ASCII
+/// characters. Parse one from a string with [`str::parse`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SalesCode([u8; 3]);
+
+impl std::str::FromStr for SalesCode {
+    type Err = OdinError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match *s.as_bytes() {
+            [a, b, c] if [a, b, c].iter().all(u8::is_ascii_alphanumeric) => Ok(Self([a, b, c])),
+            _ => Err(OdinError::InvalidSalesCode(s.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for SalesCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only alphanumeric ASCII characters are accepted, so this is valid UTF-8
+        f.write_str(std::str::from_utf8(&self.0).unwrap_or_default())
     }
 }
 
@@ -874,21 +888,17 @@ mod tests {
         futures::executor::block_on(async {
             let mut session = mock_session(MockBackend::new()).await;
 
-            assert!(session.set_sales_code("TUR").await.is_ok());
+            let code: SalesCode = "TUR".parse().unwrap();
+            assert_eq!(code.to_string(), "TUR");
+            assert!(session.set_sales_code(code).await.is_ok());
 
             // Verify invalid formats are rejected
-            assert!(matches!(
-                session.set_sales_code("TU").await,
-                Err(OdinError::InvalidSalesCode(_))
-            ));
-            assert!(matches!(
-                session.set_sales_code("TUR1").await,
-                Err(OdinError::InvalidSalesCode(_))
-            ));
-            assert!(matches!(
-                session.set_sales_code("T-R").await,
-                Err(OdinError::InvalidSalesCode(_))
-            ));
+            for invalid in ["TU", "TUR1", "T-R"] {
+                assert!(matches!(
+                    invalid.parse::<SalesCode>(),
+                    Err(OdinError::InvalidSalesCode(_))
+                ));
+            }
 
             assert!(session.close().await.is_ok());
         });
