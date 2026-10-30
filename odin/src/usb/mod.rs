@@ -30,10 +30,17 @@ macro_rules! print_verbose {
 }
 
 mod backend;
+mod discovery;
 mod transport;
 
 pub use backend::UsbBackendOption;
 pub(crate) use backend::with_backend;
+pub(crate) use discovery::DeviceMode;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use discovery::VID_SAMSUNG;
+#[cfg(target_arch = "wasm32")]
+pub use discovery::request_device;
+pub use discovery::{create_backend, detect_device};
 #[cfg(any(feature = "nusb", feature = "rusb"))]
 pub(crate) use transport::USB_CLASS_CDC_DATA;
 pub use transport::{UsbBackend, UsbTransfer};
