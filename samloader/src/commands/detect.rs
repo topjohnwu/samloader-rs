@@ -16,7 +16,7 @@
 use crate::cli::DetectArgs;
 use crate::progress::CliProgress;
 use samloader_odin::{
-    UsbBackendOption, detect_device, futures::executor::block_on, query_device_info, set_progress,
+    OdinConnection, UsbBackendOption, detect_device, futures::executor::block_on, set_progress,
 };
 use std::error::Error;
 
@@ -31,7 +31,11 @@ pub(crate) fn run(args: DetectArgs, usb_backend: UsbBackendOption) -> Result<(),
             return Err("Failed to detect compatible download-mode device.".into());
         }
 
-        match query_device_info(usb_backend, false).await {
+        let info = match OdinConnection::open(usb_backend, false).await {
+            Ok(mut connection) => connection.query_device_info().await,
+            Err(e) => Err(e),
+        };
+        match info {
             Ok(info) => {
                 if json {
                     println!("{}", info.to_json());

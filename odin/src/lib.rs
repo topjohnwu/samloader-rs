@@ -23,7 +23,6 @@ compile_error!("Feature 'rusb' is not supported when building for WebAssembly!")
 compile_error!("Feature 'serialport' is not supported when building for WebAssembly!");
 
 mod compat;
-mod device;
 mod device_info;
 mod error;
 mod firmware;
@@ -38,7 +37,6 @@ mod usb;
 mod test_util;
 
 pub use compat::{MaybeSend, MaybeSync};
-pub use device::query_device_info;
 pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError};
 pub use firmware::verify_md5_footer;

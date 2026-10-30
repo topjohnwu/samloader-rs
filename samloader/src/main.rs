@@ -21,7 +21,6 @@ mod cli;
 mod commands;
 mod progress;
 mod readahead;
-mod session;
 
 use clap::Parser;
 use cli::{Cli, Command};

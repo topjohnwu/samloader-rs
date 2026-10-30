@@ -19,7 +19,7 @@ use crate::device_info::{DeviceInfo, SessionDeviceInfo};
 use crate::error::{LokeError, OdinError};
 use crate::progress;
 use crate::protocol::{CMD_PIT, Command, DataChunk, Response, STREAMING_CHUNK_ACK};
-use crate::usb::UsbTransfer;
+use crate::usb::{UsbBackendOption, UsbTransfer, create_backend};
 use futures::StreamExt;
 use futures::stream::Stream;
 use samloader_pit::PitEntry;
@@ -44,6 +44,12 @@ const PACKET_SIZE_DEFAULT: usize = 0x20000; // 128 KB default before negotiation
 const SLICE_TIMEOUT_DEFAULT: u32 = 30000;
 
 impl OdinConnection {
+    /// Opens a device in Download Mode with the selected backend. If `wait` is
+    /// set, waits until such a device is connected.
+    pub async fn open(usb_backend: UsbBackendOption, wait: bool) -> Result<Self, OdinError> {
+        Ok(Self::new(create_backend(usb_backend, wait).await?))
+    }
+
     /// Creates a new `OdinConnection` instance with a given transport.
     ///
     /// Following official `odin4` behavior, empty packets (ZLPs) after 1024-byte
@@ -179,6 +185,15 @@ pub struct OdinSession {
 }
 
 impl OdinSession {
+    /// Opens a device in Download Mode with the selected backend, performs the
+    /// handshake and begins a session. If `wait` is set, waits until such a
+    /// device is connected.
+    pub async fn connect(usb_backend: UsbBackendOption, wait: bool) -> Result<Self, OdinError> {
+        let mut connection = OdinConnection::open(usb_backend, wait).await?;
+        connection.init().await?;
+        connection.begin_session().await
+    }
+
     async fn begin(connection: OdinConnection) -> Result<Self, OdinError> {
         progress::println("Beginning session...");
 

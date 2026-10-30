@@ -18,14 +18,13 @@ This crate manages communication with Samsung devices in Download Mode (Odin pro
 
 ```rust,no_run
 use samloader_odin::{
-    OdinConnection, UsbBackendOption, create_backend, futures::executor::block_on,
+    OdinConnection, RebootMode, UsbBackendOption, futures::executor::block_on,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     block_on(async {
-        // 1. Establish the USB/VCOM backend connection
-        let usb = create_backend(UsbBackendOption::Nusb, true).await?;
-        let mut connection = OdinConnection::new(usb);
+        // 1. Open a device in Download Mode, waiting for one to be connected
+        let mut connection = OdinConnection::open(UsbBackendOption::Nusb, true).await?;
 
         // 2. Run the Loke protocol handshake (simple string in/out)
         connection.init().await?;
@@ -37,8 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pit_bytes = session.receive_pit_info().await?;
         println!("PIT downloaded successfully ({} bytes).", pit_bytes.len());
 
-        // 5. Safely end the session
-        session.end_session().await?;
+        // 5. Safely end the session, leaving the device in Download Mode
+        session.finish(RebootMode::None).await?;
 
         Ok(())
     })
@@ -51,7 +50,7 @@ Flashing happens in three phases: configuring a `FlashRequest` performs no I/O, 
 
 ```rust,no_run
 use samloader_odin::{
-    FlashRequest, OdinConnection, UsbBackendOption, create_backend,
+    FlashRequest, OdinSession, UsbBackendOption,
     futures::{executor::block_on, io::AllowStdIo},
 };
 use std::fs::File;
@@ -69,10 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 3. Connect to the device and flash
-        let usb = create_backend(UsbBackendOption::Nusb, true).await?;
-        let mut connection = OdinConnection::new(usb);
-        connection.init().await?;
-        let mut session = connection.begin_session().await?;
+        let mut session = OdinSession::connect(UsbBackendOption::Nusb, true).await?;
         prepared.execute(&mut session).await?;
 
         Ok(())

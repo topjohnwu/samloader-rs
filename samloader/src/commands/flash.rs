@@ -17,8 +17,9 @@
 use crate::cli::FlashArgs;
 use crate::progress::CliProgress;
 use crate::readahead::ReadaheadFile;
-use crate::session::connect;
-use samloader_odin::{FlashRequest, UsbBackendOption, futures::executor::block_on, set_progress};
+use samloader_odin::{
+    FlashRequest, OdinSession, UsbBackendOption, futures::executor::block_on, set_progress,
+};
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -123,7 +124,7 @@ pub(crate) fn run(
     }
 
     block_on(async {
-        let mut session = connect(usb_backend, args.odin.wait).await?;
+        let mut session = OdinSession::connect(usb_backend, args.odin.wait).await?;
         prepared.execute(&mut session).await?;
         Ok(())
     })
