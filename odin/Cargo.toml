@@ -26,10 +26,37 @@ serialport = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-timer = { workspace = true, features = ["wasm-bindgen"] }
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = [
+    "Navigator",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamReadResult",
+    "Serial",
+    "SerialOptions",
+    "SerialPort",
+    "SerialPortFilter",
+    "SerialPortInfo",
+    "SerialPortRequestOptions",
+    "Window",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+] }
 
 [features]
 default = ["nusb"]
 rusb = ["dep:rusb"]
 nusb = ["dep:nusb"]
-serialport = ["dep:serialport"]
+# Uses the `serialport` crate on native targets and Web Serial on WebAssembly.
+serialport = [
+    "dep:serialport",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 mock = []

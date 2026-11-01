@@ -204,6 +204,14 @@ pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), Transpo
                 .ok_or(TransportError::DeviceNotFound)?;
             Ok(())
         }
+        #[cfg(feature = "serialport")]
+        UsbBackendOption::Vcom => {
+            let filters: Vec<_> = DOWNLOAD_MODE_DEVICES
+                .iter()
+                .map(|&(vid, pid)| (vid, Some(pid)))
+                .collect();
+            crate::usb::request_port(&filters).await
+        }
         #[cfg(mock_backend)]
         UsbBackendOption::Mock => Ok(()),
     }

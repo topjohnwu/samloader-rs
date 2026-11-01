@@ -38,7 +38,7 @@ macro_rules! with_backend {
             }
             #[cfg(feature = "serialport")]
             $crate::usb::UsbBackendOption::Vcom => {
-                type $b = $crate::usb::SerialBackend;
+                type $b = $crate::usb::VcomBackend;
                 $body
             }
             #[cfg(mock_backend)]
@@ -57,7 +57,8 @@ pub enum UsbBackendOption {
     /// libusb (rusb) backend.
     #[cfg(feature = "rusb")]
     Libusb,
-    /// Virtual COM port (serialport) backend.
+    /// Virtual COM port backend: `serialport` on native targets, Web Serial on
+    /// WebAssembly.
     #[cfg(feature = "serialport")]
     Vcom,
     /// nusb backend.

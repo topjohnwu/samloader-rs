@@ -80,12 +80,14 @@ impl OdinConnection {
             .await
             .map_err(OdinError::HandshakeReceiveFailed)?;
 
-        if response != "LOKE"
-            && response.starts_with("FAIL")
-            && self
-                .receive_string(Duration::from_millis(500))
-                .await
-                .is_ok_and(|s| s == "LOKE")
+        // A stale FAIL response may precede LOKE, either in a separate read or,
+        // on serial transports without packet boundaries, in the same read.
+        if response.starts_with("FAIL")
+            && (response.ends_with("LOKE")
+                || self
+                    .receive_string(Duration::from_millis(500))
+                    .await
+                    .is_ok_and(|s| s == "LOKE"))
         {
             response = "LOKE".to_string();
         }
@@ -1074,17 +1076,15 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_handshake_recovers_from_queued_fail_response() {
+    /// Runs the handshake against a transport that returns `reads` in order.
+    fn handshake_with_reads(reads: &[&[u8]]) -> Result<(), OdinError> {
         futures::executor::block_on(async {
             let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
-
-            {
-                let mut inner = spy_inner.lock().unwrap();
-                // Queue "FAILunknown command" followed by "LOKE"
-                inner.read_queue.push_back(b"FAILunknown command".to_vec());
-                inner.read_queue.push_back(b"LOKE".to_vec());
-            }
+            spy_inner
+                .lock()
+                .unwrap()
+                .read_queue
+                .extend(reads.iter().map(|r| r.to_vec()));
 
             let spy = Box::new(SpyTransfer {
                 inner: spy_inner.clone(),
@@ -1092,11 +1092,30 @@ mod tests {
             });
 
             let mut conn = OdinConnection::new(spy);
-            assert!(conn.init().await.is_ok());
+            let result = conn.init().await;
 
             let inner = spy_inner.lock().unwrap();
             assert_eq!(inner.sent_data.len(), 1);
             assert_eq!(inner.sent_data[0], b"ODIN");
-        });
+            result
+        })
+    }
+
+    #[test]
+    fn test_handshake_recovers_from_queued_fail_response() {
+        assert!(handshake_with_reads(&[b"FAILunknown command", b"LOKE"]).is_ok());
+    }
+
+    #[test]
+    fn test_handshake_recovers_from_merged_fail_response() {
+        assert!(handshake_with_reads(&[b"FAILunknown commandLOKE"]).is_ok());
+    }
+
+    #[test]
+    fn test_handshake_rejects_fail_without_loke() {
+        assert!(matches!(
+            handshake_with_reads(&[b"FAILunknown command"]),
+            Err(OdinError::HandshakeMismatch { .. })
+        ));
     }
 }

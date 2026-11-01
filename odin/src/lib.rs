@@ -19,9 +19,6 @@
 #[cfg(all(target_arch = "wasm32", feature = "rusb"))]
 compile_error!("Feature 'rusb' is not supported when building for WebAssembly!");
 
-#[cfg(all(target_arch = "wasm32", feature = "serialport"))]
-compile_error!("Feature 'serialport' is not supported when building for WebAssembly!");
-
 mod compat;
 mod device_info;
 mod error;
@@ -57,8 +54,11 @@ pub use usb::NusbBackend;
 #[cfg(feature = "rusb")]
 pub use usb::RusbBackend;
 
-#[cfg(feature = "serialport")]
+#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
 pub use usb::SerialBackend;
+
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+pub use usb::WebSerialBackend;
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
 pub use futures;
@@ -67,8 +67,10 @@ pub use nusb;
 #[cfg(feature = "rusb")]
 pub use rusb;
 pub use samloader_pit;
-#[cfg(feature = "serialport")]
+#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
 pub use serialport;
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+pub use web_sys;
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

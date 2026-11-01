@@ -78,16 +78,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## WebAssembly
 
-The `nusb` backend supports `wasm32-unknown-unknown` in browsers with [WebUSB](https://wicg.github.io/webusb/) support (Chromium-based browsers). The `rusb` and `serialport` backends are not available on WebAssembly.
+The `nusb` backend supports `wasm32-unknown-unknown` in browsers with [WebUSB](https://wicg.github.io/webusb/) support (Chromium-based browsers). On WebAssembly, the `serialport` feature enables the `vcom` backend using [Web Serial](https://wicg.github.io/serial/) instead of the `serialport` crate. On Windows, Web Serial talks to the standard virtual COM port driver, so unlike WebUSB, it does not require replacing the device driver with WinUSB (e.g. using Zadig). The `rusb` backend is not available on WebAssembly.
 
-`web-sys` considers its WebUSB bindings unstable and [requires the root crate to opt in](https://wasm-bindgen.github.io/wasm-bindgen/web-sys/unstable-apis.html). This flag is not inherited from dependencies, so put the following in the `.cargo/config.toml` of the project building the final WebAssembly binary, otherwise `nusb` fails to compile:
+`web-sys` considers its WebUSB and Web Serial bindings unstable and [requires the root crate to opt in](https://wasm-bindgen.github.io/wasm-bindgen/web-sys/unstable-apis.html). This flag is not inherited from dependencies, so put the following in the `.cargo/config.toml` of the project building the final WebAssembly binary, otherwise the crate fails to compile:
 
 ```toml
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=web_sys_unstable_apis"]
 ```
 
-Browsers only expose USB devices the user has granted access to. Before connecting, call `request_device` (or `request_reboot_device` before `reboot_download`) from a user gesture such as a click handler to prompt for permission.
+Browsers only expose USB devices and serial ports the user has granted access to. Before connecting, call `request_device` (or `request_reboot_device` before `reboot_download`) from a user gesture such as a click handler to prompt for permission.
 
 ## License
 

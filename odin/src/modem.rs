@@ -45,6 +45,11 @@ pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), 
                 .ok_or(TransportError::DeviceNotFound)?;
             Ok(())
         }
+        // Web Serial cannot filter by interface class, so this matches any
+        // Samsung serial port. Ports of devices already in Download Mode are
+        // skipped when opening a device in normal mode.
+        #[cfg(feature = "serialport")]
+        UsbBackendOption::Vcom => crate::usb::request_port(&[(VID_SAMSUNG, None)]).await,
         #[cfg(mock_backend)]
         UsbBackendOption::Mock => Ok(()),
     }

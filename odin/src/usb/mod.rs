@@ -51,11 +51,28 @@ pub use rusb::RusbBackend;
 #[cfg(feature = "rusb")]
 mod rusb;
 
-#[cfg(feature = "serialport")]
+#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
 pub use serial::SerialBackend;
 
-#[cfg(feature = "serialport")]
+#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
 mod serial;
+
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+pub use web_serial::WebSerialBackend;
+
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+pub(crate) use web_serial::request_port;
+
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+mod web_serial;
+
+/// The backend behind [`UsbBackendOption::Vcom`] on the current target.
+#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
+pub(crate) type VcomBackend = SerialBackend;
+
+/// The backend behind [`UsbBackendOption::Vcom`] on the current target.
+#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
+pub(crate) type VcomBackend = WebSerialBackend;
 
 #[cfg(feature = "nusb")]
 pub use nusb::NusbBackend;

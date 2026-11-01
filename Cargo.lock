@@ -1269,6 +1269,7 @@ dependencies = [
  "fast-md5",
  "futures",
  "futures-timer",
+ "js-sys",
  "lz4_flex",
  "nusb",
  "rusb",
@@ -1276,6 +1277,9 @@ dependencies = [
  "serialport",
  "tar",
  "thiserror",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
