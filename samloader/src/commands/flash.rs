@@ -19,6 +19,7 @@ use crate::progress::CliProgress;
 use crate::readahead::ReadaheadFile;
 use samloader_odin::{
     FlashRequest, OdinSession, UsbBackendOption, futures::executor::block_on, set_progress,
+    verify_md5_footer,
 };
 use std::error::Error;
 use std::fs::File;
@@ -72,7 +73,7 @@ pub(crate) fn run(
         );
     }
 
-    let opened_packages = args
+    let mut opened_packages = args
         .packages()
         .map(|pkg| Ok((pkg, open(pkg)?)))
         .collect::<Result<Vec<_>, String>>()?;
@@ -90,10 +91,20 @@ pub(crate) fn run(
         None => None,
     };
 
+    set_progress(CliProgress::new(verbose));
+
+    if !args.skip_md5 {
+        for (pkg, reader) in &mut opened_packages {
+            if pkg.to_lowercase().ends_with(".md5") {
+                block_on(verify_md5_footer(reader, pkg))
+                    .map_err(|e| format!("MD5 verification failed for \"{}\": {}", pkg, e))?;
+            }
+        }
+    }
+
     let mut request = FlashRequest::new()
         .reboot_mode(args.odin.reboot_mode())
         .skip_size_check(args.skip_size_check)
-        .skip_md5(args.skip_md5)
         .erase(args.erase)
         .packages(opened_packages)
         .partitions(opened_partitions)
@@ -107,7 +118,6 @@ pub(crate) fn run(
     }
 
     // Validate and index the inputs before connecting to the device
-    set_progress(CliProgress::new(verbose));
     let prepared = block_on(request.prepare())?;
 
     if !args.force && prepared.flashes_userdata() {

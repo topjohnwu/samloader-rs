@@ -291,10 +291,6 @@ pub enum FlashError {
     #[error("Corrupted archive entry in \"{0}\": {1}")]
     ArchiveCorrupted(String, #[source] std::io::Error),
 
-    /// MD5 verification failed for a TAR archive.
-    #[error("MD5 verification failed for \"{0}\": {1}")]
-    Md5VerificationFailed(String, #[source] std::io::Error),
-
     /// The files within the packages do not agree on the download allowlist manifest.
     #[error("Cross-archive consistency check failed! download-list.txt does not match.")]
     CrossArchiveInconsistency,

@@ -17,10 +17,8 @@ use super::AlreadyReported;
 use crate::cli::VerifyMd5Args;
 use crate::print_error;
 use crate::progress::CliProgress;
-use samloader_odin::{
-    futures::{executor::block_on, io::AllowStdIo},
-    set_progress, verify_md5_footer,
-};
+use crate::readahead::ReadaheadFile;
+use samloader_odin::{futures::executor::block_on, set_progress, verify_md5_footer};
 use std::error::Error;
 use std::fs::File;
 
@@ -31,7 +29,7 @@ pub(crate) fn run(args: VerifyMd5Args) -> Result<(), Box<dyn Error>> {
     block_on(async {
         // Verify every file, reporting each failure as it is found
         for file_path in &args.files {
-            let file = match File::open(file_path) {
+            let file = match File::open(file_path).and_then(ReadaheadFile::new) {
                 Ok(f) => f,
                 Err(e) => {
                     print_error!("Failed to open file \"{}\": {}", file_path, e);
@@ -40,7 +38,7 @@ pub(crate) fn run(args: VerifyMd5Args) -> Result<(), Box<dyn Error>> {
                 }
             };
 
-            if let Err(e) = verify_md5_footer(AllowStdIo::new(&file), file_path).await {
+            if let Err(e) = verify_md5_footer(file, file_path).await {
                 print_error!("MD5 verification failed for \"{}\": {}", file_path, e);
                 success = false;
             }

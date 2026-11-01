@@ -733,15 +733,6 @@ fn test_prepare_rejects_invalid_inputs() {
     let pit_tar = build_tar(&[("boot.img", b"BOOT"), ("device.pit", b"invalid")]);
     let res = prepare(FlashRequest::new().packages([("CSC.tar", Cursor::new(pit_tar.as_slice()))]));
     assert!(matches!(res, Err(FlashError::PitUnpackFailed(_))));
-
-    let _guard = crate::progress::TEST_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut md5_tar = tar_bytes.clone();
-    md5_tar.extend_from_slice(b"0123456789abcdef0123456789abcdef  AP.tar\n");
-    let res =
-        prepare(FlashRequest::new().packages([("AP.tar.md5", Cursor::new(md5_tar.as_slice()))]));
-    assert!(matches!(res, Err(FlashError::Md5VerificationFailed(name, _)) if name == "AP.tar.md5"));
 }
 
 #[test]

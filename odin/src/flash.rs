@@ -19,7 +19,6 @@ use crate::error::SendPartitionError;
 use crate::firmware::avb;
 use crate::firmware::{
     FirmwareImage, FirmwareReaders, ImageSource, PackageIndex, normalize_basename,
-    verify_md5_footer,
 };
 use crate::progress::{self, FlashEvent};
 use crate::session::{OdinSession, RebootMode, SalesCode};
@@ -33,7 +32,6 @@ use std::io::SeekFrom;
 struct FlashOptions {
     reboot_mode: RebootMode,
     skip_size_check: bool,
-    skip_md5: bool,
     sales_code: Option<String>,
     erase: bool,
     skip: Vec<String>,
@@ -138,12 +136,6 @@ impl<P, I> FlashRequest<P, I> {
         self
     }
 
-    /// Sets whether to skip MD5 package verification.
-    pub fn skip_md5(mut self, enabled: bool) -> Self {
-        self.options.skip_md5 = enabled;
-        self
-    }
-
     /// Sets an explicit PIT payload to flash. Without one, a PIT found in a
     /// package is flashed.
     pub fn pit(mut self, pit_bytes: impl Into<Vec<u8>>) -> Self {
@@ -228,11 +220,11 @@ impl<P, I> FlashRequest<P, I> {
 impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRequest<P, I> {
     /// Reads and validates all inputs without a device or PIT.
     ///
-    /// This verifies MD5 footers, indexes the packages, parses the LZ4 header of
-    /// every LZ4 compressed image, and inspects standalone super images. A local
-    /// PIT is checked to be valid, but not used. The result only depends on the
-    /// inputs and options, as matching images to partitions, including skips,
-    /// needs the device's PIT and happens in [`PreparedFlash::execute`].
+    /// This indexes the packages, parses the LZ4 header of every LZ4 compressed
+    /// image, and inspects standalone super images. A local PIT is checked to
+    /// be valid, but not used. The result only depends on the inputs and
+    /// options, as matching images to partitions, including skips, needs the
+    /// device's PIT and happens in [`PreparedFlash::execute`].
     pub async fn prepare(self) -> Result<PreparedFlash<P, I>, FlashError> {
         let Self {
             options,
@@ -257,16 +249,6 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
                 super_used_size: None,
                 has_download_list: false,
             });
-        }
-
-        if !options.skip_md5 {
-            for (name, reader) in &mut readers.packages {
-                if name.to_lowercase().ends_with(".md5") {
-                    verify_md5_footer(&mut *reader, name)
-                        .await
-                        .map_err(|e| FlashError::Md5VerificationFailed(name.clone(), e))?;
-                }
-            }
         }
 
         let index = PackageIndex::scan(&mut readers.packages, pit.is_none()).await?;
