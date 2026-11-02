@@ -1291,6 +1291,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "samloader-web"
+version = "2.2.0"
+dependencies = [
+ "futures",
+ "js-sys",
+ "samloader-odin",
+ "samloader-pit",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"

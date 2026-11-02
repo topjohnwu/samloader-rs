@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>samloader-rs — Odin Web Flasher</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231a73e8' stroke-width='2'%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Top App Bar -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="header-brand">
+        <div class="brand-logo-wrap">
+          <svg class="header-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">samloader-rs</span>
+          <span class="brand-pill">Odin Web Flasher</span>
+        </div>
+      </div>
+
+      <div class="header-controls">
+        <div class="backend-selector-group">
+          <label for="backend-select" class="backend-label">Backend</label>
+          <select id="backend-select" class="select-input">
+            <option value="nusb">WebUSB (nusb)</option>
+            <option value="vcom">WebSerial (vcom)</option>
+            <option value="mock">Mock Device (Debug)</option>
+          </select>
+        </div>
+        <div class="backend-selector-group">
+          <label for="opt-reboot-mode" class="backend-label">Reboot</label>
+          <select id="opt-reboot-mode" class="select-input">
+            <option value="normal" selected>Normal Reboot</option>
+            <option value="download">Download Mode</option>
+            <option value="none">No Reboot</option>
+          </select>
+        </div>
+        <div id="connection-chip" class="status-chip chip-disconnected">
+          <span class="chip-dot"></span>
+          <span class="chip-label">No Device</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="app-container">
+
+    <!-- Step 1: Connect a Device -->
+    <section class="card device-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="step-number">1</span>
+          <div>
+            <h2 class="card-title">Connect a device</h2>
+            <p id="paired-devices-summary" class="card-subtitle">Connect a Samsung device in Download Mode or Normal Mode</p>
+          </div>
+        </div>
+        <div id="device-header-pair" class="header-pair-actions" hidden>
+          <button type="button" id="btn-pair-download-sm" class="btn btn-sm btn-primary-outline">
+            + Download Mode
+          </button>
+          <button type="button" id="btn-pair-normal-sm" class="btn btn-sm btn-outline">
+            + Normal Mode (AT)
+          </button>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <!-- Empty State (shown when no devices are paired) -->
+        <div id="device-empty-state" class="device-empty-state">
+          <div class="empty-icon-circle">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="2" width="12" height="20" rx="2.5"/>
+              <path d="M10 18h4"/>
+              <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
+            </svg>
+          </div>
+          <div class="empty-state-title">No devices connected</div>
+          <p class="empty-state-desc">
+            Plug in your Samsung device via USB. Pair a <strong>Download Mode</strong> device to flash firmware, or pair a <strong>Normal Mode</strong> device to reboot it into Download Mode.
+          </p>
+          <div id="device-pair-toolbar" class="device-pair-toolbar">
+            <button type="button" id="btn-pair-download" class="btn btn-primary">
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M10 4v12M4 10h12" stroke-linecap="round"/>
+              </svg>
+              Add Download Mode device
+            </button>
+            <button type="button" id="btn-pair-normal" class="btn btn-outline">
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <rect x="6" y="2.5" width="8" height="15" rx="1.8"/>
+                <circle cx="10" cy="14.5" r="0.8" fill="currentColor"/>
+              </svg>
+              Add Normal Mode device
+            </button>
+          </div>
+        </div>
+
+        <!-- Connected Device List -->
+        <div id="device-list-wrap" class="device-list-wrap" hidden>
+          <div id="device-list" class="device-list" role="list" aria-label="Connected Samsung devices"></div>
+
+          <!-- Hardware Telemetry Grid (shown when DVIF is queried) -->
+          <div id="device-info-grid" class="device-info-grid" hidden></div>
+          <div id="device-info-box" class="info-box" hidden></div>
+
+          <!-- Contextual Device Actions Toolbar -->
+          <div id="device-actions-bar" class="device-actions-bar">
+            <div class="device-actions-group">
+              <button type="button" id="btn-detect-device" class="btn btn-sm btn-outline" title="Query hardware info (DVIF) from Download Mode device">
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <circle cx="9" cy="9" r="5.5"/>
+                  <path d="M13.2 13.2L17 17" stroke-linecap="round"/>
+                </svg>
+                Query Device Info
+              </button>
+              <button type="button" id="btn-dump-pit" class="btn btn-sm btn-outline" title="Download and print Partition Information Table (PIT)">
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <rect x="4" y="3" width="12" height="14" rx="1.5"/>
+                  <path d="M7 7h6M7 10.5h6M7 14h4" stroke-linecap="round"/>
+                </svg>
+                Dump PIT
+              </button>
+              <button type="button" id="btn-reboot-download" class="btn btn-sm btn-outline" title="Send AT+SUDDLMOD=0,0 to reboot a normal-mode device into Download Mode">
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 16h12" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Reboot to Download (AT)
+              </button>
+            </div>
+
+            <button type="button" id="btn-reboot-odin" class="btn btn-sm btn-outline" title="Open an Odin session and reboot the device using the global Reboot setting">
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M16 10a6 6 0 11-1.8-4.3M16 3.5v3.5h-3.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Reboot (Odin)
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2: Select Firmware Packages -->
+    <section class="card slots-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="step-number">2</span>
+          <div>
+            <h2 class="card-title">Select firmware packages</h2>
+            <p class="card-subtitle">Drag &amp; drop archives anywhere or select individual package slots</p>
+          </div>
+        </div>
+        <div class="slots-header-actions">
+          <label class="inline-check-toggle" for="opt-skip-md5">
+            <input type="checkbox" id="opt-skip-md5">
+            <span>Skip MD5</span>
+          </label>
+          <input type="file" id="input-multi-files" multiple accept=".tar,.md5,.tar.md5,.pit,.bin,.img,.lz4" hidden>
+          <button type="button" id="btn-browse-multi" class="btn btn-sm btn-primary-outline">
+            <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M3 6.5A1.5 1.5 0 014.5 5h3.3l1.7 2h6A1.5 1.5 0 0117 8.5v6a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 013 14.5v-8z"/>
+            </svg>
+            Auto-Assign Files...
+          </button>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <div class="slots-grid">
+
+          <!-- BL Slot -->
+          <div class="slot-box" data-slot="BL" id="slot-box-BL">
+            <input type="file" id="input-BL" class="slot-file-input" accept=".tar,.md5,.tar.md5,.bin,.img,.lz4" hidden>
+            <div class="dropzone" id="dropzone-BL">
+              <div class="slot-left">
+                <span class="slot-badge slot-badge-bl">BL</span>
+                <div class="dropzone-content">
+                  <span class="slot-label">Bootloader</span>
+                  <span class="file-name" id="file-name-BL">Select BL_*.tar.md5</span>
+                </div>
+              </div>
+              <div class="slot-right">
+                <span class="file-size" id="file-size-BL"></span>
+                <span class="badge badge-idle" id="md5-badge-BL">Empty</span>
+                <button type="button" class="btn-clear-slot" id="clear-BL" title="Remove file" hidden>&times;</button>
+              </div>
+            </div>
+            <div class="slot-progress-track">
+              <div class="progress-bar-fill" id="md5-bar-BL" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- AP Slot -->
+          <div class="slot-box" data-slot="AP" id="slot-box-AP">
+            <input type="file" id="input-AP" class="slot-file-input" accept=".tar,.md5,.tar.md5,.bin,.img,.lz4" hidden>
+            <div class="dropzone" id="dropzone-AP">
+              <div class="slot-left">
+                <span class="slot-badge slot-badge-ap">AP</span>
+                <div class="dropzone-content">
+                  <span class="slot-label">System / Application</span>
+                  <span class="file-name" id="file-name-AP">Select AP_*.tar.md5</span>
+                </div>
+              </div>
+              <div class="slot-right">
+                <span class="file-size" id="file-size-AP"></span>
+                <span class="badge badge-idle" id="md5-badge-AP">Empty</span>
+                <button type="button" class="btn-clear-slot" id="clear-AP" title="Remove file" hidden>&times;</button>
+              </div>
+            </div>
+            <div class="slot-progress-track">
+              <div class="progress-bar-fill" id="md5-bar-AP" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- CP Slot -->
+          <div class="slot-box" data-slot="CP" id="slot-box-CP">
+            <input type="file" id="input-CP" class="slot-file-input" accept=".tar,.md5,.tar.md5,.bin,.img,.lz4" hidden>
+            <div class="dropzone" id="dropzone-CP">
+              <div class="slot-left">
+                <span class="slot-badge slot-badge-cp">CP</span>
+                <div class="dropzone-content">
+                  <span class="slot-label">Modem / Radio</span>
+                  <span class="file-name" id="file-name-CP">Select CP_*.tar.md5</span>
+                </div>
+              </div>
+              <div class="slot-right">
+                <span class="file-size" id="file-size-CP"></span>
+                <span class="badge badge-idle" id="md5-badge-CP">Empty</span>
+                <button type="button" class="btn-clear-slot" id="clear-CP" title="Remove file" hidden>&times;</button>
+              </div>
+            </div>
+            <div class="slot-progress-track">
+              <div class="progress-bar-fill" id="md5-bar-CP" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- CSC Slot -->
+          <div class="slot-box" data-slot="CSC" id="slot-box-CSC">
+            <input type="file" id="input-CSC" class="slot-file-input" accept=".tar,.md5,.tar.md5,.bin,.img,.lz4" hidden>
+            <div class="dropzone" id="dropzone-CSC">
+              <div class="slot-left">
+                <span class="slot-badge slot-badge-csc">CSC</span>
+                <div class="dropzone-content">
+                  <span class="slot-label">CSC / HOME_CSC</span>
+                  <span class="file-name" id="file-name-CSC">Select CSC_*.tar.md5</span>
+                </div>
+              </div>
+              <div class="slot-right">
+                <span class="file-size" id="file-size-CSC"></span>
+                <span class="badge badge-idle" id="md5-badge-CSC">Empty</span>
+                <button type="button" class="btn-clear-slot" id="clear-CSC" title="Remove file" hidden>&times;</button>
+              </div>
+            </div>
+            <div class="slot-progress-track">
+              <div class="progress-bar-fill" id="md5-bar-CSC" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- USERDATA Slot -->
+          <div class="slot-box" data-slot="USERDATA" id="slot-box-USERDATA">
+            <input type="file" id="input-USERDATA" class="slot-file-input" accept=".tar,.md5,.tar.md5,.bin,.img,.lz4" hidden>
+            <div class="dropzone" id="dropzone-USERDATA">
+              <div class="slot-left">
+                <span class="slot-badge slot-badge-userdata">USER</span>
+                <div class="dropzone-content">
+                  <span class="slot-label">User Data</span>
+                  <span class="file-name" id="file-name-USERDATA">Select USERDATA_*.tar.md5</span>
+                </div>
+              </div>
+              <div class="slot-right">
+                <span class="file-size" id="file-size-USERDATA"></span>
+                <span class="badge badge-idle" id="md5-badge-USERDATA">Empty</span>
+                <button type="button" class="btn-clear-slot" id="clear-USERDATA" title="Remove file" hidden>&times;</button>
+              </div>
+            </div>
+            <div class="slot-progress-track">
+              <div class="progress-bar-fill" id="md5-bar-USERDATA" style="width: 0%"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: Configure & Flash -->
+    <section class="card options-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="step-number">3</span>
+          <div>
+            <h2 class="card-title">Configure &amp; flash</h2>
+            <p class="card-subtitle">Configure custom PIT, optional AVB patching, storage erase, or carrier sales code</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-body options-body">
+        <div class="options-fields-row">
+          <div class="field-group">
+            <span class="field-title">Partition Table (PIT) <span class="field-optional">(optional)</span></span>
+            <div class="slot-box pit-config-box" data-slot="PIT" id="slot-box-PIT">
+              <input type="file" id="input-PIT" class="slot-file-input" accept=".pit" hidden>
+              <div class="dropzone pit-dropzone" id="dropzone-PIT">
+                <div class="slot-left">
+                  <span class="slot-badge slot-badge-pit">PIT</span>
+                  <div class="dropzone-content">
+                    <span class="file-name" id="file-name-PIT">Select *.pit file</span>
+                  </div>
+                </div>
+                <div class="slot-right">
+                  <span class="file-size" id="file-size-PIT"></span>
+                  <span class="badge badge-idle" id="md5-badge-PIT">Empty</span>
+                  <button type="button" class="btn-clear-slot" id="clear-PIT" title="Remove file" hidden>&times;</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="field-group">
+            <label for="opt-sales-code" class="field-title">CSC / Sales Code <span class="field-optional">(optional)</span></label>
+            <input type="text" id="opt-sales-code" class="text-input-sm" maxlength="3" placeholder="e.g. XAA">
+          </div>
+        </div>
+
+        <div class="options-checks-grid">
+          <label class="option-tile">
+            <input type="checkbox" id="opt-nand-erase">
+            <div class="option-tile-text">
+              <span class="option-tile-title">NAND Erase (USERDATA)</span>
+              <span class="option-tile-desc">Perform low-level storage erase before flashing</span>
+            </div>
+          </label>
+          <label class="option-tile">
+            <input type="checkbox" id="opt-disable-verity">
+            <div class="option-tile-text">
+              <span class="option-tile-title">Disable dm-verity</span>
+              <span class="option-tile-desc">Patch VBMETA flags to disable hashtree verification</span>
+            </div>
+          </label>
+          <label class="option-tile">
+            <input type="checkbox" id="opt-disable-verification">
+            <div class="option-tile-text">
+              <span class="option-tile-title">Disable AVB Verification</span>
+              <span class="option-tile-desc">Patch VBMETA flags to disable boot verification</span>
+            </div>
+          </label>
+          <label class="option-tile">
+            <input type="checkbox" id="opt-skip-size-check">
+            <div class="option-tile-text">
+              <span class="option-tile-title">Skip Size Check</span>
+              <span class="option-tile-desc">Allow images larger than PIT partition size</span>
+            </div>
+          </label>
+        </div>
+
+        <div class="action-bar">
+          <button type="button" id="btn-reset-slots" class="btn btn-outline">
+            Reset Slots
+          </button>
+          <button type="button" id="btn-flash-firmware" class="btn btn-flash" disabled>
+            <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M11.3 1.5L4.5 11h5l-.8 7.5L15.5 9h-5l.8-7.5z"/>
+            </svg>
+            Flash Firmware
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 4: Progress & Activity Log -->
+    <section class="card terminal-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="step-number">4</span>
+          <div>
+            <h2 class="card-title">Progress &amp; activity log</h2>
+            <p id="flash-status-text" class="card-subtitle">Status: Ready</p>
+          </div>
+        </div>
+        <div class="terminal-actions">
+          <span id="flash-percent-text" class="progress-percent-pill">0%</span>
+          <button type="button" id="btn-clear-log" class="btn btn-sm btn-outline">Clear Log</button>
+        </div>
+      </div>
+
+      <div class="main-progress-bg">
+        <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
+      </div>
+
+      <div class="card-body terminal-body">
+        <div class="log-terminal">
+          <pre id="log-output" class="log-output">-- samloader-rs Odin Web Flasher Initialized --</pre>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

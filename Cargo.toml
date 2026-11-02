@@ -4,6 +4,7 @@ members = [
     "fus",
     "pit",
     "odin",
+    "web",
 ]
 resolver = "2"
 
