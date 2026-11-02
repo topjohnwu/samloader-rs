@@ -4,31 +4,26 @@ Browser-based Samsung Odin firmware flasher powered by [`samloader-odin`](../odi
 
 ## Prerequisites
 
-1. Add the `wasm32-unknown-unknown` target to your Rust toolchain:
+Add the `wasm32-unknown-unknown` target to your Rust toolchain:
 
-   ```bash
-   rustup target add wasm32-unknown-unknown
-   ```
-
-2. Install `wasm-bindgen-cli` (matching the `wasm-bindgen` version in [`Cargo.lock`](../Cargo.lock)):
-
-   ```bash
-   cargo install wasm-bindgen-cli
-   ```
+```bash
+rustup target add wasm32-unknown-unknown
+```
 
 ## Building
 
 From the repository root, compile `samloader-web` for WebAssembly and generate the JS/WASM bindings into `web/pkg`:
 
 ```bash
-cargo build -p samloader-web --release --target wasm32-unknown-unknown
-wasm-bindgen --target web --out-dir web/pkg target/wasm32-unknown-unknown/release/samloader_web.wasm
+cargo xtask build-web
+# or
+cargo build-web
 ```
 
-Alternatively, if you have [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) installed:
+To build with debug/dev profile instead:
 
 ```bash
-wasm-pack build web --target web --out-dir pkg
+cargo xtask build-web --dev
 ```
 
 ## Running Locally

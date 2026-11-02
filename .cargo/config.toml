@@ -1,3 +1,7 @@
+[alias]
+xtask = "run --package xtask --"
+build-web = "run --package xtask -- build-web"
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
