@@ -194,7 +194,7 @@ export async function verifyPackageMd5(file, onProgress = () => {}) {
 /**
  * Flashes firmware package files to a connected Samsung Download Mode device.
  * @param {string} backend Backend option ("nusb", "vcom", "mock")
- * @param {Object} files Object mapping slot names / filenames to File/Blob/Uint8Array objects or { name, data }
+ * @param {Object} files Object mapping slot names / filenames to File/Blob/Uint8Array objects or { name, data }, and optional `partitions` array of `{ file, partition? }`
  * @param {Object} [options] Flashing options
  * @param {"download" | "normal" | "none"} [options.reboot="normal"]
  * @param {boolean} [options.erase=false]

@@ -449,6 +449,21 @@ fn extract_explicit_name_from_js(val: &JsValue) -> Option<String> {
     None
 }
 
+fn extract_explicit_partition_from_js(val: &JsValue) -> Option<String> {
+    if val.is_object() {
+        let obj: &js_sys::Object = val.unchecked_ref();
+        if let Some(s) = js_sys::Reflect::get(obj, &JsValue::from_str("partition"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// Returns array of supported backend option names ("nusb", "vcom", "mock").
 #[wasm_bindgen]
 pub fn get_backend_options() -> Vec<String> {
@@ -666,6 +681,21 @@ pub async fn start_flash(
             continue;
         }
 
+        if key_str.eq_ignore_ascii_case("partitions") && js_sys::Array::is_array(&val_js) {
+            let arr: js_sys::Array = val_js.unchecked_into();
+            for entry_js in arr.iter() {
+                if entry_js.is_null() || entry_js.is_undefined() {
+                    continue;
+                }
+                let reader = extract_reader_from_js(&entry_js)?;
+                let filename = extract_explicit_name_from_js(&entry_js)
+                    .ok_or_else(|| JsValue::from_str("Partition entry is missing a filename"))?;
+                let target_partition = extract_explicit_partition_from_js(&entry_js);
+                partitions_vec.push((target_partition, filename, reader));
+            }
+            continue;
+        }
+
         let mut reader = extract_reader_from_js(&val_js)?;
         let explicit_name = extract_explicit_name_from_js(&val_js);
         let filename = explicit_name.clone().unwrap_or_else(|| key_str.clone());
@@ -683,15 +713,17 @@ pub async fn start_flash(
         {
             packages_vec.push((filename, reader));
         } else {
-            let target_partition = if !is_package_slot
-                && explicit_name.is_some()
-                && !key_str.is_empty()
-                && !key_str.eq_ignore_ascii_case(&filename)
-            {
-                Some(key_str)
-            } else {
-                None
-            };
+            let target_partition = extract_explicit_partition_from_js(&val_js).or_else(|| {
+                if !is_package_slot
+                    && explicit_name.is_some()
+                    && !key_str.is_empty()
+                    && !key_str.eq_ignore_ascii_case(&filename)
+                {
+                    Some(key_str)
+                } else {
+                    None
+                }
+            });
             partitions_vec.push((target_partition, filename, reader));
         }
     }

@@ -56,10 +56,13 @@ const state = {
   },
   md5Results: {},
   activeMd5Slot: null,
+  partitions: [],
+  nextPartitionId: 1,
   isBusy: false,
 };
 
 let md5Worker = null;
+let draggedPartitionId = null;
 
 // --- Helper Functions ---
 function appendLog(msg) {
@@ -378,45 +381,245 @@ function clearSlot(slot) {
   updateControlsState();
 }
 
-function matchFileNameToSlot(filename) {
-  const upper = filename.toUpperCase();
-  if (upper.startsWith("BL_")) return "BL";
-  if (upper.startsWith("AP_") || upper.startsWith("CODE_")) return "AP";
-  if (upper.startsWith("CP_") || upper.startsWith("MODEM_")) return "CP";
-  if (upper.startsWith("CSC_") || upper.startsWith("HOME_CSC_")) return "CSC";
-  if (upper.startsWith("USERDATA_")) return "USERDATA";
-  if (upper.endsWith(".PIT")) return "PIT";
-  return null;
+function formatPartitionLabel(partitionTarget) {
+  const trimmed = partitionTarget.trim();
+  if (!trimmed) {
+    return "Auto-match by filename";
+  }
+  return /^\d+$/.test(trimmed)
+    ? `Target Partition ID: ${trimmed}`
+    : `Target Partition: ${trimmed}`;
 }
 
-function routeFilesToSlots(fileList) {
+function addPartitionFiles(fileList) {
   if (state.isBusy) return;
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
 
-  const groupedBySlot = new Map();
-  Array.from(fileList).forEach((file) => {
-    const slot = matchFileNameToSlot(file.name);
-    if (slot) {
-      if (!groupedBySlot.has(slot)) {
-        groupedBySlot.set(slot, []);
-      }
-      groupedBySlot.get(slot).push(file);
-    } else {
-      appendLog(
-        `Could not auto-match "${file.name}" to a slot — click a specific slot to assign it.`
-      );
-    }
+  files.forEach((file) => {
+    const id = state.nextPartitionId++;
+    state.partitions.push({ id, file, partition: "" });
+    appendLog(`Added partition file: ${file.name} (${formatBytes(file.size)})`);
   });
 
-  for (const [slot, matchedFiles] of groupedBySlot.entries()) {
-    const chosen = matchedFiles[matchedFiles.length - 1];
-    if (matchedFiles.length > 1) {
-      const names = matchedFiles.map((f) => `"${f.name}"`).join(", ");
-      appendLog(
-        `Warning: Multiple files matched slot ${slot} (${names}); assigning "${chosen.name}".`
-      );
-    }
-    assignFileToSlot(slot, chosen);
+  renderPartitionList();
+  updateControlsState();
+}
+
+function removePartitionFile(id) {
+  if (state.isBusy) return;
+  const idx = state.partitions.findIndex((p) => p.id === id);
+  if (idx === -1) return;
+  const [removed] = state.partitions.splice(idx, 1);
+  appendLog(`Removed partition file: ${removed.file.name}`);
+  renderPartitionList();
+  updateControlsState();
+}
+
+function clearAllPartitions(silent = false) {
+  if (state.isBusy) return;
+  if (state.partitions.length === 0) return;
+  state.partitions = [];
+  if (!silent) {
+    appendLog("Cleared all individual partition files.");
   }
+  renderPartitionList();
+  updateControlsState();
+}
+
+function clearPartitionDropIndicators(clearDragging = true) {
+  document.querySelectorAll(".partition-item").forEach((el) => {
+    el.classList.remove("drop-before", "drop-after");
+    if (clearDragging) {
+      el.classList.remove("dragging");
+    }
+  });
+}
+
+function reorderPartitionFile(draggedId, targetId, insertAfter) {
+  if (draggedId === targetId) return;
+  const fromIdx = state.partitions.findIndex((p) => p.id === draggedId);
+  if (fromIdx === -1) return;
+
+  const [moved] = state.partitions.splice(fromIdx, 1);
+  const toIdx = state.partitions.findIndex((p) => p.id === targetId);
+  if (toIdx === -1) {
+    state.partitions.splice(fromIdx, 0, moved);
+    return;
+  }
+
+  const insertIdx = insertAfter ? toIdx + 1 : toIdx;
+  state.partitions.splice(insertIdx, 0, moved);
+  renderPartitionList();
+}
+
+function renderPartitionList() {
+  const sectionEl = document.getElementById("partition-files-section");
+  const listEl = document.getElementById("partition-list");
+  if (!sectionEl || !listEl) return;
+
+  listEl.innerHTML = "";
+  if (state.partitions.length === 0) {
+    sectionEl.hidden = true;
+    return;
+  }
+
+  sectionEl.hidden = false;
+
+  state.partitions.forEach((entry) => {
+    const item = document.createElement("div");
+    item.className = "partition-item";
+    item.setAttribute("role", "listitem");
+    item.dataset.partitionId = String(entry.id);
+    item.draggable = !state.isBusy;
+
+    item.addEventListener("mousedown", (e) => {
+      if (e.target.closest("input, button")) {
+        item.draggable = false;
+      } else {
+        item.draggable = !state.isBusy;
+      }
+    });
+
+    item.addEventListener("dragstart", (e) => {
+      if (state.isBusy || state.partitions.length < 2) {
+        e.preventDefault();
+        return;
+      }
+      draggedPartitionId = entry.id;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(entry.id));
+      requestAnimationFrame(() => {
+        item.classList.add("dragging");
+      });
+    });
+
+    item.addEventListener("dragend", () => {
+      draggedPartitionId = null;
+      clearPartitionDropIndicators();
+    });
+
+    item.addEventListener("dragover", (e) => {
+      if (draggedPartitionId === null || state.isBusy) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+
+      clearPartitionDropIndicators(false);
+      if (draggedPartitionId === entry.id) return;
+
+      const rect = item.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + rect.height / 2;
+      item.classList.add(insertAfter ? "drop-after" : "drop-before");
+    });
+
+    item.addEventListener("drop", (e) => {
+      if (draggedPartitionId === null || state.isBusy) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const sourceId = draggedPartitionId;
+      draggedPartitionId = null;
+      const rect = item.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + rect.height / 2;
+      clearPartitionDropIndicators();
+      reorderPartitionFile(sourceId, entry.id, insertAfter);
+    });
+
+    const replaceInput = document.createElement("input");
+    replaceInput.type = "file";
+    replaceInput.hidden = true;
+    replaceInput.addEventListener("change", () => {
+      if (!state.isBusy && replaceInput.files && replaceInput.files[0]) {
+        entry.file = replaceInput.files[0];
+        appendLog(`Updated partition file: ${entry.file.name} (${formatBytes(entry.file.size)})`);
+        renderPartitionList();
+        updateControlsState();
+      }
+      replaceInput.value = "";
+    });
+
+    const left = document.createElement("div");
+    left.className = "slot-left";
+
+    const dragHandle = document.createElement("span");
+    dragHandle.className = "partition-drag-handle";
+    dragHandle.title = "Drag to reorder";
+    dragHandle.setAttribute("aria-hidden", "true");
+    dragHandle.innerHTML =
+      '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="5.5" cy="3.5" r="1.25"/><circle cx="10.5" cy="3.5" r="1.25"/><circle cx="5.5" cy="8" r="1.25"/><circle cx="10.5" cy="8" r="1.25"/><circle cx="5.5" cy="12.5" r="1.25"/><circle cx="10.5" cy="12.5" r="1.25"/></svg>';
+
+    const fileTrigger = document.createElement("div");
+    fileTrigger.className = "partition-file-trigger";
+    fileTrigger.title = "Click to change file";
+    fileTrigger.addEventListener("click", () => {
+      if (!state.isBusy) replaceInput.click();
+    });
+
+    const badge = document.createElement("span");
+    badge.className = "slot-badge";
+    badge.textContent = "PART";
+
+    const content = document.createElement("div");
+    content.className = "dropzone-content";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "slot-label";
+    labelEl.textContent = formatPartitionLabel(entry.partition);
+
+    const fileNameEl = document.createElement("span");
+    fileNameEl.className = "file-name";
+    fileNameEl.textContent = entry.file.name;
+    fileNameEl.title = entry.file.name;
+
+    content.appendChild(labelEl);
+    content.appendChild(fileNameEl);
+    fileTrigger.appendChild(badge);
+    fileTrigger.appendChild(content);
+    left.appendChild(dragHandle);
+    left.appendChild(fileTrigger);
+
+    const right = document.createElement("div");
+    right.className = "slot-right";
+
+    const sizeEl = document.createElement("span");
+    sizeEl.className = "file-size";
+    sizeEl.textContent = formatBytes(entry.file.size);
+
+    const targetInput = document.createElement("input");
+    targetInput.type = "text";
+    targetInput.className = "partition-target-input";
+    targetInput.placeholder = "Partition name / ID (auto)";
+    targetInput.value = entry.partition;
+    targetInput.disabled = state.isBusy;
+    targetInput.setAttribute(
+      "aria-label",
+      `Target partition name or ID for ${entry.file.name}`
+    );
+    targetInput.addEventListener("input", () => {
+      entry.partition = targetInput.value;
+      labelEl.textContent = formatPartitionLabel(entry.partition);
+    });
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn-clear-slot";
+    removeBtn.title = "Remove partition file";
+    removeBtn.innerHTML = "&times;";
+    removeBtn.disabled = state.isBusy;
+    removeBtn.addEventListener("click", () => {
+      removePartitionFile(entry.id);
+    });
+
+    right.appendChild(sizeEl);
+    right.appendChild(targetInput);
+    right.appendChild(removeBtn);
+
+    item.appendChild(replaceInput);
+    item.appendChild(left);
+    item.appendChild(right);
+    listEl.appendChild(item);
+  });
 }
 
 function setupDropzones() {
@@ -468,29 +671,73 @@ function setupDropzones() {
     }
   });
 
-  // Multi-file auto-assign picker
-  const multiBtn = document.getElementById("btn-browse-multi");
-  const multiInput = document.getElementById("input-multi-files");
-  if (multiBtn && multiInput) {
-    multiBtn.addEventListener("click", () => {
-      if (!state.isBusy) multiInput.click();
+  // Individual partition file picker
+  const addPartBtn = document.getElementById("btn-add-partition");
+  const partInput = document.getElementById("input-partition-files");
+  if (addPartBtn && partInput) {
+    addPartBtn.addEventListener("click", () => {
+      if (!state.isBusy) partInput.click();
     });
-    multiInput.addEventListener("change", () => {
-      if (multiInput.files && multiInput.files.length > 0) {
-        routeFilesToSlots(multiInput.files);
-        multiInput.value = "";
+    partInput.addEventListener("change", () => {
+      if (partInput.files && partInput.files.length > 0) {
+        addPartitionFiles(partInput.files);
+        partInput.value = "";
       }
     });
   }
 
-  // Global window drop auto-router
+  const clearPartsBtn = document.getElementById("btn-clear-partitions");
+  if (clearPartsBtn) {
+    clearPartsBtn.addEventListener("click", () => {
+      clearAllPartitions();
+    });
+  }
+
+  const partListEl = document.getElementById("partition-list");
+  if (partListEl) {
+    partListEl.addEventListener("dragover", (e) => {
+      if (draggedPartitionId === null || state.isBusy) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+    });
+    partListEl.addEventListener("drop", (e) => {
+      if (draggedPartitionId === null || state.isBusy) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const items = Array.from(partListEl.querySelectorAll(".partition-item"));
+      const sourceId = draggedPartitionId;
+      draggedPartitionId = null;
+
+      let closestItem = null;
+      let minDistance = Infinity;
+      let insertAfter = false;
+
+      items.forEach((el) => {
+        const rect = el.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        const dist = Math.abs(e.clientY - midY);
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestItem = el;
+          insertAfter = e.clientY > midY;
+        }
+      });
+
+      clearPartitionDropIndicators();
+      if (closestItem) {
+        const targetId = Number(closestItem.dataset.partitionId);
+        if (!Number.isNaN(targetId)) {
+          reorderPartitionFile(sourceId, targetId, insertAfter);
+        }
+      }
+    });
+  }
+
+  // Prevent browser default navigation when files are dropped outside a dropzone
   window.addEventListener("dragover", (e) => e.preventDefault());
-  window.addEventListener("drop", (e) => {
-    e.preventDefault();
-    if (!state.isBusy && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      routeFilesToSlots(e.dataTransfer.files);
-    }
-  });
+  window.addEventListener("drop", (e) => e.preventDefault());
 }
 
 function updateControlsState() {
@@ -500,6 +747,7 @@ function updateControlsState() {
   const salesCodeInput = document.getElementById("opt-sales-code");
   const hasAction =
     activeEntries.length > 0 ||
+    state.partitions.length > 0 ||
     Boolean(eraseChk && eraseChk.checked) ||
     Boolean(salesCodeInput && salesCodeInput.value.trim().length > 0);
   const hasPendingOrInvalidMd5 = activeEntries.some(([slot]) => {
@@ -535,7 +783,8 @@ function updateControlsState() {
     "btn-pair-download-sm",
     "btn-pair-normal-sm",
     "btn-reboot-download",
-    "btn-browse-multi",
+    "btn-add-partition",
+    "btn-clear-partitions",
     "btn-reset-slots",
     "opt-sales-code",
     "opt-nand-erase",
@@ -555,6 +804,16 @@ function updateControlsState() {
     if (clearBtn) {
       clearBtn.disabled = state.isBusy;
     }
+  });
+
+  document
+    .querySelectorAll(".partition-target-input, .partition-item .btn-clear-slot")
+    .forEach((el) => {
+      el.disabled = state.isBusy;
+    });
+
+  document.querySelectorAll(".partition-item").forEach((el) => {
+    el.draggable = !state.isBusy;
   });
 }
 
@@ -976,7 +1235,8 @@ async function setupWasmAndEvents() {
     document.getElementById("btn-reset-slots")?.addEventListener("click", () => {
       if (state.isBusy) return;
       SLOTS.forEach(clearSlot);
-      appendLog("All package slots reset.");
+      clearAllPartitions(true);
+      appendLog("All package slots and partition files reset.");
     });
 
     // Clear Terminal
@@ -1016,12 +1276,28 @@ async function executeFlashProcess() {
     if (activeSlots.length > 0) {
       appendLog(`Active flashing slots: ${activeSlots.map(([s]) => s).join(", ")}`);
     }
+    if (state.partitions.length > 0) {
+      appendLog(`Individual partition files: ${state.partitions.length}`);
+    }
 
     try {
       const files = {};
       for (const [slot, file] of activeSlots) {
         appendLog(`Preparing slot ${slot}: ${file.name} (${formatBytes(file.size)})...`);
         files[slot] = file;
+      }
+      if (state.partitions.length > 0) {
+        files.partitions = state.partitions.map((entry) => {
+          const target = entry.partition.trim();
+          const targetDesc = target ? `target: ${target}` : "auto-match";
+          appendLog(
+            `Preparing partition (${targetDesc}): ${entry.file.name} (${formatBytes(entry.file.size)})...`
+          );
+          return {
+            file: entry.file,
+            partition: target || null,
+          };
+        });
       }
 
       const eraseChk = document.getElementById("opt-nand-erase");
