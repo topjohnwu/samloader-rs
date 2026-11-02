@@ -163,7 +163,10 @@
         </div>
         <div class="slots-header-actions">
           <label class="inline-check-toggle" for="opt-skip-md5">
-            <input type="checkbox" id="opt-skip-md5">
+            <input type="checkbox" id="opt-skip-md5" role="switch">
+            <span class="md-switch-track" aria-hidden="true">
+              <span class="md-switch-thumb"></span>
+            </span>
             <span>Skip MD5</span>
           </label>
           <input type="file" id="input-multi-files" multiple accept=".tar,.md5,.tar.md5,.pit,.bin,.img,.lz4" hidden>
