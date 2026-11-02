@@ -134,6 +134,7 @@ fn run_bindgen(
 
     bindgen.keep_debug(keep_debug);
     bindgen.typescript(!no_typescript);
+    bindgen.omit_default_module_path(false);
 
     bindgen
         .generate(out_dir)
