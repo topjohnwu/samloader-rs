@@ -33,11 +33,24 @@ const SLOTS = ["BL", "AP", "CP", "CSC", "USERDATA", "PIT"];
 const SAMSUNG_VID = 0x04e8;
 const DOWNLOAD_MODE_PIDS = new Set([0x6601, 0x685d, 0x68c3]);
 
+const MOCK_DOWNLOAD_DEVICE = {
+  name: "Samsung SM-F968B (Simulated Odin Bootloader)",
+  subtitle: "USB VID:PID 04e8:685d • Serial C1A2B3C4",
+  mode: "download",
+};
+
+const MOCK_NORMAL_DEVICE = {
+  name: "Samsung SM-F968B (Simulated Normal Mode)",
+  subtitle: "USB VID:PID 04e8:6860 • Serial C1A2B3C4",
+  mode: "normal",
+};
+
 const state = {
   selectedBackend: "nusb",
   rebootMode: "normal",
   skipMd5: false,
-  devices: [],
+  device: null,
+  mockDevice: { ...MOCK_DOWNLOAD_DEVICE },
   slots: {
     BL: null,
     AP: null,
@@ -759,7 +772,7 @@ function updateControlsState() {
     flashBtn.disabled = !hasAction || state.isBusy || hasPendingOrInvalidMd5;
   }
 
-  const hasDownloadDevice = state.devices.some((d) => d.mode === "download");
+  const hasDownloadDevice = state.device?.mode === "download";
   const downloadActionIds = ["btn-detect-device", "btn-dump-pit"];
   downloadActionIds.forEach((id) => {
     const el = document.getElementById(id);
@@ -780,8 +793,6 @@ function updateControlsState() {
     "opt-skip-md5",
     "btn-pair-download",
     "btn-pair-normal",
-    "btn-pair-download-sm",
-    "btn-pair-normal-sm",
     "btn-reboot-download",
     "btn-add-partition",
     "btn-clear-partitions",
@@ -807,7 +818,9 @@ function updateControlsState() {
   });
 
   document
-    .querySelectorAll(".partition-target-input, .partition-item .btn-clear-slot")
+    .querySelectorAll(
+      ".partition-target-input, .partition-item .btn-clear-slot, .btn-disconnect-device"
+    )
     .forEach((el) => {
       el.disabled = state.isBusy;
     });
@@ -881,67 +894,109 @@ function renderDeviceList() {
   const listWrap = document.getElementById("device-list-wrap");
   const listEl = document.getElementById("device-list");
   const emptyEl = document.getElementById("device-empty-state");
-  const headerPair = document.getElementById("device-header-pair");
 
   if (!listEl || !listWrap || !emptyEl) return;
   listEl.innerHTML = "";
 
-  if (state.devices.length === 0) {
+  const dev = state.device;
+  if (!dev) {
     emptyEl.hidden = false;
     listWrap.hidden = true;
-    if (headerPair) headerPair.hidden = true;
     updateControlsState();
     return;
   }
 
   emptyEl.hidden = true;
   listWrap.hidden = false;
-  if (headerPair) {
-    headerPair.hidden = state.selectedBackend === "mock";
+
+  const row = document.createElement("div");
+  row.className = "device-item";
+
+  const left = document.createElement("div");
+  left.className = "device-item-left";
+
+  const dot = document.createElement("span");
+  dot.className = `device-status-dot${dev.mode === "normal" ? " dot-normal" : ""}`;
+
+  const meta = document.createElement("div");
+  meta.className = "device-meta";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "device-name";
+  nameEl.textContent = dev.name;
+
+  const subEl = document.createElement("span");
+  subEl.className = "device-sub";
+  subEl.textContent = dev.subtitle;
+
+  meta.appendChild(nameEl);
+  meta.appendChild(subEl);
+  left.appendChild(dot);
+  left.appendChild(meta);
+
+  const right = document.createElement("div");
+  right.className = "device-item-right";
+
+  const badge = document.createElement("span");
+  if (dev.mode === "download") {
+    badge.className = "mode-badge mode-badge-download";
+    badge.textContent = "Download Mode";
+  } else {
+    badge.className = "mode-badge mode-badge-normal";
+    badge.textContent = "Normal Mode (AT)";
   }
 
-  state.devices.forEach((dev) => {
-    const row = document.createElement("div");
-    row.className = "device-item";
-    row.setAttribute("role", "listitem");
-
-    const left = document.createElement("div");
-    left.className = "device-item-left";
-
-    const dot = document.createElement("span");
-    dot.className = `device-status-dot${dev.mode === "normal" ? " dot-normal" : ""}`;
-
-    const meta = document.createElement("div");
-    meta.className = "device-meta";
-
-    const nameEl = document.createElement("span");
-    nameEl.className = "device-name";
-    nameEl.textContent = dev.name;
-
-    const subEl = document.createElement("span");
-    subEl.className = "device-sub";
-    subEl.textContent = dev.subtitle;
-
-    meta.appendChild(nameEl);
-    meta.appendChild(subEl);
-    left.appendChild(dot);
-    left.appendChild(meta);
-
-    const badge = document.createElement("span");
-    if (dev.mode === "download") {
-      badge.className = "mode-badge mode-badge-download";
-      badge.textContent = "Download Mode";
-    } else {
-      badge.className = "mode-badge mode-badge-normal";
-      badge.textContent = "Normal Mode (AT)";
-    }
-
-    row.appendChild(left);
-    row.appendChild(badge);
-    listEl.appendChild(row);
+  const disconnectBtn = document.createElement("button");
+  disconnectBtn.type = "button";
+  disconnectBtn.className = "btn-clear-slot btn-disconnect-device";
+  disconnectBtn.title = "Disconnect device";
+  disconnectBtn.setAttribute("aria-label", `Disconnect ${dev.name}`);
+  disconnectBtn.innerHTML = "&times;";
+  disconnectBtn.disabled = state.isBusy;
+  disconnectBtn.addEventListener("click", () => {
+    handleDisconnectDevice(dev);
   });
 
+  right.appendChild(badge);
+  right.appendChild(disconnectBtn);
+  row.appendChild(left);
+  row.appendChild(right);
+  listEl.appendChild(row);
+
   updateControlsState();
+}
+
+async function handleDisconnectDevice(dev) {
+  if (state.isBusy) return;
+  try {
+    if (state.selectedBackend === "mock") {
+      state.mockDevice = null;
+    } else if (state.selectedBackend === "vcom" && dev.rawPort) {
+      try {
+        await dev.rawPort.close();
+      } catch {
+        // Port may not be open
+      }
+      if (typeof dev.rawPort.forget === "function") {
+        await dev.rawPort.forget();
+      }
+    } else if (state.selectedBackend === "nusb" && dev.rawDevice) {
+      if (dev.rawDevice.opened) {
+        try {
+          await dev.rawDevice.close();
+        } catch {
+          // Device may already be closing
+        }
+      }
+      if (typeof dev.rawDevice.forget === "function") {
+        await dev.rawDevice.forget();
+      }
+    }
+    appendLog(`Disconnected device: ${dev.name}`);
+    await refreshPairedDevicesStatus();
+  } catch (err) {
+    appendLog(`Failed to disconnect device: ${err}`);
+  }
 }
 
 async function runExclusive(fn) {
@@ -978,23 +1033,28 @@ async function refreshPairedDevicesStatus() {
   clearDeviceInfo();
 
   if (state.selectedBackend === "mock") {
-    state.devices = [
-      {
-        name: "Samsung SM-F968B (Simulated Odin Bootloader)",
-        subtitle: "USB VID:PID 04e8:685d • Serial C1A2B3C4",
-        mode: "download",
-      },
-    ];
+    state.device = state.mockDevice ? { ...state.mockDevice } : null;
+    if (!state.device) {
+      if (summaryEl) {
+        summaryEl.textContent =
+          "Connect a simulated Samsung device in Download Mode or Normal Mode";
+      }
+      updateConnectionChip(false, "No Device");
+      renderDeviceList();
+      return;
+    }
     if (summaryEl) summaryEl.textContent = "Simulated Samsung device ready for testing";
     updateConnectionChip(true, "Mock Ready");
     renderDeviceList();
-    await queryAndShowDeviceInfo();
+    if (state.device.mode === "download") {
+      await queryAndShowDeviceInfo();
+    }
     return;
   }
 
   if (state.selectedBackend === "vcom") {
     if (!isWebSerialSupported()) {
-      state.devices = [];
+      state.device = null;
       if (summaryEl) summaryEl.textContent = "WebSerial is not supported in this browser";
       updateConnectionChip(false, "WebSerial Unavailable");
       renderDeviceList();
@@ -1002,29 +1062,29 @@ async function refreshPairedDevicesStatus() {
     }
     try {
       const ports = await getPairedSerialPorts();
-      const samsungPorts = ports.filter((port) => {
-        const info = port.getInfo ? port.getInfo() : {};
+      const port = ports.find((p) => {
+        const info = p.getInfo ? p.getInfo() : {};
         return info.usbVendorId === SAMSUNG_VID && info.usbProductId != null;
       });
-      state.devices = samsungPorts.map((port, idx) => {
+      if (!port) {
+        state.device = null;
+        if (summaryEl) summaryEl.textContent = "Connect a Samsung device via USB serial";
+        updateConnectionChip(false, "No Device");
+      } else {
         const info = port.getInfo();
         const vid = info.usbVendorId;
         const pid = info.usbProductId;
         const vidHex = vid.toString(16).padStart(4, "0");
         const pidHex = pid.toString(16).padStart(4, "0");
         const mode = classifyDeviceMode(vid, pid);
-        return {
-          name: `Samsung Serial Port #${idx + 1}`,
+        state.device = {
+          name: "Samsung Serial Port",
           subtitle: `USB VID:PID ${vidHex}:${pidHex}`,
           mode,
+          rawPort: port,
         };
-      });
-      if (state.devices.length === 0) {
-        if (summaryEl) summaryEl.textContent = "Connect a Samsung device via USB serial";
-        updateConnectionChip(false, "No Device");
-      } else {
-        if (summaryEl) summaryEl.textContent = `${state.devices.length} serial port(s) paired`;
-        updateConnectionChip(true, `${state.devices.length} Port(s) Paired`);
+        if (summaryEl) summaryEl.textContent = "Serial port paired";
+        updateConnectionChip(true, "Port Paired");
       }
       renderDeviceList();
     } catch (err) {
@@ -1034,7 +1094,7 @@ async function refreshPairedDevicesStatus() {
   }
 
   if (!isWebUsbSupported()) {
-    state.devices = [];
+    state.device = null;
     if (summaryEl) summaryEl.textContent = "WebUSB is not supported in this browser";
     updateConnectionChip(false, "WebUSB Unavailable");
     renderDeviceList();
@@ -1043,8 +1103,14 @@ async function refreshPairedDevicesStatus() {
 
   try {
     const usbDevices = await getPairedDevices();
-    const samsungDevices = usbDevices.filter((d) => d.vendorId === SAMSUNG_VID);
-    state.devices = samsungDevices.map((d) => {
+    const d = usbDevices.find((dev) => dev.vendorId === SAMSUNG_VID);
+    if (!d) {
+      state.device = null;
+      if (summaryEl) {
+        summaryEl.textContent = "Connect a Samsung device in Download Mode or Normal Mode";
+      }
+      updateConnectionChip(false, "No Device");
+    } else {
       const vid = d.vendorId.toString(16).padStart(4, "0");
       const pid = d.productId.toString(16).padStart(4, "0");
       const mode = classifyDeviceMode(d.vendorId, d.productId);
@@ -1052,25 +1118,18 @@ async function refreshPairedDevicesStatus() {
         d.productName ||
         (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
       const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
-      return {
+      state.device = {
         name,
         subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
         mode,
+        rawDevice: d,
       };
-    });
-
-    if (state.devices.length === 0) {
-      if (summaryEl) {
-        summaryEl.textContent = "Connect a Samsung device in Download Mode or Normal Mode";
-      }
-      updateConnectionChip(false, "No Device");
-    } else {
-      if (summaryEl) summaryEl.textContent = `${state.devices.length} USB device(s) paired`;
-      updateConnectionChip(true, `${state.devices.length} Device(s) Paired`);
+      if (summaryEl) summaryEl.textContent = "USB device paired";
+      updateConnectionChip(true, "Device Paired");
     }
     renderDeviceList();
   } catch (err) {
-    appendLog(`Failed to enumerate paired USB devices: ${err}`);
+    appendLog(`Failed to enumerate paired USB device: ${err}`);
   }
 }
 
@@ -1079,6 +1138,9 @@ async function handlePairDownload() {
   try {
     appendLog(`Pairing Download Mode device via ${state.selectedBackend}...`);
     await pairDownloadDevice(state.selectedBackend);
+    if (state.selectedBackend === "mock") {
+      state.mockDevice = { ...MOCK_DOWNLOAD_DEVICE };
+    }
     appendLog("Download Mode device paired successfully.");
     await refreshPairedDevicesStatus();
   } catch (err) {
@@ -1091,6 +1153,9 @@ async function handlePairNormal() {
   try {
     appendLog(`Pairing Samsung device (Normal AT) via ${state.selectedBackend}...`);
     await pairSamsungDevice(state.selectedBackend);
+    if (state.selectedBackend === "mock") {
+      state.mockDevice = { ...MOCK_NORMAL_DEVICE };
+    }
     appendLog("Normal Mode Samsung device paired.");
     await refreshPairedDevicesStatus();
   } catch (err) {
@@ -1153,13 +1218,11 @@ async function setupWasmAndEvents() {
     document.getElementById("opt-nand-erase")?.addEventListener("change", updateControlsState);
     document.getElementById("opt-sales-code")?.addEventListener("input", updateControlsState);
 
-    // Pair Download Device buttons
+    // Pair Download Device button
     document.getElementById("btn-pair-download")?.addEventListener("click", handlePairDownload);
-    document.getElementById("btn-pair-download-sm")?.addEventListener("click", handlePairDownload);
 
-    // Pair Normal Device (AT) buttons
+    // Pair Normal Device (AT) button
     document.getElementById("btn-pair-normal")?.addEventListener("click", handlePairNormal);
-    document.getElementById("btn-pair-normal-sm")?.addEventListener("click", handlePairNormal);
 
     // Query Device Info (DVIF)
     document.getElementById("btn-detect-device")?.addEventListener("click", async () => {

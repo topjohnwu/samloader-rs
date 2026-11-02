@@ -66,18 +66,10 @@
             <p id="paired-devices-summary" class="card-subtitle">Connect a Samsung device in Download Mode or Normal Mode</p>
           </div>
         </div>
-        <div id="device-header-pair" class="header-pair-actions" hidden>
-          <button type="button" id="btn-pair-download-sm" class="btn btn-sm btn-primary-outline">
-            + Download Mode
-          </button>
-          <button type="button" id="btn-pair-normal-sm" class="btn btn-sm btn-outline">
-            + Normal Mode (AT)
-          </button>
-        </div>
       </div>
 
       <div class="card-body">
-        <!-- Empty State (shown when no devices are paired) -->
+        <!-- Empty State (shown when no device is paired) -->
         <div id="device-empty-state" class="device-empty-state">
           <div class="empty-icon-circle">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -86,7 +78,7 @@
               <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
             </svg>
           </div>
-          <div class="empty-state-title">No devices connected</div>
+          <div class="empty-state-title">No device connected</div>
           <p class="empty-state-desc">
             Plug in your Samsung device via USB. Pair a <strong>Download Mode</strong> device to flash firmware, or pair a <strong>Normal Mode</strong> device to reboot it into Download Mode.
           </p>
@@ -107,9 +99,9 @@
           </div>
         </div>
 
-        <!-- Connected Device List -->
+        <!-- Connected Device -->
         <div id="device-list-wrap" class="device-list-wrap" hidden>
-          <div id="device-list" class="device-list" role="list" aria-label="Connected Samsung devices"></div>
+          <div id="device-list" class="device-list" aria-label="Connected Samsung device"></div>
 
           <!-- Hardware Telemetry Grid (shown when DVIF is queried) -->
           <div id="device-info-grid" class="device-info-grid" hidden></div>

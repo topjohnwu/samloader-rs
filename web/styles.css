@@ -391,12 +391,6 @@ textarea {
 }
 
 /* Step 1: Device Empty State & Connected State */
-.header-pair-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .device-empty-state {
   padding: 20px 16px 8px;
   text-align: center;
@@ -464,17 +458,18 @@ textarea {
   align-items: center;
   justify-content: space-between;
   padding: 14px 18px;
-  border-bottom: 1px solid var(--md-sys-color-outline-subtle);
-}
-
-.device-item:last-child {
-  border-bottom: none;
 }
 
 .device-item-left {
   display: flex;
   align-items: center;
   gap: 14px;
+}
+
+.device-item-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .device-status-dot {
