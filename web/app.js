@@ -15,10 +15,10 @@
 import {
   initWasm,
   getBackendOptions,
+  isBackendSupported,
   isWebUsbSupported,
   isWebSerialSupported,
   getPairedDevices,
-  getPairedSerialPorts,
   pairDownloadDevice,
   pairSamsungDevice,
   detectDownloadDevice,
@@ -33,24 +33,11 @@ const SLOTS = ["BL", "AP", "CP", "CSC", "USERDATA", "PIT"];
 const SAMSUNG_VID = 0x04e8;
 const DOWNLOAD_MODE_PIDS = new Set([0x6601, 0x685d, 0x68c3]);
 
-const MOCK_DOWNLOAD_DEVICE = {
-  name: "Samsung SM-F968B (Simulated Odin Bootloader)",
-  subtitle: "USB VID:PID 04e8:685d • Serial C1A2B3C4",
-  mode: "download",
-};
-
-const MOCK_NORMAL_DEVICE = {
-  name: "Samsung SM-F968B (Simulated Normal Mode)",
-  subtitle: "USB VID:PID 04e8:6860 • Serial C1A2B3C4",
-  mode: "normal",
-};
-
 const state = {
   selectedBackend: "nusb",
   rebootMode: "normal",
   skipMd5: false,
   device: null,
-  mockDevice: { ...MOCK_DOWNLOAD_DEVICE },
   slots: {
     BL: null,
     AP: null,
@@ -969,29 +956,7 @@ function renderDeviceList() {
 async function handleDisconnectDevice(dev) {
   if (state.isBusy) return;
   try {
-    if (state.selectedBackend === "mock") {
-      state.mockDevice = null;
-    } else if (state.selectedBackend === "vcom" && dev.rawPort) {
-      try {
-        await dev.rawPort.close();
-      } catch {
-        // Port may not be open
-      }
-      if (typeof dev.rawPort.forget === "function") {
-        await dev.rawPort.forget();
-      }
-    } else if (state.selectedBackend === "nusb" && dev.rawDevice) {
-      if (dev.rawDevice.opened) {
-        try {
-          await dev.rawDevice.close();
-        } catch {
-          // Device may already be closing
-        }
-      }
-      if (typeof dev.rawDevice.forget === "function") {
-        await dev.rawDevice.forget();
-      }
-    }
+    await dev.disconnect();
     appendLog(`Disconnected device: ${dev.name}`);
     await refreshPairedDevicesStatus();
   } catch (err) {
@@ -1032,78 +997,18 @@ async function refreshPairedDevicesStatus() {
   const summaryEl = document.getElementById("paired-devices-summary");
   clearDeviceInfo();
 
-  if (state.selectedBackend === "mock") {
-    state.device = state.mockDevice ? { ...state.mockDevice } : null;
-    if (!state.device) {
-      if (summaryEl) {
-        summaryEl.textContent =
-          "Connect a simulated Samsung device in Download Mode or Normal Mode";
-      }
-      updateConnectionChip(false, "No Device");
-      renderDeviceList();
-      return;
-    }
-    if (summaryEl) summaryEl.textContent = "Simulated Samsung device ready for testing";
-    updateConnectionChip(true, "Mock Ready");
-    renderDeviceList();
-    if (state.device.mode === "download") {
-      await queryAndShowDeviceInfo();
-    }
-    return;
-  }
-
-  if (state.selectedBackend === "vcom") {
-    if (!isWebSerialSupported()) {
-      state.device = null;
-      if (summaryEl) summaryEl.textContent = "WebSerial is not supported in this browser";
-      updateConnectionChip(false, "WebSerial Unavailable");
-      renderDeviceList();
-      return;
-    }
-    try {
-      const ports = await getPairedSerialPorts();
-      const port = ports.find((p) => {
-        const info = p.getInfo ? p.getInfo() : {};
-        return info.usbVendorId === SAMSUNG_VID && info.usbProductId != null;
-      });
-      if (!port) {
-        state.device = null;
-        if (summaryEl) summaryEl.textContent = "Connect a Samsung device via USB serial";
-        updateConnectionChip(false, "No Device");
-      } else {
-        const info = port.getInfo();
-        const vid = info.usbVendorId;
-        const pid = info.usbProductId;
-        const vidHex = vid.toString(16).padStart(4, "0");
-        const pidHex = pid.toString(16).padStart(4, "0");
-        const mode = classifyDeviceMode(vid, pid);
-        state.device = {
-          name: "Samsung Serial Port",
-          subtitle: `USB VID:PID ${vidHex}:${pidHex}`,
-          mode,
-          rawPort: port,
-        };
-        if (summaryEl) summaryEl.textContent = "Serial port paired";
-        updateConnectionChip(true, "Port Paired");
-      }
-      renderDeviceList();
-    } catch (err) {
-      appendLog(`Failed to enumerate WebSerial ports: ${err}`);
-    }
-    return;
-  }
-
-  if (!isWebUsbSupported()) {
+  if (!isBackendSupported(state.selectedBackend)) {
     state.device = null;
-    if (summaryEl) summaryEl.textContent = "WebUSB is not supported in this browser";
-    updateConnectionChip(false, "WebUSB Unavailable");
+    const label = state.selectedBackend === "vcom" ? "WebSerial" : "WebUSB";
+    if (summaryEl) summaryEl.textContent = `${label} is not supported in this browser`;
+    updateConnectionChip(false, `${label} Unavailable`);
     renderDeviceList();
     return;
   }
 
   try {
-    const usbDevices = await getPairedDevices();
-    const d = usbDevices.find((dev) => dev.vendorId === SAMSUNG_VID);
+    const devices = await getPairedDevices(state.selectedBackend);
+    const d = devices.find((dev) => dev.vendorId === SAMSUNG_VID);
     if (!d) {
       state.device = null;
       if (summaryEl) {
@@ -1122,14 +1027,14 @@ async function refreshPairedDevicesStatus() {
         name,
         subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
         mode,
-        rawDevice: d,
+        disconnect: d.disconnect,
       };
-      if (summaryEl) summaryEl.textContent = "USB device paired";
+      if (summaryEl) summaryEl.textContent = "Samsung device paired";
       updateConnectionChip(true, "Device Paired");
     }
     renderDeviceList();
   } catch (err) {
-    appendLog(`Failed to enumerate paired USB device: ${err}`);
+    appendLog(`Failed to enumerate paired device: ${err}`);
   }
 }
 
@@ -1138,9 +1043,6 @@ async function handlePairDownload() {
   try {
     appendLog(`Pairing Download Mode device via ${state.selectedBackend}...`);
     await pairDownloadDevice(state.selectedBackend);
-    if (state.selectedBackend === "mock") {
-      state.mockDevice = { ...MOCK_DOWNLOAD_DEVICE };
-    }
     appendLog("Download Mode device paired successfully.");
     await refreshPairedDevicesStatus();
   } catch (err) {
@@ -1153,9 +1055,6 @@ async function handlePairNormal() {
   try {
     appendLog(`Pairing Samsung device (Normal AT) via ${state.selectedBackend}...`);
     await pairSamsungDevice(state.selectedBackend);
-    if (state.selectedBackend === "mock") {
-      state.mockDevice = { ...MOCK_NORMAL_DEVICE };
-    }
     appendLog("Normal Mode Samsung device paired.");
     await refreshPairedDevicesStatus();
   } catch (err) {

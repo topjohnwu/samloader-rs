@@ -25,6 +25,19 @@ import init, {
 } from "./pkg/samloader_web.js";
 
 let initPromise = null;
+let mockPairedDevice = null;
+
+function createMockDevice(productId) {
+  return {
+    vendorId: 0x04e8,
+    productId,
+    productName: "Samsung SM-F968B (Simulated)",
+    serialNumber: "C1A2B3C4",
+    disconnect: async () => {
+      mockPairedDevice = null;
+    },
+  };
+}
 
 /**
  * Initializes the samloader-web WASM module if not already initialized.
@@ -63,37 +76,89 @@ export function isWebSerialSupported() {
 }
 
 /**
- * Lists currently paired WebUSB devices in the browser.
+ * Checks whether the current browser context supports the specified backend.
+ * @param {string} backend Backend option ("nusb", "vcom", "mock")
  */
-export async function getPairedDevices() {
+export function isBackendSupported(backend) {
+  if (backend === "mock") return true;
+  if (backend === "vcom") return isWebSerialSupported();
+  return isWebUsbSupported();
+}
+
+/**
+ * Lists currently paired devices for the specified backend with a normalized shape.
+ * @param {string} [backend="nusb"] Backend option ("nusb", "vcom", "mock")
+ */
+export async function getPairedDevices(backend = "nusb") {
+  if (backend === "mock") {
+    return mockPairedDevice ? [mockPairedDevice] : [];
+  }
+  if (backend === "vcom") {
+    if (!isWebSerialSupported()) {
+      return [];
+    }
+    const ports = await navigator.serial.getPorts();
+    return ports
+      .map((port) => {
+        const info = port.getInfo ? port.getInfo() : {};
+        return {
+          vendorId: info.usbVendorId,
+          productId: info.usbProductId,
+          productName: "Samsung Serial Port",
+          serialNumber: undefined,
+          disconnect: async () => {
+            try {
+              await port.close();
+            } catch {
+              // Port may not be open
+            }
+            if (typeof port.forget === "function") {
+              await port.forget();
+            }
+          },
+        };
+      })
+      .filter((d) => d.vendorId != null && d.productId != null);
+  }
   if (!isWebUsbSupported()) {
     return [];
   }
-  return await navigator.usb.getDevices();
+  const devices = await navigator.usb.getDevices();
+  return devices.map((d) => ({
+    vendorId: d.vendorId,
+    productId: d.productId,
+    productName: d.productName,
+    serialNumber: d.serialNumber,
+    disconnect: async () => {
+      if (d.opened) {
+        try {
+          await d.close();
+        } catch {
+          // Device may already be closing
+        }
+      }
+      if (typeof d.forget === "function") {
+        await d.forget();
+      }
+    },
+  }));
 }
 
 /**
- * Lists currently paired WebSerial ports in the browser.
- */
-export async function getPairedSerialPorts() {
-  if (!isWebSerialSupported()) {
-    return [];
-  }
-  return await navigator.serial.getPorts();
-}
-
-/**
- * Prompts the browser's WebUSB picker filtered for Samsung Download Mode PIDs.
+ * Prompts the browser's device picker filtered for Samsung Download Mode PIDs.
  * Must be invoked from a user gesture (click handler).
  * @param {string} [backend] Optional backend name ("nusb", "vcom", "mock")
  */
 export async function pairDownloadDevice(backend) {
   await initWasm();
   await pair_download_device(backend);
+  if (backend === "mock") {
+    mockPairedDevice = createMockDevice(0x685d);
+  }
 }
 
 /**
- * Prompts the browser's WebUSB picker filtered for any Samsung USB device (VID 0x04E8),
+ * Prompts the browser's device picker filtered for any Samsung USB device (VID 0x04E8),
  * including normal-mode/AT-mode devices.
  * Must be invoked from a user gesture (click handler).
  * @param {string} [backend] Optional backend name ("nusb", "vcom", "mock")
@@ -101,6 +166,9 @@ export async function pairDownloadDevice(backend) {
 export async function pairSamsungDevice(backend) {
   await initWasm();
   await pair_samsung_device(backend);
+  if (backend === "mock") {
+    mockPairedDevice = createMockDevice(0x6860);
+  }
 }
 
 /**
