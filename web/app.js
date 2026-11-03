@@ -20,6 +20,7 @@ import {
   appendRawWasmLogs,
   clearWasmLog,
   renderLogViewport,
+  logLineHeight,
   getBackendOptions,
   isBackendSupported,
   isWebUsbSupported,
@@ -61,7 +62,6 @@ const state = {
 let draggedPartitionId = null;
 
 // --- Virtualized Activity Log Scroller ---
-const LOG_LINE_HEIGHT = 20;
 let logStickToBottom = true;
 let logFlushScheduled = false;
 
@@ -98,14 +98,19 @@ function scheduleLogFlush() {
 
 function setupLogScroller() {
   const container = document.querySelector(".log-terminal");
-  if (!container) return;
+  const logElem = document.getElementById("log-output");
+  if (!container || !logElem) return;
+
+  // The virtualization in Rust assumes a fixed line height, so take it from there
+  const lineHeight = logLineHeight();
+  logElem.style.lineHeight = `${lineHeight}px`;
 
   container.addEventListener(
     "scroll",
     () => {
       const distanceFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
-      logStickToBottom = distanceFromBottom <= LOG_LINE_HEIGHT * 1.5;
+      logStickToBottom = distanceFromBottom <= lineHeight * 1.5;
       flushLogViewport(false);
     },
     { passive: true }
@@ -121,7 +126,8 @@ function appendLog(msg) {
     // WASM is still initializing; show the queued lines until Rust takes over rendering
     const logElem = document.getElementById("log-output");
     if (logElem) {
-      logElem.textContent += `\n${queuedLines.join("\n")}`;
+      const separator = logElem.textContent ? "\n" : "";
+      logElem.textContent += `${separator}${queuedLines.join("\n")}`;
     }
   }
 }
@@ -135,8 +141,8 @@ function clearLog() {
 function formatBytes(bytes) {
   if (bytes === 0) return "0 Bytes";
   const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
@@ -1003,49 +1009,89 @@ async function queryAndShowDeviceInfo() {
   });
 }
 
-async function refreshPairedDevicesStatus() {
-  const summaryEl = document.getElementById("paired-devices-summary");
-  clearDeviceInfo();
+let refreshGen = 0;
 
-  if (!isBackendSupported(state.selectedBackend)) {
+// Identifies a paired device across refreshes. Web Serial ports have no serial number,
+// but unplugging a device still triggers a refresh without it, so swapping two identical
+// phones clears the device info in between.
+function deviceKey(backend, d) {
+  return `${backend}/${d.vendorId}:${d.productId}:${d.serialNumber ?? ""}`;
+}
+
+function hasDeviceInfo() {
+  const gridEl = document.getElementById("device-info-grid");
+  const boxEl = document.getElementById("device-info-box");
+  return Boolean((gridEl && !gridEl.hidden) || (boxEl && !boxEl.hidden));
+}
+
+async function refreshPairedDevicesStatus() {
+  // Refreshes may overlap (e.g. a backend switch while a hotplug refresh is pending);
+  // only the most recent one may update the UI.
+  const gen = ++refreshGen;
+  const backend = state.selectedBackend;
+  const summaryEl = document.getElementById("paired-devices-summary");
+
+  if (!isBackendSupported(backend)) {
+    clearDeviceInfo();
     state.device = null;
-    const label = state.selectedBackend === "vcom" ? "WebSerial" : "WebUSB";
+    const label = backend === "vcom" ? "WebSerial" : "WebUSB";
     if (summaryEl) summaryEl.textContent = `${label} is not supported in this browser`;
     updateConnectionChip(false, `${label} Unavailable`);
     renderDeviceList();
     return;
   }
 
+  let devices;
   try {
-    const devices = await getPairedDevices(state.selectedBackend);
-    const d = devices.find((dev) => dev.vendorId === SAMSUNG_VID);
-    if (!d) {
-      state.device = null;
-      if (summaryEl) {
-        summaryEl.textContent = "Connect a Samsung device in Download Mode or Normal Mode";
-      }
-      updateConnectionChip(false, "No Device");
-    } else {
-      const vid = d.vendorId.toString(16).padStart(4, "0");
-      const pid = d.productId.toString(16).padStart(4, "0");
-      const mode = classifyDeviceMode(d.vendorId, d.productId);
-      const name =
-        d.productName ||
-        (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
-      const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
-      state.device = {
-        name,
-        subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
-        mode,
-        disconnect: d.disconnect,
-      };
-      if (summaryEl) summaryEl.textContent = "Samsung device paired";
-      updateConnectionChip(true, "Device Paired");
-    }
-    renderDeviceList();
+    devices = await getPairedDevices(backend);
   } catch (err) {
-    appendLog(`Failed to enumerate paired device: ${err}`);
+    if (gen === refreshGen) {
+      appendLog(`Failed to enumerate paired device: ${err}`);
+    }
+    return;
   }
+  if (gen !== refreshGen) return;
+
+  // Prefer a Download Mode device, so a Normal Mode device that happens to be listed
+  // first does not disable the Download Mode actions
+  const samsung = devices.filter((dev) => dev.vendorId === SAMSUNG_VID);
+  const d =
+    samsung.find((dev) => classifyDeviceMode(dev.vendorId, dev.productId) === "download") ??
+    samsung[0];
+
+  // Only drop the queried device info when the device itself changed or disappeared
+  const key = d ? deviceKey(backend, d) : null;
+  const sameDevice = key !== null && key === state.device?.key;
+  if (!sameDevice) {
+    clearDeviceInfo();
+  }
+
+  if (!d) {
+    state.device = null;
+    if (summaryEl) {
+      summaryEl.textContent = "Connect a Samsung device in Download Mode or Normal Mode";
+    }
+    updateConnectionChip(false, "No Device");
+  } else {
+    const vid = d.vendorId.toString(16).padStart(4, "0");
+    const pid = d.productId.toString(16).padStart(4, "0");
+    const mode = classifyDeviceMode(d.vendorId, d.productId);
+    const name =
+      d.productName ||
+      (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
+    const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
+    state.device = {
+      key,
+      name,
+      subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
+      mode,
+      disconnect: d.disconnect,
+    };
+    if (summaryEl) summaryEl.textContent = "Samsung device paired";
+    const ready = sameDevice && hasDeviceInfo();
+    updateConnectionChip(true, ready ? "Device Ready" : "Device Paired");
+  }
+  renderDeviceList();
 }
 
 async function handlePairDownload() {

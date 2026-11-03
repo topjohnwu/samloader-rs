@@ -189,6 +189,7 @@ impl AsyncSeek for JsReader {
     }
 }
 
+/// Height of a single log line in pixels; exposed to JS via [`log_line_height`].
 const LOG_LINE_HEIGHT: f64 = 20.0;
 const LOG_OVERSCAN: usize = 20;
 const INITIAL_LOG_BANNER: &str = "-- samloader-rs Odin Web Flasher Initialized --";
@@ -522,6 +523,13 @@ pub fn take_logs() -> Vec<String> {
     PROGRESS.with(|&p| p.take_logs())
 }
 
+/// Returns the height in pixels of a single log line. The log element's CSS `line-height`
+/// must match it for the virtualized viewport to line up.
+#[wasm_bindgen]
+pub fn log_line_height() -> f64 {
+    LOG_LINE_HEIGHT
+}
+
 /// Computes the visible virtualized log viewport slice for the given scroll position.
 #[wasm_bindgen]
 pub fn render_log_viewport(
@@ -770,16 +778,17 @@ fn get_skip_option(options: &js_sys::Object) -> Vec<String> {
     }
 }
 
-fn slot_sort_rank(key: &str) -> usize {
-    match key.to_ascii_uppercase().as_str() {
-        "PIT" => 0,
-        "BL" => 1,
-        "AP" => 2,
-        "CP" => 3,
-        "CSC" => 4,
-        "USERDATA" => 5,
-        _ => 6,
-    }
+/// Odin package slots, in the order the CLI passes them to `FlashRequest::packages`.
+const PACKAGE_SLOTS: [&str; 5] = ["BL", "AP", "CP", "CSC", "USERDATA"];
+/// Input key for the PIT file.
+const PIT_SLOT: &str = "PIT";
+/// Input key for the array of individual partition images.
+const PARTITIONS_KEY: &str = "partitions";
+
+/// Returns the value of `key` in `obj`, or `None` if it is missing, `null` or `undefined`.
+fn get_present(obj: &js_sys::Object, key: &str) -> Result<Option<JsValue>, JsValue> {
+    let val = js_sys::Reflect::get(obj, &JsValue::from_str(key))?;
+    Ok((!val.is_null() && !val.is_undefined()).then_some(val))
 }
 
 /// A validated flash, ready to be executed on a device. Created by [`prepare_flash`].
@@ -835,70 +844,48 @@ pub async fn prepare_flash(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let keys = js_sys::Object::keys(&files);
-    let mut ordered_keys: Vec<(usize, String, JsValue)> = (0..keys.length())
-        .map(|i| {
-            let key_js = keys.get(i);
-            let key_str = key_js.as_string().unwrap_or_default();
-            (i as usize, key_str, key_js)
-        })
-        .collect();
-    ordered_keys.sort_by_key(|(idx, key, _)| (slot_sort_rank(key), *idx));
+    // Like the CLI, the slot alone decides how an input is used: package slots are
+    // always TAR packages (`--bl`, `--ap`, ...), the PIT slot is always the PIT
+    // (`--pit`), and `partitions` are always raw images (`-p` / `-f`).
+    for key in js_sys::Object::keys(&files).iter() {
+        let key = key.as_string().unwrap_or_default();
+        if !PACKAGE_SLOTS.contains(&key.as_str()) && key != PIT_SLOT && key != PARTITIONS_KEY {
+            return Err(JsValue::from_str(&format!("Unknown flash input \"{key}\"")));
+        }
+    }
 
     let mut packages_vec: Vec<(String, JsReader)> = Vec::new();
-    let mut partitions_vec: Vec<(Option<String>, String, JsReader)> = Vec::new();
+    for slot in PACKAGE_SLOTS {
+        if let Some(val) = get_present(&files, slot)? {
+            let name = extract_explicit_name_from_js(&val).unwrap_or_else(|| slot.to_string());
+            packages_vec.push((name, extract_reader_from_js(&val)?));
+        }
+    }
+
     let mut pit_bytes: Option<Vec<u8>> = None;
+    if let Some(val) = get_present(&files, PIT_SLOT)? {
+        let mut bytes = Vec::new();
+        extract_reader_from_js(&val)?
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(to_js_err)?;
+        pit_bytes = Some(bytes);
+    }
 
-    for (_, key_str, key_js) in ordered_keys {
-        let val_js = js_sys::Reflect::get(&files, &key_js)?;
-
-        if val_js.is_null() || val_js.is_undefined() {
-            continue;
+    let mut partitions_vec: Vec<(Option<String>, String, JsReader)> = Vec::new();
+    if let Some(val) = get_present(&files, PARTITIONS_KEY)? {
+        if !js_sys::Array::is_array(&val) {
+            return Err(JsValue::from_str("\"partitions\" must be an array"));
         }
-
-        if key_str.eq_ignore_ascii_case("partitions") && js_sys::Array::is_array(&val_js) {
-            let arr: js_sys::Array = val_js.unchecked_into();
-            for entry_js in arr.iter() {
-                if entry_js.is_null() || entry_js.is_undefined() {
-                    continue;
-                }
-                let reader = extract_reader_from_js(&entry_js)?;
-                let filename = extract_explicit_name_from_js(&entry_js)
-                    .ok_or_else(|| JsValue::from_str("Partition entry is missing a filename"))?;
-                let target_partition = extract_explicit_partition_from_js(&entry_js);
-                partitions_vec.push((target_partition, filename, reader));
+        let arr: js_sys::Array = val.unchecked_into();
+        for entry_js in arr.iter() {
+            if entry_js.is_null() || entry_js.is_undefined() {
+                continue;
             }
-            continue;
-        }
-
-        let mut reader = extract_reader_from_js(&val_js)?;
-        let explicit_name = extract_explicit_name_from_js(&val_js);
-        let filename = explicit_name.clone().unwrap_or_else(|| key_str.clone());
-        let lower_filename = filename.to_lowercase();
-        let upper_key = key_str.to_uppercase();
-        let is_package_slot = ["BL", "AP", "CP", "CSC", "USERDATA"].contains(&upper_key.as_str());
-
-        if upper_key == "PIT" || lower_filename.ends_with(".pit") {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).await.map_err(to_js_err)?;
-            pit_bytes = Some(bytes);
-        } else if lower_filename.ends_with(".tar")
-            || lower_filename.ends_with(".tar.md5")
-            || (explicit_name.is_none() && is_package_slot)
-        {
-            packages_vec.push((filename, reader));
-        } else {
-            let target_partition = extract_explicit_partition_from_js(&val_js).or_else(|| {
-                if !is_package_slot
-                    && explicit_name.is_some()
-                    && !key_str.is_empty()
-                    && !key_str.eq_ignore_ascii_case(&filename)
-                {
-                    Some(key_str)
-                } else {
-                    None
-                }
-            });
+            let reader = extract_reader_from_js(&entry_js)?;
+            let filename = extract_explicit_name_from_js(&entry_js)
+                .ok_or_else(|| JsValue::from_str("Partition entry is missing a filename"))?;
+            let target_partition = extract_explicit_partition_from_js(&entry_js);
             partitions_vec.push((target_partition, filename, reader));
         }
     }

@@ -19,6 +19,7 @@ import init, {
   clear_progress_callback,
   detect_download_device,
   get_backend_options,
+  log_line_height,
   pair_download_device,
   pair_samsung_device,
   prepare_flash,
@@ -153,6 +154,14 @@ export function clearWasmLog() {
 export function takeWasmLogs() {
   if (!wasmReady) return [];
   return take_logs();
+}
+
+/**
+ * Returns the log line height in pixels used by the Rust log viewport virtualization.
+ * @returns {number | null} Line height, or null if WASM is not initialized yet
+ */
+export function logLineHeight() {
+  return wasmReady ? log_line_height() : null;
 }
 
 /**
@@ -356,7 +365,19 @@ export async function verifyPackageMd5(file) {
  * Validates and indexes firmware package files without connecting to a device.
  * Inspect the returned job (e.g. to confirm data-wiping flashes), then either call
  * `job.execute(backend, wait)` to flash, or `job.free()` to discard it.
- * @param {Object} files Object mapping slot names / filenames to File/Blob/Uint8Array objects or { name, data }, and optional `partitions` array of `{ file, partition? }`
+ *
+ * Like the CLI, the slot alone decides how an input is used: package slots are always
+ * parsed as TAR packages, `PIT` is always the PIT, and `partitions` are always raw images.
+ * Any other key is rejected.
+ * @param {Object} files Flash inputs. Each value is a File/Blob/Uint8Array/ArrayBuffer or `{ name, data }`.
+ * @param {*} [files.BL] Bootloader package
+ * @param {*} [files.AP] AP package
+ * @param {*} [files.CP] CP (modem) package
+ * @param {*} [files.CSC] CSC / HOME_CSC package
+ * @param {*} [files.USERDATA] USERDATA package
+ * @param {*} [files.PIT] PIT file
+ * @param {{ file: *, partition?: string | null }[]} [files.partitions] Raw partition images,
+ *   flashed to `partition` (name or numeric ID) or matched by file name if omitted
  * @param {Object} [options] Flashing options
  * @param {"download" | "normal" | "none"} [options.reboot="normal"]
  * @param {boolean} [options.erase=false]

@@ -4,6 +4,7 @@
 
 - Always run `cargo fmt` to format all changes before committing any Rust code change.
 - Ensure all Rust code changes are free of clippy warnings. Always run `cargo clippy --workspace --all-targets -- -D warnings` to verify.
+- `samloader-web` only compiles for WebAssembly, so the command above does not lint it. When changing `web/`, also run `cargo clippy -p samloader-web --target wasm32-unknown-unknown -- -D warnings`.
 
 ## Code Commit Instructions
 

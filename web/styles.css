@@ -1238,6 +1238,7 @@ textarea {
 .log-output {
   font-family: 'Roboto Mono', monospace;
   font-size: 0.78rem;
+  /* Pre-WASM fallback; overridden at runtime with log_line_height() from Rust */
   line-height: 20px;
   color: var(--terminal-text);
   white-space: pre;
