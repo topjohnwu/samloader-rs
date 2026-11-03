@@ -722,6 +722,10 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
             .sum();
 
         session.set_total_bytes(total_bytes).await?;
+        progress::on_event(FlashEvent::FlashStart {
+            total_bytes,
+            partitions: plan.payloads.len(),
+        });
 
         if let Some(super_used_size) = super_used_size
             && super_used_size > 0

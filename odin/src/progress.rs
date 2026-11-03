@@ -49,6 +49,16 @@ pub enum FlashEvent<'a> {
         /// The number of erased sectors reported by the device.
         sectors: u32,
     },
+    /// Flashing partitions is about to begin, after the flash has been resolved
+    /// against the device's PIT. Reported once per flash, before the first
+    /// [`PartitionStart`](Self::PartitionStart).
+    FlashStart {
+        /// Total uncompressed size in bytes of all partitions to be flashed, the
+        /// sum of the sizes reported by each [`PartitionStart`](Self::PartitionStart).
+        total_bytes: u64,
+        /// Number of partitions to be flashed.
+        partitions: usize,
+    },
     /// Partition flashing has started.
     PartitionStart {
         /// Name of the partition being flashed.

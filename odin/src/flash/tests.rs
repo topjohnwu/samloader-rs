@@ -626,6 +626,86 @@ fn test_execute_with_local_pit_reports_once() {
     assert_eq!(count, 1, "messages: {:?}", *messages);
 }
 
+#[test]
+fn test_execute_reports_flash_start() {
+    #[derive(Debug, PartialEq)]
+    enum Recorded {
+        FlashStart { total_bytes: u64, partitions: usize },
+        PartitionStart { size: u64 },
+    }
+
+    struct Collector(std::sync::Mutex<Vec<Recorded>>);
+
+    impl crate::FlashProgress for Collector {
+        fn on_event(&self, event: crate::FlashEvent<'_>) {
+            let recorded = match event {
+                crate::FlashEvent::FlashStart {
+                    total_bytes,
+                    partitions,
+                } => Recorded::FlashStart {
+                    total_bytes,
+                    partitions,
+                },
+                crate::FlashEvent::PartitionStart { size, .. } => Recorded::PartitionStart { size },
+                _ => return,
+            };
+            self.0.lock().unwrap().push(recorded);
+        }
+    }
+
+    static COLLECTOR: Collector = Collector(std::sync::Mutex::new(Vec::new()));
+
+    let _guard = crate::progress::TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Sizes unique to this test, as other tests may report to the global
+    // progress reporter concurrently
+    let boot = b"FLASH START BOOT IMAGE";
+    let image: Vec<u8> = (0..123_457u32).map(|i| (i % 251) as u8).collect();
+    let (vendor_lz4, _) = lz4_compress(&image);
+    let tar_bytes = build_tar(&[
+        ("boot.img", boot),
+        ("vendor_boot.img.lz4", &vendor_lz4),
+        ("dtbo.img", b"DUMMY DTBO IMAGE DATA"),
+        ("orphan.img", b"NOT IN PIT"),
+    ]);
+
+    COLLECTOR.0.lock().unwrap().clear();
+    crate::progress::set_progress(&COLLECTOR);
+    let res = futures::executor::block_on(async {
+        let mut session = mock_session(MockBackend::new()).await;
+        FlashRequest::new()
+            .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
+            .skip(&["DTBO"])
+            .run(&mut session)
+            .await
+    });
+    crate::progress::clear_progress();
+    res.unwrap();
+
+    // Skipped and orphan images are not counted, and LZ4 images count with
+    // their uncompressed size
+    let events = COLLECTOR.0.lock().unwrap();
+    let start = events
+        .iter()
+        .position(|e| {
+            *e == Recorded::FlashStart {
+                total_bytes: (boot.len() + image.len()) as u64,
+                partitions: 2,
+            }
+        })
+        .unwrap_or_else(|| panic!("no matching FlashStart: {:?}", *events));
+    for size in [boot.len(), image.len()] {
+        let size = size as u64;
+        assert!(
+            events[start..].contains(&Recorded::PartitionStart { size }),
+            "no PartitionStart of {size} bytes after FlashStart: {:?}",
+            *events
+        );
+    }
+}
+
 /// Summarizes the images of a prepared flash for comparisons.
 fn image_summary<P, I>(
     prepared: &PreparedFlash<P, I>,
