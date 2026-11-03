@@ -71,6 +71,7 @@
   --md-sys-color-primary-container: #d3e3fd;
   --md-sys-color-on-primary-container: #041e49;
   --md-sys-color-primary-hover: #0842a0;
+  --md-sys-color-primary-container-hover: #c1d8fb;
 
   --md-sys-color-secondary-container: #e8f0fe;
   --md-sys-color-on-secondary-container: #001d35;
@@ -109,6 +110,58 @@
   /* M3 Elevation Shadows */
   --md-elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.06), 0 1px 3px 1px rgba(0, 0, 0, 0.04);
   --md-elevation-2: 0 1px 2px 0 rgba(0, 0, 0, 0.1), 0 2px 6px 2px rgba(0, 0, 0, 0.06);
+
+  /* Native controls (checkboxes, selects, scrollbars) follow the color scheme */
+  color-scheme: light dark;
+}
+
+/* M3 baseline dark color tokens */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-sys-color-primary: #a8c7fa;
+    --md-sys-color-on-primary: #062e6f;
+    --md-sys-color-primary-container: #0842a0;
+    --md-sys-color-on-primary-container: #d3e3fd;
+    --md-sys-color-primary-hover: #d3e3fd;
+    --md-sys-color-primary-container-hover: #0b57d0;
+
+    --md-sys-color-secondary-container: #004a77;
+    --md-sys-color-on-secondary-container: #c2e7ff;
+
+    --md-sys-color-surface: #1b1c1d;
+    --md-sys-color-surface-dim: #131314;
+    --md-sys-color-surface-container-low: #202124;
+    --md-sys-color-surface-container: #26282a;
+    --md-sys-color-surface-container-high: #303235;
+    --md-sys-color-on-surface: #e3e3e3;
+    --md-sys-color-on-surface-variant: #c4c7c5;
+
+    --md-sys-color-outline: #8e918f;
+    --md-sys-color-outline-variant: #444746;
+    --md-sys-color-outline-subtle: #303235;
+
+    --status-success: #6dd58c;
+    --status-success-bg: #0f5223;
+    --status-warning: #ffb95c;
+    --status-warning-bg: #5c3a00;
+    --status-error: #f2b8b5;
+    --status-error-bg: #8c1d18;
+
+    --terminal-bg: #0b0c0f;
+    --terminal-text: #e2e8f0;
+
+    --md-elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+    --md-elevation-2: 0 1px 2px 0 rgba(0, 0, 0, 0.3), 0 2px 6px 2px rgba(0, 0, 0, 0.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 * {
@@ -442,7 +495,7 @@ textarea {
 }
 
 .btn-primary-outline:hover:not(:disabled) {
-  background-color: #c1d8fb;
+  background-color: var(--md-sys-color-primary-container-hover);
   box-shadow: var(--md-elevation-1);
 }
 
