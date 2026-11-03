@@ -874,28 +874,15 @@ function updateControlsState() {
 }
 
 // --- Device List & Hardware Info Rendering ---
-function renderDeviceInfo(infoText) {
+function renderDeviceInfo(info) {
   const gridEl = document.getElementById("device-info-grid");
   const boxEl = document.getElementById("device-info-box");
   if (!gridEl || !boxEl) return;
 
-  const lines = infoText
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.includes(":"));
-
-  if (lines.length >= 2) {
+  state.deviceModel = info.model ?? null;
+  if (info.fields.length > 0) {
     gridEl.innerHTML = "";
-    lines.forEach((line) => {
-      const colonIdx = line.indexOf(":");
-      const label = line.substring(0, colonIdx).trim();
-      const val = line.substring(colonIdx + 1).trim();
-      if (!label || !val) return;
-
-      if (label.toLowerCase() === "model") {
-        state.deviceModel = val;
-      }
-
+    info.fields.forEach(([label, val]) => {
       const card = document.createElement("div");
       card.className =
         label.toLowerCase() === "storage" || val.length > 20
@@ -918,7 +905,7 @@ function renderDeviceInfo(infoText) {
     gridEl.hidden = false;
     boxEl.hidden = true;
   } else {
-    boxEl.textContent = infoText;
+    boxEl.textContent = "Device detected (Download mode)";
     boxEl.hidden = false;
     gridEl.hidden = true;
   }

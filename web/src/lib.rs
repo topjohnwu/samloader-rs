@@ -90,20 +90,31 @@ pub async fn pair_samsung_device(backend_str: Option<String>) -> Result<(), JsVa
 }
 
 /// Detects a Download Mode device and queries DVIF device info.
+///
+/// Returns `{ model?, fields }`, where `fields` is an array of `[label, value]` pairs in
+/// display order. `fields` is empty if the device did not report any DVIF info.
 #[wasm_bindgen]
 pub async fn detect_download_device(
     backend_str: Option<String>,
     wait: bool,
-) -> Result<String, JsValue> {
+) -> Result<JsValue, JsValue> {
     let backend = parse_backend(backend_str.as_deref())?;
     let mut connection = OdinConnection::open(backend, wait)
         .await
         .map_err(to_js_err)?;
 
-    match connection.query_device_info().await {
-        Ok(info) => Ok(format!("Device detected (Download mode)\n{info}")),
-        Err(_) => Ok("Device detected (Download mode)".to_string()),
+    let info = connection.query_device_info().await.ok();
+    let fields = js_sys::Array::new();
+    for (label, value) in info.iter().flat_map(|info| info.fields()) {
+        fields.push(&js_sys::Array::of2(&label.into(), &value.into()));
     }
+
+    let obj = js_sys::Object::new();
+    if let Some(model) = info.and_then(|info| info.model) {
+        js_sys::Reflect::set(&obj, &"model".into(), &model.into())?;
+    }
+    js_sys::Reflect::set(&obj, &"fields".into(), &fields)?;
+    Ok(obj.into())
 }
 
 /// Reboots a normal-mode/AT-mode Samsung device into Download Mode using `AT+SUDDLMOD=0,0\r`.

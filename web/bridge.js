@@ -324,7 +324,8 @@ export async function pairSamsungDevice(backend) {
  * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {boolean} [options.wait=false]
- * @returns {Promise<string>}
+ * @returns {Promise<{ model?: string, fields: [string, string][] }>} DVIF info as display
+ *   label/value pairs; `fields` is empty if the device did not report any
  */
 export async function detectDownloadDevice({ backend, wait = false } = {}) {
   await initWasm();

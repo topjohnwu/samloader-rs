@@ -111,42 +111,46 @@ impl DeviceInfo {
             self.serial_number.as_deref().unwrap_or("")
         )
     }
+
+    /// Returns the device information as display labels and values, in display
+    /// order. Storage details are combined into a single "Storage" value.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = Vec::new();
+        let mut push = |label, value: Option<String>| {
+            if let Some(value) = value {
+                fields.push((label, value));
+            }
+        };
+
+        push("Model", self.model.clone());
+        push("Serial Number", self.serial_number.clone());
+        push("Bootloader Version", self.bootloader_version.clone());
+        push("Sales Code", self.sales_code.clone());
+        if let Some(capa) = self.storage_capacity_gb {
+            let mut storage = format!("{} GB", capa);
+            if let Some(vendor) = &self.storage_vendor {
+                storage.push_str(&format!(" {}", vendor));
+            }
+            if let Some(prod) = &self.storage_product_name {
+                storage.push_str(&format!(" {}", prod));
+            }
+            if let Some(fw) = &self.storage_firmware_version {
+                storage.push_str(&format!(" (FW: {})", fw));
+            }
+            push("Storage", Some(storage));
+        } else {
+            push("Storage Vendor", self.storage_vendor.clone());
+        }
+        push("Provisioning", self.provisioning_status.clone());
+        push("Temperature", self.temperature.map(|t| format!("{}°C", t)));
+        fields
+    }
 }
 
 impl fmt::Display for DeviceInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(model) = &self.model {
-            writeln!(f, "  Model:               {}", model)?;
-        }
-        if let Some(serial) = &self.serial_number {
-            writeln!(f, "  Serial Number:       {}", serial)?;
-        }
-        if let Some(ver) = &self.bootloader_version {
-            writeln!(f, "  Bootloader Version:  {}", ver)?;
-        }
-        if let Some(sales) = &self.sales_code {
-            writeln!(f, "  Sales Code:          {}", sales)?;
-        }
-        if let Some(capa) = self.storage_capacity_gb {
-            let mut storage_line = format!("{} GB", capa);
-            if let Some(vendor) = &self.storage_vendor {
-                storage_line.push_str(&format!(" {}", vendor));
-            }
-            if let Some(prod) = &self.storage_product_name {
-                storage_line.push_str(&format!(" {}", prod));
-            }
-            if let Some(fw) = &self.storage_firmware_version {
-                storage_line.push_str(&format!(" (FW: {})", fw));
-            }
-            writeln!(f, "  Storage:             {}", storage_line)?;
-        } else if let Some(vendor) = &self.storage_vendor {
-            writeln!(f, "  Storage Vendor:      {}", vendor)?;
-        }
-        if let Some(prov) = &self.provisioning_status {
-            writeln!(f, "  Provisioning:        {}", prov)?;
-        }
-        if let Some(temp) = self.temperature {
-            writeln!(f, "  Temperature:         {}°C", temp)?;
+        for (label, value) in self.fields() {
+            writeln!(f, "  {:<20} {}", format!("{label}:"), value)?;
         }
         Ok(())
     }
@@ -271,6 +275,33 @@ mod tests {
         assert_eq!(info.storage_capacity_gb, Some(256));
         assert_eq!(info.storage_vendor, None);
         assert_eq!(info.temperature, None);
+    }
+
+    #[test]
+    fn test_display_dvif() {
+        let raw = "@#MODEL=SM-F968B;UN=C1A2B3C4;CAPA=512;VENDOR=SAMSUNG;FWVER=0800;PRODUCT=KLUEG8UHDB;PROV=2;SALES=TUR;VER=F968BXXS7BZH3;TMU_TEMP=32;";
+        let info = DeviceInfo::parse(raw).unwrap();
+        assert_eq!(
+            info.to_string(),
+            concat!(
+                "  Model:               SM-F968B\n",
+                "  Serial Number:       C1A2B3C4\n",
+                "  Bootloader Version:  F968BXXS7BZH3\n",
+                "  Sales Code:          TUR\n",
+                "  Storage:             512 GB SAMSUNG KLUEG8UHDB (FW: 0800)\n",
+                "  Provisioning:        2\n",
+                "  Temperature:         32°C\n",
+            )
+        );
+        assert_eq!(info.fields()[0], ("Model", "SM-F968B".to_string()));
+        assert_eq!(info.fields().len(), 7);
+
+        // Without a capacity, only the storage vendor is shown
+        let info = DeviceInfo::parse("@#MODEL=SM-A145F;VENDOR=SAMSUNG;").unwrap();
+        assert_eq!(
+            info.to_string(),
+            "  Model:               SM-A145F\n  Storage Vendor:      SAMSUNG\n"
+        );
     }
 
     #[test]
