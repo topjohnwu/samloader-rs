@@ -13,6 +13,9 @@
 // limitations under the License.
 
 import init, {
+  append_log,
+  append_raw_logs,
+  clear_log,
   clear_progress_callback,
   detect_download_device,
   get_backend_options,
@@ -21,13 +24,17 @@ import init, {
   print_pit,
   reboot_from_odin,
   reboot_to_download_at,
+  render_log_viewport,
   set_progress_callback,
   set_verbose,
   start_flash,
+  take_logs,
   verify_package_md5,
 } from "./pkg/samloader_web.js";
 
 let initPromise = null;
+let wasmReady = false;
+const pendingLogs = [];
 let mockPairedDevice = null;
 
 function createMockDevice(productId) {
@@ -47,17 +54,26 @@ function createMockDevice(productId) {
  */
 export async function initWasm() {
   if (!initPromise) {
-    initPromise = init().catch((err) => {
-      initPromise = null;
-      throw err;
-    });
+    initPromise = init()
+      .then((res) => {
+        wasmReady = true;
+        if (pendingLogs.length > 0) {
+          pendingLogs.splice(0).forEach((msg) => append_log(msg));
+        }
+        return res;
+      })
+      .catch((err) => {
+        initPromise = null;
+        wasmReady = false;
+        throw err;
+      });
   }
   await initPromise;
 }
 
 /**
- * Registers the thread-local callback receiving string log messages and progress objects.
- * @param {(eventOrMsg: string | { type: "progress", percent: number, current: number, total: number, partition: string }) => void} onProgress
+ * Registers the thread-local callback receiving log/progress event objects.
+ * @param {(event: { type: "log" } | { type: "progress", percent: number, current: number, total: number, partition: string }) => void} onProgress
  */
 export async function setProgressCallback(onProgress) {
   await initWasm();
@@ -79,6 +95,61 @@ export async function clearProgressCallback() {
 export async function setVerbose(verbose) {
   await initWasm();
   set_verbose(Boolean(verbose));
+}
+
+/**
+ * Appends a log message to the Rust log buffer, queuing it if WASM is still initializing.
+ * @param {string} msg
+ * @returns {boolean} True if appended directly to WASM, false if queued before WASM init
+ */
+export function appendWasmLog(msg) {
+  const text = String(msg);
+  if (wasmReady) {
+    append_log(text);
+    return true;
+  }
+  pendingLogs.push(text);
+  return false;
+}
+
+/**
+ * Appends pre-formatted log lines (e.g. from a Web Worker) to the Rust log buffer.
+ * @param {string[]} lines
+ */
+export function appendRawWasmLogs(lines) {
+  if (wasmReady && Array.isArray(lines) && lines.length > 0) {
+    append_raw_logs(lines);
+  }
+}
+
+/**
+ * Clears the Rust log buffer.
+ */
+export function clearWasmLog() {
+  if (wasmReady) {
+    clear_log();
+  }
+}
+
+/**
+ * Drains buffered log lines from the current thread's progress reporter.
+ * @returns {string[]}
+ */
+export function takeWasmLogs() {
+  if (!wasmReady) return [];
+  return take_logs();
+}
+
+/**
+ * Computes the visible virtualized log viewport slice in Rust.
+ * @param {number} scrollTop
+ * @param {number} viewportHeight
+ * @param {boolean} stickToBottom
+ * @returns {{ totalHeight?: number, paddingTop?: number, text?: string, scrollToBottom: boolean } | null}
+ */
+export function renderLogViewport(scrollTop, viewportHeight, stickToBottom) {
+  if (!wasmReady) return null;
+  return render_log_viewport(scrollTop, viewportHeight, stickToBottom);
 }
 
 /**

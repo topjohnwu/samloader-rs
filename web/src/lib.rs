@@ -189,6 +189,11 @@ impl AsyncSeek for JsReader {
     }
 }
 
+const LOG_LINE_HEIGHT: f64 = 20.0;
+const LOG_OVERSCAN: usize = 20;
+const INITIAL_LOG_BANNER: &str = "-- samloader-rs Odin Web Flasher Initialized --";
+const CLEARED_LOG_BANNER: &str = "-- Log Cleared --";
+
 thread_local! {
     static PROGRESS: &'static WebProgress = Box::leak(Box::new(WebProgress::new()));
 }
@@ -196,6 +201,11 @@ thread_local! {
 struct WebProgress {
     verbose: Cell<bool>,
     log_cb: RefCell<Option<Function>>,
+    lines: RefCell<Vec<String>>,
+    rendered_start: Cell<usize>,
+    rendered_end: Cell<usize>,
+    rendered_total: Cell<usize>,
+    log_dirty: Cell<bool>,
     total_bytes: Cell<u64>,
     current_bytes: Cell<u64>,
     last_percent: Cell<Option<u32>>,
@@ -207,6 +217,11 @@ impl WebProgress {
         Self {
             verbose: Cell::new(false),
             log_cb: RefCell::new(None),
+            lines: RefCell::new(vec![INITIAL_LOG_BANNER.to_string()]),
+            rendered_start: Cell::new(usize::MAX),
+            rendered_end: Cell::new(usize::MAX),
+            rendered_total: Cell::new(usize::MAX),
+            log_dirty: Cell::new(false),
             total_bytes: Cell::new(0),
             current_bytes: Cell::new(0),
             last_percent: Cell::new(None),
@@ -214,10 +229,122 @@ impl WebProgress {
         }
     }
 
-    fn emit_log(&self, msg: &str) {
-        if let Some(cb) = self.log_cb.borrow().as_ref() {
-            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(msg));
+    fn notify_log_dirty(&self) {
+        // Coalesce log notifications so JS only schedules a single animation frame
+        // per frame regardless of how many log lines are pushed in a burst.
+        if !self.log_dirty.replace(true)
+            && let Some(cb) = self.log_cb.borrow().as_ref()
+        {
+            let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"type".into(), &"log".into());
+            let _ = cb.call1(&JsValue::NULL, &obj);
         }
+    }
+
+    fn push_log(&self, msg: &str) {
+        let total_secs = (js_sys::Date::now() as u64) / 1000;
+        let secs = total_secs % 60;
+        let mins = (total_secs / 60) % 60;
+        let hours = (total_secs / 3600) % 24;
+
+        {
+            let mut lines = self.lines.borrow_mut();
+            let mut parts = msg.split('\n');
+            if let Some(first) = parts.next() {
+                lines.push(format!("[{hours:02}:{mins:02}:{secs:02}] {first}"));
+                for part in parts {
+                    lines.push(part.to_string());
+                }
+            }
+        }
+
+        self.notify_log_dirty();
+    }
+
+    fn push_raw_lines(&self, raw_lines: Vec<String>) {
+        if raw_lines.is_empty() {
+            return;
+        }
+        self.lines.borrow_mut().extend(raw_lines);
+        self.notify_log_dirty();
+    }
+
+    fn clear_logs(&self) {
+        {
+            let mut lines = self.lines.borrow_mut();
+            lines.clear();
+            lines.push(CLEARED_LOG_BANNER.to_string());
+        }
+        self.rendered_start.set(usize::MAX);
+        self.rendered_end.set(usize::MAX);
+        self.rendered_total.set(usize::MAX);
+        self.log_dirty.set(false);
+    }
+
+    fn take_logs(&self) -> Vec<String> {
+        self.log_dirty.set(false);
+        std::mem::take(&mut *self.lines.borrow_mut())
+    }
+
+    fn render_viewport(
+        &self,
+        scroll_top: f64,
+        viewport_height: f64,
+        stick_to_bottom: bool,
+    ) -> JsValue {
+        self.log_dirty.set(false);
+
+        let lines = self.lines.borrow();
+        let total_lines = lines.len();
+        let total_height = (total_lines as f64) * LOG_LINE_HEIGHT;
+        let vh = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            220.0
+        };
+
+        let effective_scroll_top = if stick_to_bottom {
+            (total_height - vh).max(0.0)
+        } else {
+            scroll_top.max(0.0)
+        };
+
+        let first_visible = (effective_scroll_top / LOG_LINE_HEIGHT).floor() as usize;
+        let visible_count = (vh / LOG_LINE_HEIGHT).ceil() as usize;
+        let start_index = first_visible.saturating_sub(LOG_OVERSCAN).min(total_lines);
+        let end_index = (first_visible + visible_count + LOG_OVERSCAN).min(total_lines);
+
+        let height_changed = self.rendered_total.replace(total_lines) != total_lines;
+        let slice_changed =
+            start_index != self.rendered_start.get() || end_index != self.rendered_end.get();
+
+        if !height_changed && !slice_changed {
+            return JsValue::NULL;
+        }
+
+        let should_scroll_to_bottom = stick_to_bottom && height_changed;
+        let obj = js_sys::Object::new();
+        if height_changed {
+            let _ = js_sys::Reflect::set(&obj, &"totalHeight".into(), &total_height.into());
+        }
+        if slice_changed {
+            self.rendered_start.set(start_index);
+            self.rendered_end.set(end_index);
+            let padding_top = (start_index as f64) * LOG_LINE_HEIGHT;
+            let text = lines[start_index..end_index].join("\n");
+            let _ = js_sys::Reflect::set(&obj, &"paddingTop".into(), &padding_top.into());
+            let _ = js_sys::Reflect::set(&obj, &"text".into(), &text.into());
+        }
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &"scrollToBottom".into(),
+            &should_scroll_to_bottom.into(),
+        );
+        obj.into()
+    }
+
+    fn emit_log(&self, msg: &str) {
+        self.push_log(msg);
     }
 
     fn emit_progress(&self, force: bool) {
@@ -349,7 +476,7 @@ impl FlashProgress for WebProgress {
     }
 }
 
-/// Registers the thread-local JavaScript callback for receiving log messages and progress events.
+/// Registers the thread-local JavaScript callback for receiving log and progress notifications.
 #[wasm_bindgen]
 pub fn set_progress_callback(log_cb: Function) {
     let progress = PROGRESS.with(|&p| p);
@@ -369,6 +496,40 @@ pub fn clear_progress_callback() {
 #[wasm_bindgen]
 pub fn set_verbose(verbose: bool) {
     PROGRESS.with(|&p| p.verbose.set(verbose));
+}
+
+/// Appends a timestamped log message to the Rust log buffer and schedules a dirty notification.
+#[wasm_bindgen]
+pub fn append_log(msg: &str) {
+    PROGRESS.with(|&p| p.push_log(msg));
+}
+
+/// Appends pre-formatted log lines (e.g. from a Web Worker) to the Rust log buffer.
+#[wasm_bindgen]
+pub fn append_raw_logs(lines: Vec<String>) {
+    PROGRESS.with(|&p| p.push_raw_lines(lines));
+}
+
+/// Clears the Rust log buffer and resets virtual viewport tracking.
+#[wasm_bindgen]
+pub fn clear_log() {
+    PROGRESS.with(|&p| p.clear_logs());
+}
+
+/// Drains buffered log lines from the current thread's progress reporter (used by Web Workers).
+#[wasm_bindgen]
+pub fn take_logs() -> Vec<String> {
+    PROGRESS.with(|&p| p.take_logs())
+}
+
+/// Computes the visible virtualized log viewport slice for the given scroll position.
+#[wasm_bindgen]
+pub fn render_log_viewport(
+    scroll_top: f64,
+    viewport_height: f64,
+    stick_to_bottom: bool,
+) -> JsValue {
+    PROGRESS.with(|&p| p.render_viewport(scroll_top, viewport_height, stick_to_bottom))
 }
 
 fn parse_backend(backend: Option<&str>) -> Result<UsbBackendOption, JsValue> {

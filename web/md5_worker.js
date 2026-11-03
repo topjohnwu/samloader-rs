@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { setProgressCallback, verifyPackageMd5 } from "./bridge.js";
+import { setProgressCallback, takeWasmLogs, verifyPackageMd5 } from "./bridge.js";
 
 let taskQueue = Promise.resolve();
 const activeRequestIds = new Map();
@@ -33,29 +33,34 @@ async function handleVerifyMd5({ fileId, requestId, file }) {
   }
 
   try {
-    await setProgressCallback((eventOrMsg) => {
+    await setProgressCallback((event) => {
       if (activeRequestIds.get(fileId) !== requestId) {
         return;
       }
-      if (eventOrMsg && typeof eventOrMsg === "object" && eventOrMsg.type === "progress") {
+      if (!event || typeof event !== "object") return;
+      if (event.type === "progress") {
         self.postMessage({
           type: "PROGRESS",
           fileId,
           requestId,
-          bytesProcessed: eventOrMsg.current,
-          totalBytes: eventOrMsg.total,
-          percent: eventOrMsg.percent,
+          bytesProcessed: event.current,
+          totalBytes: event.total,
+          percent: event.percent,
         });
-      } else if (typeof eventOrMsg === "string") {
-        self.postMessage({
-          type: "LOG",
-          fileId,
-          requestId,
-          message: eventOrMsg,
-        });
+      } else if (event.type === "log") {
+        const lines = takeWasmLogs();
+        if (lines.length > 0) {
+          self.postMessage({
+            type: "LOG",
+            fileId,
+            requestId,
+            lines,
+          });
+        }
       }
     });
 
+    takeWasmLogs();
     await verifyPackageMd5(file);
 
     if (activeRequestIds.get(fileId) === requestId) {

@@ -16,6 +16,10 @@ import {
   initWasm,
   setProgressCallback,
   setVerbose,
+  appendWasmLog,
+  appendRawWasmLogs,
+  clearWasmLog,
+  renderLogViewport,
   getBackendOptions,
   isBackendSupported,
   isWebUsbSupported,
@@ -66,17 +70,75 @@ const state = {
 let md5Worker = null;
 let draggedPartitionId = null;
 
+// --- Virtualized Activity Log Scroller ---
+const LOG_LINE_HEIGHT = 20;
+let logStickToBottom = true;
+let logFlushScheduled = false;
+
+function flushLogViewport(stickToBottom = logStickToBottom) {
+  const container = document.querySelector(".log-terminal");
+  const logElem = document.getElementById("log-output");
+  if (!container || !logElem) return;
+
+  const view = renderLogViewport(container.scrollTop, container.clientHeight, stickToBottom);
+  if (!view) return;
+
+  if (view.totalHeight !== undefined) {
+    logElem.style.height = `${view.totalHeight}px`;
+  }
+  if (view.paddingTop !== undefined) {
+    logElem.style.paddingTop = `${view.paddingTop}px`;
+  }
+  if (view.text !== undefined) {
+    logElem.textContent = view.text;
+  }
+  if (view.scrollToBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function scheduleLogFlush() {
+  if (logFlushScheduled) return;
+  logFlushScheduled = true;
+  requestAnimationFrame(() => {
+    logFlushScheduled = false;
+    flushLogViewport(logStickToBottom);
+  });
+}
+
+function setupLogScroller() {
+  const container = document.querySelector(".log-terminal");
+  if (!container) return;
+
+  container.addEventListener(
+    "scroll",
+    () => {
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      logStickToBottom = distanceFromBottom <= LOG_LINE_HEIGHT * 1.5;
+      flushLogViewport(false);
+    },
+    { passive: true }
+  );
+
+  flushLogViewport(true);
+}
+
 // --- Helper Functions ---
 function appendLog(msg) {
-  const logElem = document.getElementById("log-output");
-  if (logElem) {
-    const timestamp = new Date().toISOString().substring(11, 19);
-    logElem.textContent += `\n[${timestamp}] ${msg}`;
-    const container = document.querySelector(".log-terminal");
-    if (container) {
-      container.scrollTop = container.scrollHeight;
+  if (!appendWasmLog(msg)) {
+    const logElem = document.getElementById("log-output");
+    if (logElem) {
+      const timestamp = new Date().toISOString().substring(11, 19);
+      logElem.textContent += `\n[${timestamp}] ${msg}`;
     }
   }
+}
+
+function clearLog() {
+  clearWasmLog();
+  logStickToBottom = true;
+  flushLogViewport(true);
 }
 
 function formatBytes(bytes) {
@@ -124,7 +186,11 @@ function initMd5Worker() {
       }
     } else if (type === "LOG") {
       state.activeMd5Slot = fileId;
-      appendLog(`[MD5] ${message}`);
+      if (Array.isArray(e.data.lines)) {
+        appendRawWasmLogs(e.data.lines);
+      } else if (message) {
+        appendLog(`[MD5] ${message}`);
+      }
     } else if (type === "SUCCESS") {
       if (state.activeMd5Slot === fileId) {
         state.activeMd5Slot = null;
@@ -1063,11 +1129,12 @@ async function handlePairNormal() {
   }
 }
 
-function handleProgressEvent(eventOrMsg) {
-  if (typeof eventOrMsg === "string") {
-    appendLog(eventOrMsg);
-  } else if (eventOrMsg && typeof eventOrMsg === "object" && eventOrMsg.type === "progress") {
-    const { percent, partition } = eventOrMsg;
+function handleProgressEvent(event) {
+  if (!event || typeof event !== "object") return;
+  if (event.type === "log") {
+    scheduleLogFlush();
+  } else if (event.type === "progress") {
+    const { percent, partition } = event;
     const progressBar = document.getElementById("flash-progress-bar");
     const percentText = document.getElementById("flash-percent-text");
     const statusText = document.getElementById("flash-status-text");
@@ -1084,6 +1151,7 @@ async function setupWasmAndEvents() {
   try {
     await initWasm();
     await setProgressCallback(handleProgressEvent);
+    setupLogScroller();
     appendLog("WASM engine initialized successfully.");
 
     const backendOptions = await getBackendOptions();
@@ -1220,8 +1288,7 @@ async function setupWasmAndEvents() {
 
     // Clear Terminal
     document.getElementById("btn-clear-log")?.addEventListener("click", () => {
-      const logElem = document.getElementById("log-output");
-      if (logElem) logElem.textContent = "-- Log Cleared --";
+      clearLog();
     });
   } catch (err) {
     appendLog(`WASM Initialization Error: ${err}`);

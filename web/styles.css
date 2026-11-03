@@ -1229,16 +1229,17 @@ textarea {
 .log-terminal {
   background-color: var(--terminal-bg);
   border-radius: var(--md-shape-md);
-  padding: 16px 18px;
+  padding: 12px 18px;
   height: 220px;
-  overflow-y: auto;
+  overflow: auto;
+  contain: strict;
 }
 
 .log-output {
   font-family: 'Roboto Mono', monospace;
   font-size: 0.78rem;
-  line-height: 1.6;
+  line-height: 20px;
   color: var(--terminal-text);
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  margin: 0;
 }
