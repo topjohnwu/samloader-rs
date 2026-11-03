@@ -313,6 +313,14 @@ textarea {
   cursor: not-allowed;
 }
 
+/* Full-width select matching the height of the other step 3 fields */
+.select-input-field {
+  width: 100%;
+  height: 46px;
+  padding-left: 14px;
+  font-size: 0.875rem;
+}
+
 /* M3 Assist / Status Chip */
 .status-chip {
   display: inline-flex;
@@ -740,6 +748,24 @@ textarea {
   white-space: pre-wrap;
 }
 
+/* Normal Mode Device Panel */
+.device-normal-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  border-radius: var(--md-shape-md);
+  background-color: var(--status-warning-bg);
+  color: var(--md-sys-color-on-surface);
+}
+
+.device-normal-desc {
+  flex: 1 1 320px;
+  font-size: 0.875rem;
+}
+
 /* Device Actions Bar */
 .device-actions-bar {
   display: flex;
@@ -1059,7 +1085,7 @@ textarea {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.btn-clear-all-partitions {
+.btn-clear-all {
   background: transparent;
   border: none;
   padding: 6px 12px;
@@ -1072,11 +1098,11 @@ textarea {
   transition: background-color 0.15s, opacity 0.15s;
 }
 
-.btn-clear-all-partitions:hover:not(:disabled) {
+.btn-clear-all:hover:not(:disabled) {
   background-color: var(--status-error-bg);
 }
 
-.btn-clear-all-partitions:disabled {
+.btn-clear-all:disabled {
   opacity: 0.38;
   cursor: not-allowed;
 }
@@ -1352,9 +1378,19 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding-top: 18px;
   border-top: 1px solid var(--md-sys-color-outline-subtle);
+}
+
+.action-bar-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
 }
 
 /* Step 4: Progress & Activity Log */

@@ -25,7 +25,12 @@ import {
 import { state } from "./ui/state.js";
 import { setupLogScroller, appendLog, clearLog, saveLog } from "./ui/log.js";
 import { updateControlsState, setupExclusiveGuards } from "./ui/controls.js";
-import { renderPackageSlots, handleSkipMd5Change, resetSlots, setupDropzones } from "./ui/slots.js";
+import {
+  renderPackageSlots,
+  handleSkipMd5Change,
+  clearFirmwareSelections,
+  setupDropzones,
+} from "./ui/slots.js";
 import {
   queryAndShowDeviceInfo,
   refreshPairedDevicesStatus,
@@ -65,8 +70,7 @@ async function setupWasmAndEvents() {
       rebootModeSelect.value = state.rebootMode;
       rebootModeSelect.addEventListener("change", (e) => {
         state.rebootMode = e.target.value;
-        appendLog(`Reboot mode selected: ${state.rebootMode}`);
-        updateControlsState();
+        appendLog(`When done: ${e.target.selectedOptions[0]?.text ?? state.rebootMode}`);
       });
     }
 
@@ -112,11 +116,16 @@ async function setupWasmAndEvents() {
       await queryAndShowDeviceInfo();
     });
 
-    // Reboot to Download (AT)
+    // Reboot to Download Mode (Normal Mode device, via AT command)
     document.getElementById("btn-reboot-download")?.addEventListener("click", handleRebootToDownload);
 
-    // Reboot Device (Odin)
-    document.getElementById("btn-reboot-odin")?.addEventListener("click", handleRebootOdin);
+    // Reboot to Android / Download Mode (Download Mode device, via Odin)
+    document
+      .getElementById("btn-odin-reboot-android")
+      ?.addEventListener("click", () => handleRebootOdin("normal"));
+    document
+      .getElementById("btn-odin-reboot-download")
+      ?.addEventListener("click", () => handleRebootOdin("download"));
 
     // Dump PIT Table
     document.getElementById("btn-dump-pit")?.addEventListener("click", handleDumpPit);
@@ -126,8 +135,8 @@ async function setupWasmAndEvents() {
       await executeFlashProcess();
     });
 
-    // Reset Slots
-    document.getElementById("btn-reset-slots")?.addEventListener("click", resetSlots);
+    // Clear All firmware selections
+    document.getElementById("btn-clear-slots")?.addEventListener("click", clearFirmwareSelections);
 
     // Clear Terminal
     document.getElementById("btn-clear-log")?.addEventListener("click", () => {

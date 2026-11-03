@@ -74,7 +74,7 @@ const md5Queue = [];
 let md5Active = null; // { slot, worker }
 
 function scheduleMd5Pump() {
-  // Deferred so that cancelling several slots in a row (e.g. Reset Slots) does not
+  // Deferred so that cancelling several slots in a row (e.g. Clear All) does not
   // spawn a worker for a slot that is about to be cancelled too.
   queueMicrotask(pumpMd5Queue);
 }
@@ -254,11 +254,13 @@ function clearSlot(slot) {
   updateControlsState();
 }
 
-export function resetSlots() {
+// Clears the firmware selections of step 2. The PIT file is a step 3 option with its
+// own clear button, so it is kept.
+export function clearFirmwareSelections() {
   if (state.isBusy) return;
-  SLOTS.forEach(clearSlot);
-  clearAllPartitions(true);
-  appendLog("All package slots and partition files reset.");
+  PACKAGE_SLOTS.forEach(({ id }) => clearSlot(id));
+  clearAllPartitions();
+  appendLog("All package slots and partition files cleared.");
 }
 
 function formatPartitionLabel(partitionTarget) {
@@ -296,13 +298,10 @@ function removePartitionFile(id) {
   updateControlsState();
 }
 
-function clearAllPartitions(silent = false) {
+function clearAllPartitions() {
   if (state.isBusy) return;
   if (state.partitions.length === 0) return;
   state.partitions = [];
-  if (!silent) {
-    appendLog("Cleared all individual partition files.");
-  }
   renderPartitionList();
   updateControlsState();
 }
@@ -599,13 +598,6 @@ export function setupDropzones() {
         addPartitionFiles(partInput.files);
         partInput.value = "";
       }
-    });
-  }
-
-  const clearPartsBtn = document.getElementById("btn-clear-partitions");
-  if (clearPartsBtn) {
-    clearPartsBtn.addEventListener("click", () => {
-      clearAllPartitions();
     });
   }
 

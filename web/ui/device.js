@@ -101,6 +101,14 @@ function renderDeviceList() {
   emptyEl.hidden = true;
   listWrap.hidden = false;
 
+  // A Normal Mode device only supports rebooting into Download Mode over AT, while
+  // every other device action needs a Download Mode (Odin) device
+  const isNormal = dev.mode === "normal";
+  const normalPanel = document.getElementById("device-normal-panel");
+  const actionsBar = document.getElementById("device-actions-bar");
+  if (normalPanel) normalPanel.hidden = !isNormal;
+  if (actionsBar) actionsBar.hidden = isNormal;
+
   const row = document.createElement("div");
   row.className = "device-item";
 
@@ -135,7 +143,7 @@ function renderDeviceList() {
     badge.textContent = "Download Mode";
   } else {
     badge.className = "mode-badge mode-badge-normal";
-    badge.textContent = "Normal Mode (AT)";
+    badge.textContent = "Normal Mode";
   }
 
   const disconnectBtn = document.createElement("button");
@@ -261,7 +269,12 @@ export async function refreshPairedDevicesStatus() {
       mode,
       disconnect: d.disconnect,
     };
-    if (summaryEl) summaryEl.textContent = "Samsung device paired";
+    if (summaryEl) {
+      summaryEl.textContent =
+        mode === "download"
+          ? "Download Mode device paired"
+          : "Normal Mode device paired. Reboot it into Download Mode to flash firmware";
+    }
     const ready = sameDevice && hasDeviceInfo();
     updateConnectionChip(true, ready ? "Device Ready" : "Device Paired");
   }
@@ -283,7 +296,7 @@ export async function handlePairDownload() {
 export async function handlePairNormal() {
   if (state.isBusy) return;
   try {
-    appendLog(`Pairing Samsung device (Normal AT) via ${state.selectedBackend}...`);
+    appendLog(`Pairing Normal Mode device via ${state.selectedBackend}...`);
     await pairSamsungDevice(state.selectedBackend);
     appendLog("Normal Mode Samsung device paired.");
     await refreshPairedDevicesStatus();
@@ -312,15 +325,18 @@ export async function handleRebootToDownload() {
   });
 }
 
-export async function handleRebootOdin() {
+// Reboots a Download Mode device over Odin into `target` ("normal" for Android, or
+// "download"), independent of the "When done" setting of flashing and PIT dumps.
+export async function handleRebootOdin(target) {
+  const label = target === "download" ? "Download Mode" : "Android";
   await runExclusive(async () => {
     try {
-      appendLog(`Executing Odin reboot (mode: ${state.rebootMode})...`);
+      appendLog(`Rebooting device to ${label} via Odin...`);
       await rebootFromOdin({
         backend: state.selectedBackend,
-        rebootMode: state.rebootMode,
+        rebootMode: target,
       });
-      appendLog("Odin reboot executed successfully.");
+      appendLog(`Reboot to ${label} command sent.`);
     } catch (err) {
       appendLog(`Odin reboot failed: ${err}`);
     }

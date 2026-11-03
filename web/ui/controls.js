@@ -14,7 +14,7 @@
 
 // Enabling controls for the current state, and guarding exclusive device operations.
 
-import { SLOTS, state } from "./state.js";
+import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
 
 export function updateControlsState() {
   const flashBtn = document.getElementById("btn-flash-firmware");
@@ -37,7 +37,12 @@ export function updateControlsState() {
       !hasAction || !hasDownloadDevice || state.isBusy || hasPendingOrInvalidMd5;
   }
 
-  const downloadActionIds = ["btn-detect-device", "btn-dump-pit"];
+  const downloadActionIds = [
+    "btn-detect-device",
+    "btn-dump-pit",
+    "btn-odin-reboot-android",
+    "btn-odin-reboot-download",
+  ];
   downloadActionIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
@@ -45,10 +50,18 @@ export function updateControlsState() {
     }
   });
 
-  const rebootOdinBtn = document.getElementById("btn-reboot-odin");
-  if (rebootOdinBtn) {
-    rebootOdinBtn.disabled =
-      state.isBusy || !hasDownloadDevice || state.rebootMode === "none";
+  // Rebooting into Download Mode over AT is the only action a Normal Mode device supports
+  const rebootDownloadBtn = document.getElementById("btn-reboot-download");
+  if (rebootDownloadBtn) {
+    rebootDownloadBtn.disabled = state.isBusy || state.device?.mode !== "normal";
+  }
+
+  // Clears the firmware selections of step 2, so only offer it when there is any
+  const clearSlotsBtn = document.getElementById("btn-clear-slots");
+  if (clearSlotsBtn) {
+    const hasSelection =
+      PACKAGE_SLOTS.some(({ id }) => state.slots[id] !== null) || state.partitions.length > 0;
+    clearSlotsBtn.disabled = state.isBusy || !hasSelection;
   }
 
   const generalControlIds = [
@@ -58,10 +71,7 @@ export function updateControlsState() {
     "opt-verbose",
     "btn-pair-download",
     "btn-pair-normal",
-    "btn-reboot-download",
     "btn-add-partition",
-    "btn-clear-partitions",
-    "btn-reset-slots",
     "opt-sales-code",
     "opt-nand-erase",
     "opt-disable-verity",
