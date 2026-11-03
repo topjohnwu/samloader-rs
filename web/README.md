@@ -58,3 +58,5 @@ The web app is a purely static site with no backend server requirements.
 ## License
 
 This project is licensed under the Apache License, Version 2.0.
+
+The bundled fonts in `web/fonts/` (DM Sans, Roboto, and Roboto Mono) are licensed under the SIL Open Font License, Version 1.1. See the `OFL-*.txt` files next to them.
