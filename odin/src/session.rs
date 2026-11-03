@@ -105,7 +105,7 @@ impl OdinConnection {
 
     /// Sends a raw string message over the transport connection.
     async fn send_string(&mut self, s: &str, timeout: Duration) -> Result<(), TransportError> {
-        progress::println_verbose(&format!("Sending string: {:?}", s));
+        progress::println_verbose(|| format!("Sending string: {:?}", s));
         self.usb.send(s.as_bytes(), timeout).await
     }
 
@@ -115,10 +115,9 @@ impl OdinConnection {
         let received_size = self.usb.receive(&mut buffer, timeout).await?;
 
         let data = &buffer[..received_size];
-        progress::println_verbose(&format!(
-            "Received string data ({} bytes): {:?}",
-            received_size, data
-        ));
+        progress::println_verbose(|| {
+            format!("Received string data ({} bytes): {:?}", received_size, data)
+        });
         Ok(String::from_utf8_lossy(data).into_owned())
     }
 
@@ -126,7 +125,7 @@ impl OdinConnection {
     ///
     /// Can be called prior to `init()` to inspect the device without opening an Odin session.
     pub async fn query_device_info(&mut self) -> Result<DeviceInfo, OdinError> {
-        progress::println_verbose("Querying device info via DVIF...");
+        progress::println_verbose(|| "Querying device info via DVIF...");
         self.usb
             .send(b"DVIF", HANDSHAKE_TIMEOUT)
             .await
@@ -139,7 +138,7 @@ impl OdinConnection {
         };
 
         let s = String::from_utf8_lossy(&buffer[..received_size]);
-        progress::println_verbose(&format!("DVIF response ({} bytes): {}", received_size, s));
+        progress::println_verbose(|| format!("DVIF response ({} bytes): {}", received_size, s));
         DeviceInfo::parse(&s)
     }
 
@@ -301,7 +300,7 @@ impl OdinSession {
     }
 
     async fn send_command(&mut self, cmd: &Command, timeout: Duration) -> Result<(), OdinError> {
-        progress::println_verbose(&format!("Sending command: {:#04X?}", cmd));
+        progress::println_verbose(|| format!("Sending command: {:#04X?}", cmd));
         let cmd_bytes = cmd.pack();
         self.connection
             .usb
@@ -320,7 +319,7 @@ impl OdinSession {
         chunk: &DataChunk<'_>,
         timeout: Duration,
     ) -> Result<(), OdinError> {
-        progress::println_verbose(&format!("Sending chunk: {:#04X?}", chunk));
+        progress::println_verbose(|| format!("Sending chunk: {:#04X?}", chunk));
         let chunk_bytes = chunk.as_bytes();
         self.connection
             .usb
@@ -340,7 +339,7 @@ impl OdinSession {
 
         let parsed =
             Response::parse(&buffer[..received_size]).map_err(OdinError::InvalidResponse)?;
-        progress::println_verbose(&format!("Received response: {:#04X?}", parsed));
+        progress::println_verbose(|| format!("Received response: {:#04X?}", parsed));
         Ok(parsed)
     }
 

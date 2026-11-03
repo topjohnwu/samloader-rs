@@ -68,24 +68,15 @@ impl FlashProgress for CliProgress {
         }
     }
 
-    fn println_verbose(&self, msg: &str) {
-        if self.is_verbose() {
-            self.println(msg);
+    fn eprintln(&self, msg: &str) {
+        match &*self.progress_bar.lock().unwrap() {
+            Some(pb) => pb.suspend(|| eprintln!("{}", msg)),
+            None => eprintln!("{}", msg),
         }
     }
 
     fn is_verbose(&self) -> bool {
         self.verbose.load(Ordering::Relaxed)
-    }
-
-    fn eprintln_verbose(&self, msg: &str) {
-        if !self.is_verbose() {
-            return;
-        }
-        match &*self.progress_bar.lock().unwrap() {
-            Some(pb) => pb.suspend(|| eprintln!("{}", msg)),
-            None => eprintln!("{}", msg),
-        }
     }
 
     fn on_event(&self, event: FlashEvent<'_>) {

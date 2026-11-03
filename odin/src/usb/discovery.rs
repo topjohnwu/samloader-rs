@@ -133,10 +133,9 @@ where
         match B::new(device).await {
             Ok(backend) => return Ok(backend),
             Err(e) => {
-                crate::progress::eprintln_verbose(&format!(
-                    "Skipping device {:04X}:{:04X}: {e}",
-                    id.0, id.1
-                ));
+                crate::progress::println_verbose(|| {
+                    format!("Skipping device {:04X}:{:04X}: {e}", id.0, id.1)
+                });
                 if matches!(
                     error,
                     TransportError::DeviceNotFound

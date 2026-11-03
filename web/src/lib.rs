@@ -344,12 +344,6 @@ impl FlashProgress for WebProgress {
         self.emit_log(msg);
     }
 
-    fn println_verbose(&self, msg: &str) {
-        if self.verbose.get() {
-            self.emit_log(msg);
-        }
-    }
-
     fn is_verbose(&self) -> bool {
         self.verbose.get()
     }

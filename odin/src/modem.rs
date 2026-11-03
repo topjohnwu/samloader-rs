@@ -84,7 +84,7 @@ pub async fn reboot_download(
             // so check for a device already in Download Mode before reporting it.
             if DeviceMode::Download.find_with(usb_backend).await.is_ok() {
                 if !matches!(e, TransportError::NormalModeDeviceNotFound) {
-                    crate::progress::println_verbose(&format!("Ignoring error: {e}"));
+                    crate::progress::println_verbose(|| format!("Ignoring error: {e}"));
                 }
                 return Ok(DownloadModeReboot::AlreadyInDownloadMode);
             }

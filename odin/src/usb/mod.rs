@@ -19,13 +19,13 @@ compile_error!("At least one USB backend must be enabled!");
 #[cfg_attr(not(real_backend), allow(unused_macros))]
 macro_rules! print_warning {
     ($($arg:tt)*) => {
-        crate::progress::eprintln_verbose(&format!("WARNING: {}", format_args!($($arg)*)));
+        crate::progress::eprintln(&format!("WARNING: {}", format_args!($($arg)*)));
     };
 }
 
 macro_rules! print_verbose {
     ($($arg:tt)*) => {
-        crate::progress::eprintln_verbose(&format!($($arg)*));
+        crate::progress::println_verbose(|| format!($($arg)*));
     };
 }
 

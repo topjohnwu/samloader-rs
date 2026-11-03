@@ -92,19 +92,15 @@ pub trait FlashProgress: MaybeSend + MaybeSync {
     /// Prints a standard log or status message.
     fn println(&self, _msg: &str) {}
 
-    /// Prints a verbose log or status message (implementation decides if it is shown).
-    fn println_verbose(&self, _msg: &str) {}
+    /// Prints a diagnostic or error message. Defaults to [`println`](Self::println).
+    fn eprintln(&self, msg: &str) {
+        self.println(msg);
+    }
 
     /// Returns whether verbose messages are shown. Used to skip collecting
     /// diagnostics that are expensive to obtain (e.g. USB string descriptors).
     fn is_verbose(&self) -> bool {
         false
-    }
-
-    /// Prints a verbose diagnostic message from the USB device and transport layers.
-    /// Defaults to [`println_verbose`](Self::println_verbose).
-    fn eprintln_verbose(&self, msg: &str) {
-        self.println_verbose(msg);
     }
 
     /// Handles a flashing or verification lifecycle event.
@@ -187,21 +183,25 @@ pub(crate) fn println(msg: &str) {
     with_progress(|p| p.println(msg));
 }
 
+/// Prints a diagnostic or warning message through the active progress reporter.
+#[cfg_attr(not(real_backend), allow(dead_code))]
+pub(crate) fn eprintln(msg: &str) {
+    with_progress(|p| p.eprintln(msg));
+}
+
 /// Prints a verbose message through the active progress reporter.
-pub(crate) fn println_verbose(msg: &str) {
-    with_progress(|p| p.println_verbose(msg));
+pub(crate) fn println_verbose<S: AsRef<str>>(f: impl FnOnce() -> S) {
+    with_progress(|p| {
+        if p.is_verbose() {
+            p.eprintln(f().as_ref());
+        }
+    });
 }
 
 /// Returns whether verbose messages are shown through the active progress reporter.
 #[cfg(feature = "rusb")]
 pub(crate) fn is_verbose() -> bool {
     with_progress(|p| p.is_verbose())
-}
-
-/// Prints a verbose diagnostic message from the USB device and transport layers
-/// through the active progress reporter.
-pub(crate) fn eprintln_verbose(msg: &str) {
-    with_progress(|p| p.eprintln_verbose(msg));
 }
 
 /// Dispatches a flashing lifecycle event through the active progress reporter.
