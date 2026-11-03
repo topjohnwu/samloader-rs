@@ -56,6 +56,11 @@ struct BuildWebArgs {
     #[arg(long)]
     no_typescript: bool,
 
+    /// Also stage a deployable copy of the static site (web assets and bindings) into
+    /// this directory
+    #[arg(long, value_name = "DIR")]
+    dist: Option<PathBuf>,
+
     /// Additional arguments passed directly to `cargo build`
     #[arg(last = true)]
     cargo_args: Vec<String>,
@@ -143,6 +148,51 @@ fn run_bindgen(
     Ok(())
 }
 
+/// Static files of the web app, relative to `web/`, deployed alongside the bindings.
+const WEB_STATIC_FILES: &[&str] = &[
+    "index.html",
+    "styles.css",
+    "app.js",
+    "bridge.js",
+    "md5_worker.js",
+];
+/// Static directories of the web app, relative to `web/`.
+const WEB_STATIC_DIRS: &[&str] = &["fonts"];
+
+fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("Failed to read {}", src.display()))? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Stages the static web app and its generated bindings into `dist`.
+fn stage_dist(root: &Path, pkg_dir: &Path, dist: &Path) -> Result<()> {
+    let web = root.join("web");
+    fs::create_dir_all(dist).with_context(|| format!("Failed to create {}", dist.display()))?;
+    for file in WEB_STATIC_FILES {
+        fs::copy(web.join(file), dist.join(file))
+            .with_context(|| format!("Failed to copy web/{file}"))?;
+    }
+    for dir in WEB_STATIC_DIRS {
+        copy_dir(&web.join(dir), &dist.join(dir))?;
+    }
+    copy_dir(pkg_dir, &dist.join("pkg"))
+}
+
 fn build_web(args: BuildWebArgs) -> Result<()> {
     let root = workspace_root();
     let is_release = !args.dev;
@@ -197,6 +247,11 @@ fn build_web(args: BuildWebArgs) -> Result<()> {
         args.keep_debug,
         args.no_typescript,
     )?;
+
+    if let Some(dist) = &args.dist {
+        println!("Staging static site into {}...", dist.display());
+        stage_dist(&root, &out_dir, dist)?;
+    }
 
     println!("WASM build complete.");
     Ok(())

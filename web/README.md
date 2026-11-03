@@ -40,18 +40,15 @@ Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Bra
 
 ## Deploying
 
-The web app is a purely static site with no backend server requirements.
+The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/fonts/`, so the page makes no third-party requests.
 
-1. Build the release WASM bundle into `web/pkg` as shown above.
-2. Stage the static assets for deployment (excluding Rust crate files):
+1. Build the release WASM bundle and stage the static site (web assets, fonts, and the generated `pkg/` bindings) into `dist/`:
 
    ```bash
-   mkdir -p dist
-   cp web/index.html web/styles.css web/app.js web/bridge.js web/md5_worker.js dist/
-   cp -r web/pkg dist/pkg
+   cargo xtask build-web --dist dist
    ```
 
-3. Deploy the contents of `dist/` to any static hosting provider (GitHub Pages, Cloudflare Pages, Netlify, Vercel, S3, nginx, etc.):
+2. Deploy the contents of `dist/` to any static hosting provider (GitHub Pages, Cloudflare Pages, Netlify, Vercel, S3, nginx, etc.):
    - **HTTPS required:** Production deployments must be served over `https://` so the browser enables `navigator.usb` (WebUSB) and `navigator.serial` (Web Serial).
    - **MIME types:** Ensure `.wasm` files are served with `Content-Type: application/wasm` and `.js` files with `Content-Type: text/javascript` (standard on all modern static hosts).
 
