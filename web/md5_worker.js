@@ -14,88 +14,32 @@
 
 import { setProgressCallback, takeWasmLogs, verifyPackageMd5 } from "./bridge.js";
 
-let taskQueue = Promise.resolve();
-const activeRequestIds = new Map();
-
-async function handleVerifyMd5({ fileId, requestId, file }) {
-  if (activeRequestIds.get(fileId) !== requestId) {
-    return;
-  }
-
+// Verifies the MD5 footer of a single package file, then reports the result.
+// Each verification runs in its own worker; the main thread cancels it with terminate().
+self.onmessage = async ({ data }) => {
+  const file = data?.file;
   if (!file) {
-    self.postMessage({
-      type: "ERROR",
-      fileId,
-      requestId,
-      error: "Invalid or missing file object",
-    });
+    self.postMessage({ type: "ERROR", error: "Invalid or missing file object" });
     return;
   }
 
   try {
     await setProgressCallback((event) => {
-      if (activeRequestIds.get(fileId) !== requestId) {
-        return;
-      }
-      if (!event || typeof event !== "object") return;
-      if (event.type === "progress") {
-        self.postMessage({
-          type: "PROGRESS",
-          fileId,
-          requestId,
-          bytesProcessed: event.current,
-          totalBytes: event.total,
-          percent: event.percent,
-        });
-      } else if (event.type === "log") {
+      if (event?.type === "progress") {
+        self.postMessage({ type: "PROGRESS", percent: event.percent });
+      } else if (event?.type === "log") {
         const lines = takeWasmLogs();
         if (lines.length > 0) {
-          self.postMessage({
-            type: "LOG",
-            fileId,
-            requestId,
-            lines,
-          });
+          self.postMessage({ type: "LOG", lines });
         }
       }
     });
 
+    // Drop the initial log banner so only verification output is forwarded
     takeWasmLogs();
     await verifyPackageMd5(file);
-
-    if (activeRequestIds.get(fileId) === requestId) {
-      self.postMessage({
-        type: "SUCCESS",
-        fileId,
-        requestId,
-      });
-    }
+    self.postMessage({ type: "SUCCESS" });
   } catch (err) {
-    if (activeRequestIds.get(fileId) === requestId) {
-      self.postMessage({
-        type: "ERROR",
-        fileId,
-        requestId,
-        error: err?.message || String(err),
-      });
-    }
+    self.postMessage({ type: "ERROR", error: err?.message || String(err) });
   }
-}
-
-self.onmessage = (event) => {
-  const { command, fileId, requestId, file } = event.data || {};
-  if (command === "CANCEL_MD5") {
-    if (fileId) {
-      activeRequestIds.delete(fileId);
-    } else {
-      activeRequestIds.clear();
-    }
-    return;
-  }
-  if (command !== "VERIFY_MD5") {
-    return;
-  }
-
-  activeRequestIds.set(fileId, requestId);
-  taskQueue = taskQueue.then(() => handleVerifyMd5({ fileId, requestId, file }));
 };

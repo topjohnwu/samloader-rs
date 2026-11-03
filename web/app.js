@@ -52,22 +52,12 @@ const state = {
     USERDATA: null,
     PIT: null,
   },
-  slotRequestIds: {
-    BL: 0,
-    AP: 0,
-    CP: 0,
-    CSC: 0,
-    USERDATA: 0,
-    PIT: 0,
-  },
   md5Results: {},
-  activeMd5Slot: null,
   partitions: [],
   nextPartitionId: 1,
   isBusy: false,
 };
 
-let md5Worker = null;
 let draggedPartitionId = null;
 
 // --- Virtualized Activity Log Scroller ---
@@ -157,193 +147,156 @@ function classifyDeviceMode(vid, pid) {
   return "normal";
 }
 
-// --- Worker Initialization & Cancellation ---
-function initMd5Worker() {
-  if (md5Worker) {
-    md5Worker.terminate();
+// --- Slot Status ---
+const SLOT_STATUS = {
+  empty: { cls: "badge-idle", text: () => "Empty", width: 0 },
+  queued: { cls: "badge-hashing", text: () => "Queued...", width: 0 },
+  verifying: { cls: "badge-hashing", text: (p) => `Verifying ${p ?? 0}%`, width: null },
+  valid: { cls: "badge-valid", text: () => "MD5 Verified", width: 100 },
+  skipped: { cls: "badge-valid", text: () => "MD5 Skipped", width: 100 },
+  ready: { cls: "badge-valid", text: () => "Ready", width: 100 },
+  invalid: { cls: "badge-invalid", text: () => "MD5 Failed", width: 100, error: true },
+};
+
+/**
+ * Records a slot's verification status and updates its badge and progress bar.
+ * @param {string} slot
+ * @param {keyof SLOT_STATUS} status
+ * @param {number} [percent] Progress percentage, used by "verifying"
+ * @param {string} [error] Error message, used by "invalid"
+ */
+function setSlotStatus(slot, status, percent, error) {
+  const def = SLOT_STATUS[status];
+  if (status === "empty") {
+    delete state.md5Results[slot];
+  } else {
+    state.md5Results[slot] = { status, error };
   }
-  state.activeMd5Slot = null;
-  md5Worker = new Worker(new URL("./md5_worker.js", import.meta.url), { type: "module" });
 
-  md5Worker.onmessage = (e) => {
-    const { type, fileId, requestId, percent, message, error } = e.data;
-
-    if (requestId !== undefined && requestId !== state.slotRequestIds[fileId]) {
-      return;
-    }
-
-    const badge = document.getElementById(`md5-badge-${fileId}`);
-    const bar = document.getElementById(`md5-bar-${fileId}`);
-
-    if (type === "PROGRESS") {
-      state.activeMd5Slot = fileId;
-      if (badge) {
-        badge.className = "badge badge-hashing";
-        badge.textContent = `Verifying ${percent}%`;
-      }
-      if (bar) {
-        bar.classList.remove("progress-bar-error");
-        bar.style.width = `${percent}%`;
-      }
-    } else if (type === "LOG") {
-      state.activeMd5Slot = fileId;
-      if (Array.isArray(e.data.lines)) {
-        appendRawWasmLogs(e.data.lines);
-      } else if (message) {
-        appendLog(`[MD5] ${message}`);
-      }
-    } else if (type === "SUCCESS") {
-      if (state.activeMd5Slot === fileId) {
-        state.activeMd5Slot = null;
-      }
-      state.md5Results[fileId] = { status: "valid" };
-      if (badge) {
-        badge.className = "badge badge-valid";
-        badge.textContent = "MD5 Verified";
-      }
-      if (bar) {
-        bar.classList.remove("progress-bar-error");
-        bar.style.width = "100%";
-      }
-      updateControlsState();
-    } else if (type === "ERROR") {
-      if (state.activeMd5Slot === fileId) {
-        state.activeMd5Slot = null;
-      }
-      state.md5Results[fileId] = { status: "invalid", error };
-      if (badge) {
-        badge.className = "badge badge-invalid";
-        badge.textContent = "MD5 Failed";
-      }
-      if (bar) {
-        bar.classList.add("progress-bar-error");
-        bar.style.width = "100%";
-      }
-      appendLog(`[MD5 ERROR] ${fileId}: ${error}`);
-      updateControlsState();
-    }
-  };
-
-  md5Worker.onerror = (err) => {
-    const errorMsg = err?.message || "MD5 worker encountered an unexpected error";
-    appendLog(`[MD5 WORKER ERROR] ${errorMsg}`);
-    SLOTS.forEach((slot) => {
-      if (state.md5Results[slot]?.status === "verifying") {
-        state.md5Results[slot] = { status: "invalid", error: errorMsg };
-        const badge = document.getElementById(`md5-badge-${slot}`);
-        const bar = document.getElementById(`md5-bar-${slot}`);
-        if (badge) {
-          badge.className = "badge badge-invalid";
-          badge.textContent = "MD5 Error";
-        }
-        if (bar) {
-          bar.classList.add("progress-bar-error");
-          bar.style.width = "100%";
-        }
-      }
-    });
-    state.activeMd5Slot = null;
-    updateControlsState();
-  };
+  const badge = document.getElementById(`md5-badge-${slot}`);
+  const bar = document.getElementById(`md5-bar-${slot}`);
+  if (badge) {
+    badge.className = `badge ${def.cls}`;
+    badge.textContent = def.text(percent);
+  }
+  if (bar) {
+    bar.classList.toggle("progress-bar-error", Boolean(def.error));
+    bar.style.width = `${def.width ?? percent ?? 0}%`;
+  }
 }
 
-function cancelSlotMd5(slot) {
-  if (state.md5Results[slot]?.status !== "verifying") {
+function isMd5File(file) {
+  return file.name.toLowerCase().endsWith(".md5");
+}
+
+// --- MD5 Verification Queue ---
+// Verification is I/O-bound, so slots are verified one at a time. The queue lives on the
+// main thread and each verification runs in a fresh worker, so cancelling the active
+// slot is simply terminating its worker.
+const md5Queue = [];
+let md5Active = null; // { slot, worker }
+
+function scheduleMd5Pump() {
+  // Deferred so that cancelling several slots in a row (e.g. Reset Slots) does not
+  // spawn a worker for a slot that is about to be cancelled too.
+  queueMicrotask(pumpMd5Queue);
+}
+
+function enqueueMd5(slot) {
+  cancelMd5(slot);
+  md5Queue.push(slot);
+  setSlotStatus(slot, "queued");
+  scheduleMd5Pump();
+}
+
+function cancelMd5(slot) {
+  const idx = md5Queue.indexOf(slot);
+  if (idx !== -1) {
+    md5Queue.splice(idx, 1);
+  }
+  if (md5Active?.slot === slot) {
+    md5Active.worker.terminate();
+    md5Active = null;
+    scheduleMd5Pump();
+  }
+}
+
+function pumpMd5Queue() {
+  if (md5Active || md5Queue.length === 0) return;
+  const slot = md5Queue.shift();
+  const file = state.slots[slot];
+  if (!file) {
+    scheduleMd5Pump();
     return;
   }
-  delete state.md5Results[slot];
 
-  if (state.activeMd5Slot === slot) {
-    // Abort the in-flight WASM file hash by restarting the worker and re-queuing remaining slots
-    initMd5Worker();
-    SLOTS.forEach((otherSlot) => {
-      if (otherSlot !== slot && state.md5Results[otherSlot]?.status === "verifying") {
-        const file = state.slots[otherSlot];
-        const requestId = state.slotRequestIds[otherSlot];
-        const badge = document.getElementById(`md5-badge-${otherSlot}`);
-        const bar = document.getElementById(`md5-bar-${otherSlot}`);
-        if (badge) {
-          badge.className = "badge badge-hashing";
-          badge.textContent = "Queued...";
-        }
-        if (bar) {
-          bar.classList.remove("progress-bar-error");
-          bar.style.width = "0%";
-        }
-        if (file && md5Worker) {
-          md5Worker.postMessage({
-            command: "VERIFY_MD5",
-            fileId: otherSlot,
-            requestId,
-            file,
-          });
-        }
-      }
-    });
-  } else if (md5Worker) {
-    md5Worker.postMessage({
-      command: "CANCEL_MD5",
-      fileId: slot,
-    });
-  }
+  const worker = new Worker(new URL("./md5_worker.js", import.meta.url), { type: "module" });
+  md5Active = { slot, worker };
+
+  const finish = (status, error) => {
+    if (md5Active?.worker !== worker) return; // Cancelled; ignore late messages
+    worker.terminate();
+    md5Active = null;
+    setSlotStatus(slot, status, 100, error);
+    if (error) {
+      appendLog(`[MD5 ERROR] ${slot}: ${error}`);
+    }
+    updateControlsState();
+    pumpMd5Queue();
+  };
+
+  worker.onmessage = ({ data }) => {
+    if (md5Active?.worker !== worker) return;
+    switch (data.type) {
+      case "PROGRESS":
+        setSlotStatus(slot, "verifying", data.percent);
+        break;
+      case "LOG":
+        appendRawWasmLogs(data.lines);
+        break;
+      case "SUCCESS":
+        finish("valid");
+        break;
+      case "ERROR":
+        finish("invalid", data.error);
+        break;
+    }
+  };
+  worker.onerror = (e) => {
+    finish("invalid", e.message || "MD5 worker encountered an unexpected error");
+  };
+
+  setSlotStatus(slot, "verifying", 0);
+  worker.postMessage({ file });
 }
 
 // --- Slot Handling & Dropzones ---
 function assignFileToSlot(slot, file) {
   if (state.isBusy) return;
 
-  cancelSlotMd5(slot);
+  cancelMd5(slot);
   state.slots[slot] = file;
-  const requestId = ++state.slotRequestIds[slot];
 
   const slotBox = document.getElementById(`slot-box-${slot}`);
   const fileNameElem = document.getElementById(`file-name-${slot}`);
   const fileSizeElem = document.getElementById(`file-size-${slot}`);
   const clearBtn = document.getElementById(`clear-${slot}`);
-  const badge = document.getElementById(`md5-badge-${slot}`);
-  const bar = document.getElementById(`md5-bar-${slot}`);
 
   if (slotBox) slotBox.classList.add("slot-populated");
   if (fileNameElem) fileNameElem.textContent = file.name;
   if (fileSizeElem) fileSizeElem.textContent = formatBytes(file.size);
   if (clearBtn) clearBtn.hidden = false;
-  if (bar) bar.classList.remove("progress-bar-error");
 
-  if (file.name.toLowerCase().endsWith(".md5")) {
-    if (state.skipMd5) {
-      state.md5Results[slot] = { status: "skipped" };
-      if (badge) {
-        badge.className = "badge badge-valid";
-        badge.textContent = "MD5 Skipped";
-      }
-      if (bar) bar.style.width = "100%";
-      appendLog(`Loaded ${slot}: ${file.name} (${formatBytes(file.size)}) — MD5 check skipped`);
-    } else {
-      state.md5Results[slot] = { status: "verifying" };
-      if (badge) {
-        badge.className = "badge badge-hashing";
-        badge.textContent = "Queued...";
-      }
-      if (bar) bar.style.width = "0%";
-      appendLog(`Loaded ${slot}: ${file.name} (${formatBytes(file.size)}) — queued for MD5 check`);
-
-      if (md5Worker) {
-        md5Worker.postMessage({
-          command: "VERIFY_MD5",
-          fileId: slot,
-          requestId,
-          file,
-        });
-      }
-    }
+  const loaded = `Loaded ${slot}: ${file.name} (${formatBytes(file.size)})`;
+  if (!isMd5File(file)) {
+    setSlotStatus(slot, "ready");
+    appendLog(loaded);
+  } else if (state.skipMd5) {
+    setSlotStatus(slot, "skipped");
+    appendLog(`${loaded} — MD5 check skipped`);
   } else {
-    state.md5Results[slot] = { status: "skipped" };
-    if (badge) {
-      badge.className = "badge badge-valid";
-      badge.textContent = "Ready";
-    }
-    if (bar) bar.style.width = "100%";
-    appendLog(`Loaded ${slot}: ${file.name} (${formatBytes(file.size)})`);
+    enqueueMd5(slot);
+    appendLog(`${loaded} — queued for MD5 check`);
   }
 
   updateControlsState();
@@ -353,64 +306,18 @@ function handleSkipMd5Change(skip) {
   state.skipMd5 = skip;
   appendLog(`MD5 verification ${skip ? "disabled (skipped)" : "enabled"}.`);
 
-  if (skip) {
-    // Cancel any active or queued worker tasks and mark unverified .md5 slots as skipped
-    if (state.activeMd5Slot !== null) {
-      initMd5Worker();
-    } else if (md5Worker) {
-      md5Worker.postMessage({ command: "CANCEL_MD5" });
+  SLOTS.forEach((slot) => {
+    const file = state.slots[slot];
+    if (!file || !isMd5File(file)) return;
+    const status = state.md5Results[slot]?.status;
+    if (skip && status !== "valid") {
+      // Stop any queued or active verification and mark unverified slots as skipped
+      cancelMd5(slot);
+      setSlotStatus(slot, "skipped");
+    } else if (!skip && status === "skipped") {
+      enqueueMd5(slot);
     }
-
-    SLOTS.forEach((slot) => {
-      const file = state.slots[slot];
-      const status = state.md5Results[slot]?.status;
-      if (file && file.name.toLowerCase().endsWith(".md5") && status !== "valid") {
-        state.slotRequestIds[slot]++;
-        state.md5Results[slot] = { status: "skipped" };
-        const badge = document.getElementById(`md5-badge-${slot}`);
-        const bar = document.getElementById(`md5-bar-${slot}`);
-        if (badge) {
-          badge.className = "badge badge-valid";
-          badge.textContent = "MD5 Skipped";
-        }
-        if (bar) {
-          bar.classList.remove("progress-bar-error");
-          bar.style.width = "100%";
-        }
-      }
-    });
-  } else {
-    // Re-queue any .md5 slots that were previously skipped
-    SLOTS.forEach((slot) => {
-      const file = state.slots[slot];
-      if (
-        file &&
-        file.name.toLowerCase().endsWith(".md5") &&
-        state.md5Results[slot]?.status === "skipped"
-      ) {
-        const requestId = ++state.slotRequestIds[slot];
-        state.md5Results[slot] = { status: "verifying" };
-        const badge = document.getElementById(`md5-badge-${slot}`);
-        const bar = document.getElementById(`md5-bar-${slot}`);
-        if (badge) {
-          badge.className = "badge badge-hashing";
-          badge.textContent = "Queued...";
-        }
-        if (bar) {
-          bar.classList.remove("progress-bar-error");
-          bar.style.width = "0%";
-        }
-        if (md5Worker) {
-          md5Worker.postMessage({
-            command: "VERIFY_MD5",
-            fileId: slot,
-            requestId,
-            file,
-          });
-        }
-      }
-    });
-  }
+  });
 
   updateControlsState();
 }
@@ -418,17 +325,14 @@ function handleSkipMd5Change(skip) {
 function clearSlot(slot) {
   if (state.isBusy) return;
 
-  cancelSlotMd5(slot);
+  cancelMd5(slot);
   state.slots[slot] = null;
-  state.slotRequestIds[slot]++;
-  delete state.md5Results[slot];
+  setSlotStatus(slot, "empty");
 
   const slotBox = document.getElementById(`slot-box-${slot}`);
   const fileNameElem = document.getElementById(`file-name-${slot}`);
   const fileSizeElem = document.getElementById(`file-size-${slot}`);
   const clearBtn = document.getElementById(`clear-${slot}`);
-  const badge = document.getElementById(`md5-badge-${slot}`);
-  const bar = document.getElementById(`md5-bar-${slot}`);
   const fileInput = document.getElementById(`input-${slot}`);
 
   if (slotBox) slotBox.classList.remove("slot-populated");
@@ -437,14 +341,6 @@ function clearSlot(slot) {
   }
   if (fileSizeElem) fileSizeElem.textContent = "";
   if (clearBtn) clearBtn.hidden = true;
-  if (badge) {
-    badge.className = "badge badge-idle";
-    badge.textContent = "Empty";
-  }
-  if (bar) {
-    bar.classList.remove("progress-bar-error");
-    bar.style.width = "0%";
-  }
   if (fileInput) fileInput.value = "";
 
   updateControlsState();
@@ -821,7 +717,7 @@ function updateControlsState() {
     Boolean(salesCodeInput && salesCodeInput.value.trim().length > 0);
   const hasPendingOrInvalidMd5 = activeEntries.some(([slot]) => {
     const res = state.md5Results[slot];
-    return !res || res.status === "verifying" || res.status === "invalid";
+    return !res || ["queued", "verifying", "invalid"].includes(res.status);
   });
   const hasDownloadDevice = state.device?.mode === "download";
 
@@ -1446,7 +1342,6 @@ async function executeFlashProcess() {
 
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
-  initMd5Worker();
   setupExclusiveGuards();
   setupDropzones();
   setupWasmAndEvents();
