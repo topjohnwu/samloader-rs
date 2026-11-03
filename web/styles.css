@@ -64,40 +64,45 @@
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
+/* Color tokens use light-dark(), which resolves against the root's color-scheme.
+   It follows the OS by default; data-theme on <html> (set by ui/theme.js) forces
+   light or dark. */
 :root {
-  /* Material Design 3 (M3) Color Tokens — Baseline Google Blue */
-  --md-sys-color-primary: #0b57d0;
-  --md-sys-color-on-primary: #ffffff;
-  --md-sys-color-primary-container: #d3e3fd;
-  --md-sys-color-on-primary-container: #041e49;
-  --md-sys-color-primary-hover: #0842a0;
-  --md-sys-color-primary-container-hover: #c1d8fb;
+  color-scheme: light dark;
 
-  --md-sys-color-secondary-container: #e8f0fe;
-  --md-sys-color-on-secondary-container: #001d35;
+  /* Material Design 3 (M3) Color Tokens — Baseline Google Blue (light, dark) */
+  --md-sys-color-primary: light-dark(#0b57d0, #a8c7fa);
+  --md-sys-color-on-primary: light-dark(#ffffff, #062e6f);
+  --md-sys-color-primary-container: light-dark(#d3e3fd, #0842a0);
+  --md-sys-color-on-primary-container: light-dark(#041e49, #d3e3fd);
+  --md-sys-color-primary-hover: light-dark(#0842a0, #d3e3fd);
+  --md-sys-color-primary-container-hover: light-dark(#c1d8fb, #0b57d0);
 
-  --md-sys-color-surface: #ffffff;
-  --md-sys-color-surface-dim: #f0f4f9;
-  --md-sys-color-surface-container-low: #f8fafd;
-  --md-sys-color-surface-container: #f0f4f9;
-  --md-sys-color-surface-container-high: #e9eef6;
-  --md-sys-color-on-surface: #1f1f1f;
-  --md-sys-color-on-surface-variant: #444746;
+  --md-sys-color-secondary-container: light-dark(#e8f0fe, #004a77);
+  --md-sys-color-on-secondary-container: light-dark(#001d35, #c2e7ff);
 
-  --md-sys-color-outline: #747775;
-  --md-sys-color-outline-variant: #c4c7c5;
-  --md-sys-color-outline-subtle: #e1e3e1;
+  --md-sys-color-surface: light-dark(#ffffff, #1b1c1d);
+  --md-sys-color-surface-dim: light-dark(#f0f4f9, #131314);
+  --md-sys-color-surface-container-low: light-dark(#f8fafd, #202124);
+  --md-sys-color-surface-container: light-dark(#f0f4f9, #26282a);
+  --md-sys-color-surface-container-high: light-dark(#e9eef6, #303235);
+  --md-sys-color-on-surface: light-dark(#1f1f1f, #e3e3e3);
+  --md-sys-color-on-surface-variant: light-dark(#444746, #c4c7c5);
+
+  --md-sys-color-outline: light-dark(#747775, #8e918f);
+  --md-sys-color-outline-variant: light-dark(#c4c7c5, #444746);
+  --md-sys-color-outline-subtle: light-dark(#e1e3e1, #303235);
 
   /* Semantic Status Tokens (M3 Tonal Containers) */
-  --status-success: #146c2e;
-  --status-success-bg: #c4eed0;
-  --status-warning: #8f4c00;
-  --status-warning-bg: #ffefc3;
-  --status-error: #b3261e;
-  --status-error-bg: #f9dedc;
+  --status-success: light-dark(#146c2e, #6dd58c);
+  --status-success-bg: light-dark(#c4eed0, #0f5223);
+  --status-warning: light-dark(#8f4c00, #ffb95c);
+  --status-warning-bg: light-dark(#ffefc3, #5c3a00);
+  --status-error: light-dark(#b3261e, #f2b8b5);
+  --status-error-bg: light-dark(#f9dedc, #8c1d18);
 
   /* Terminal Surface */
-  --terminal-bg: #111318;
+  --terminal-bg: light-dark(#111318, #0b0c0f);
   --terminal-text: #e2e8f0;
 
   /* M3 Shape Tokens */
@@ -108,51 +113,21 @@
   --md-shape-full: 9999px;
 
   /* M3 Elevation Shadows */
-  --md-elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.06), 0 1px 3px 1px rgba(0, 0, 0, 0.04);
-  --md-elevation-2: 0 1px 2px 0 rgba(0, 0, 0, 0.1), 0 2px 6px 2px rgba(0, 0, 0, 0.06);
-
-  /* Native controls (checkboxes, selects, scrollbars) follow the color scheme */
-  color-scheme: light dark;
+  --md-elevation-1:
+    0 1px 2px 0 light-dark(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.3)),
+    0 1px 3px 1px light-dark(rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.15));
+  --md-elevation-2:
+    0 1px 2px 0 light-dark(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.3)),
+    0 2px 6px 2px light-dark(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.15));
 }
 
-/* M3 baseline dark color tokens */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --md-sys-color-primary: #a8c7fa;
-    --md-sys-color-on-primary: #062e6f;
-    --md-sys-color-primary-container: #0842a0;
-    --md-sys-color-on-primary-container: #d3e3fd;
-    --md-sys-color-primary-hover: #d3e3fd;
-    --md-sys-color-primary-container-hover: #0b57d0;
+/* Explicit theme selection; native controls and scrollbars follow too */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
 
-    --md-sys-color-secondary-container: #004a77;
-    --md-sys-color-on-secondary-container: #c2e7ff;
-
-    --md-sys-color-surface: #1b1c1d;
-    --md-sys-color-surface-dim: #131314;
-    --md-sys-color-surface-container-low: #202124;
-    --md-sys-color-surface-container: #26282a;
-    --md-sys-color-surface-container-high: #303235;
-    --md-sys-color-on-surface: #e3e3e3;
-    --md-sys-color-on-surface-variant: #c4c7c5;
-
-    --md-sys-color-outline: #8e918f;
-    --md-sys-color-outline-variant: #444746;
-    --md-sys-color-outline-subtle: #303235;
-
-    --status-success: #6dd58c;
-    --status-success-bg: #0f5223;
-    --status-warning: #ffb95c;
-    --status-warning-bg: #5c3a00;
-    --status-error: #f2b8b5;
-    --status-error-bg: #8c1d18;
-
-    --terminal-bg: #0b0c0f;
-    --terminal-text: #e2e8f0;
-
-    --md-elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
-    --md-elevation-2: 0 1px 2px 0 rgba(0, 0, 0, 0.3), 0 2px 6px 2px rgba(0, 0, 0, 0.15);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -223,8 +198,6 @@ textarea {
 }
 
 .header-inner {
-  max-width: 980px;
-  margin: 0 auto;
   padding: 12px 24px;
   min-height: 64px;
   display: flex;
@@ -372,6 +345,57 @@ textarea {
   height: 8px;
   border-radius: 50%;
   background-color: currentColor;
+}
+
+/* M3 Segmented Button (theme toggle), backed by native radios for keyboard support */
+.segmented-group {
+  display: inline-flex;
+  height: 36px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  overflow: hidden;
+}
+
+.segmented-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.segmented-option + .segmented-option {
+  border-left: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.segmented-option input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.segmented-option svg {
+  width: 18px;
+  height: 18px;
+}
+
+.segmented-option:hover {
+  background-color: var(--md-sys-color-surface-container);
+}
+
+.segmented-option:has(input:checked) {
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.segmented-option:has(input:focus-visible) {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
 }
 
 /* Main Container */

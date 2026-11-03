@@ -37,6 +37,7 @@ import {
   savePit,
 } from "./ui/device.js";
 import { handleProgressEvent, executeFlashProcess } from "./ui/flash.js";
+import { setupThemeToggle } from "./ui/theme.js";
 
 // --- WASM & Event Wiring ---
 async function setupWasmAndEvents() {
@@ -143,6 +144,7 @@ async function setupWasmAndEvents() {
 
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
+  setupThemeToggle();
   renderPackageSlots();
   setupExclusiveGuards();
   setupDropzones();

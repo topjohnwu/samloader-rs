@@ -6,6 +6,13 @@
   <title>samloader-rs — Odin Web Flasher</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231a73e8' stroke-width='2'%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
+  <!-- Apply the stored theme before first paint to avoid a flash; see ui/theme.js -->
+  <script>
+    try {
+      const theme = localStorage.getItem("theme");
+      if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+    } catch {}
+  </script>
 </head>
 <body>
   <!-- Top App Bar -->
@@ -45,6 +52,28 @@
         <div id="connection-chip" class="status-chip chip-disconnected">
           <span class="chip-dot"></span>
           <span class="chip-label">No Device</span>
+        </div>
+        <div class="segmented-group" role="radiogroup" aria-label="Theme">
+          <label class="segmented-option" title="Light theme">
+            <input type="radio" name="theme" value="light" aria-label="Light theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"/>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+            </svg>
+          </label>
+          <label class="segmented-option" title="Dark theme">
+            <input type="radio" name="theme" value="dark" aria-label="Dark theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>
+            </svg>
+          </label>
+          <label class="segmented-option" title="Use system theme">
+            <input type="radio" name="theme" value="system" aria-label="System theme" checked>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="3" width="20" height="14" rx="2"/>
+              <path d="M8 21h8M12 17v4"/>
+            </svg>
+          </label>
         </div>
       </div>
     </div>
