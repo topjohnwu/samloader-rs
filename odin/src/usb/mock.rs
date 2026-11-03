@@ -559,6 +559,16 @@ impl MockBackend {
         self
     }
 
+    fn has_event_listener(&self) -> bool {
+        Arc::strong_count(&self.event_log) > 1
+    }
+
+    fn record_event(&self, event: MockEvent) {
+        if self.has_event_listener() {
+            self.event_log.lock().unwrap().push(event);
+        }
+    }
+
     fn push_response(&mut self, response_type: u32, value: u32) {
         print_verbose!(
             "MockBackend: queueing response: response_type = {:#04X?}, value = {}",
@@ -652,8 +662,10 @@ impl UsbTransfer for MockBackend {
                         self.push_response(STATUS_FAIL, err as u32);
                     } else {
                         self.current_partition_bytes += chunk_size;
-                        self.current_slice_data
-                            .extend_from_slice(&self.incoming_buffer[..chunk_size]);
+                        if self.has_event_listener() {
+                            self.current_slice_data
+                                .extend_from_slice(&self.incoming_buffer[..chunk_size]);
+                        }
                         self.push_response(STREAMING_CHUNK_ACK, self.current_chunk_index);
                         self.current_chunk_index += 1;
                         self.received_chunks.fetch_add(1, Ordering::Relaxed);
@@ -724,17 +736,14 @@ impl UsbTransfer for MockBackend {
                                 }
                                 SessionCommand::SalesCode { c0, c1, c2 } => {
                                     let code = [c0, c1, c2].map(|c| char::from(c as u8));
-                                    self.event_log
-                                        .lock()
-                                        .unwrap()
-                                        .push(MockEvent::SalesCode(code.iter().collect()));
+                                    self.record_event(MockEvent::SalesCode(code.iter().collect()));
                                     self.push_response(CMD_SESSION_INIT, 0);
                                 }
                                 SessionCommand::NandErase => {
                                     if let Some(err) = self.fail_nand_erase {
                                         self.push_response(STATUS_FAIL, err as u32);
                                     } else {
-                                        self.event_log.lock().unwrap().push(MockEvent::NandErase);
+                                        self.record_event(MockEvent::NandErase);
                                         self.push_response(
                                             CMD_SESSION_INIT,
                                             self.nand_erase_sectors,
@@ -749,11 +758,11 @@ impl UsbTransfer for MockBackend {
                                 PitCommand::Flash => {
                                     self.state = State::PitFlash;
                                     self.active_pit_data.clear();
-                                    self.event_log.lock().unwrap().push(MockEvent::PitFlash);
+                                    self.record_event(MockEvent::PitFlash);
                                     self.push_response(CMD_PIT, 0);
                                 }
                                 PitCommand::Dump => {
-                                    self.event_log.lock().unwrap().push(MockEvent::PitDump);
+                                    self.record_event(MockEvent::PitDump);
                                     self.push_response(CMD_PIT, self.active_pit_data.len() as u32);
                                 }
                                 PitCommand::Slice { slice } => {
@@ -796,27 +805,30 @@ impl UsbTransfer for MockBackend {
                                     if let Some(err) = self.fail_commit {
                                         self.push_response(STATUS_FAIL, err as u32);
                                     } else {
-                                        let partition_id = commit.partition_id();
-                                        let lz4 =
-                                            matches!(&transmit_cmd, TransmitCommand::Lz4End(_));
-                                        // The raw slice size announced at the start is rounded
-                                        // up to 128 KB, so use the exact size from the commit.
-                                        // LZ4 commits carry the decompressed size instead, so
-                                        // use the announced compressed size for those.
-                                        let payload_size = if lz4 {
-                                            self.current_slice_announced_size
-                                                .unwrap_or(self.current_slice_data.len())
-                                        } else {
-                                            commit.slice_size() as usize
-                                        };
-                                        let mut data = std::mem::take(&mut self.current_slice_data);
-                                        data.truncate(payload_size);
-                                        self.event_log.lock().unwrap().push(MockEvent::Slice {
-                                            partition_id,
-                                            lz4,
-                                            last: commit.is_end_of_file(),
-                                            data,
-                                        });
+                                        if self.has_event_listener() {
+                                            let partition_id = commit.partition_id();
+                                            let lz4 =
+                                                matches!(&transmit_cmd, TransmitCommand::Lz4End(_));
+                                            // The raw slice size announced at the start is rounded
+                                            // up to 128 KB, so use the exact size from the commit.
+                                            // LZ4 commits carry the decompressed size instead, so
+                                            // use the announced compressed size for those.
+                                            let payload_size = if lz4 {
+                                                self.current_slice_announced_size
+                                                    .unwrap_or(self.current_slice_data.len())
+                                            } else {
+                                                commit.slice_size() as usize
+                                            };
+                                            let mut data =
+                                                std::mem::take(&mut self.current_slice_data);
+                                            data.truncate(payload_size);
+                                            self.record_event(MockEvent::Slice {
+                                                partition_id,
+                                                lz4,
+                                                last: commit.is_end_of_file(),
+                                                data,
+                                            });
+                                        }
 
                                         self.current_partition_bytes = 0;
                                         self.state = State::SessionBegun;
@@ -830,20 +842,17 @@ impl UsbTransfer for MockBackend {
                                         self.push_response(STATUS_FAIL, err as u32);
                                     } else {
                                         self.state = State::HandshakeComplete;
-                                        self.event_log.lock().unwrap().push(MockEvent::EndSession);
+                                        self.record_event(MockEvent::EndSession);
                                         self.push_response(CMD_CLOSE_CONNECTION, 0);
                                     }
                                 }
                                 CloseConnectionCommand::RebootDevice => {
                                     self.state = State::Uninitialized;
-                                    self.event_log.lock().unwrap().push(MockEvent::Reboot);
+                                    self.record_event(MockEvent::Reboot);
                                 }
                                 CloseConnectionCommand::RebootDownload => {
                                     self.state = State::Uninitialized;
-                                    self.event_log
-                                        .lock()
-                                        .unwrap()
-                                        .push(MockEvent::RebootToDownload);
+                                    self.record_event(MockEvent::RebootToDownload);
                                 }
                             },
                             Command::DynamicPartition(dp_cmd) => {
