@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import init, {
+  FlashOptions,
   append_log,
   append_raw_logs,
   clear_log,
@@ -396,11 +397,13 @@ export async function verifyPackageMd5(file) {
  * @param {boolean} [options.disable_verification=false]
  * @param {boolean} [options.skip_size_check=false]
  * @param {string} [options.sales_code]
- * @param {string[] | string} [options.skip]
+ * @param {string[]} [options.skip] File or partition names to exclude
  * @returns {Promise<FlashJob>} Job with `flashes_userdata(): boolean`, `erases_userdata(): boolean`,
  *   `execute(backend: string, wait: boolean): Promise<void>` (consumes the job), and `free(): void`
  */
 export async function prepareFlash(files, options = {}) {
   await initWasm();
-  return await prepare_flash(files, options);
+  // The generated setters convert each value; unset options keep their defaults
+  const flashOptions = Object.assign(new FlashOptions(), options);
+  return await prepare_flash(files, flashOptions);
 }

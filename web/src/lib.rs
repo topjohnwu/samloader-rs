@@ -167,31 +167,36 @@ pub async fn verify_package_md5(file: JsValue) -> Result<(), JsValue> {
         .map_err(to_js_err)
 }
 
-fn get_bool_option(options: &js_sys::Object, key: &str, default: bool) -> bool {
-    js_sys::Reflect::get(options, &JsValue::from_str(key))
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
+/// Options for [`prepare_flash`], mirroring the CLI's flash options. Constructed in
+/// JavaScript with `new FlashOptions()` and set field by field.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct FlashOptions {
+    /// Reboot mode after flashing: "normal" (default), "download" or "none".
+    #[wasm_bindgen(getter_with_clone)]
+    pub reboot: Option<String>,
+    /// Performs a NAND erase of USERDATA before flashing.
+    pub erase: bool,
+    /// Disables dm-verity in the flashed vbmeta images.
+    pub disable_verity: bool,
+    /// Disables AVB verification in the flashed vbmeta images.
+    pub disable_verification: bool,
+    /// Allows images larger than their PIT partitions.
+    pub skip_size_check: bool,
+    /// Sales code (CSC) to set on the device.
+    #[wasm_bindgen(getter_with_clone)]
+    pub sales_code: Option<String>,
+    /// File or partition names to exclude from flashing.
+    #[wasm_bindgen(getter_with_clone)]
+    pub skip: Vec<String>,
 }
 
-fn get_skip_option(options: &js_sys::Object) -> Vec<String> {
-    let Ok(val) = js_sys::Reflect::get(options, &JsValue::from_str("skip")) else {
-        return Vec::new();
-    };
-    if js_sys::Array::is_array(&val) {
-        let arr: js_sys::Array = val.unchecked_into();
-        arr.iter()
-            .filter_map(|v| v.as_string())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else if let Some(s) = val.as_string() {
-        s.split(',')
-            .map(|part| part.trim().to_string())
-            .filter(|part| !part.is_empty())
-            .collect()
-    } else {
-        Vec::new()
+#[wasm_bindgen]
+impl FlashOptions {
+    /// Creates options with every setting at its default.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -241,26 +246,8 @@ impl FlashJob {
 #[wasm_bindgen]
 pub async fn prepare_flash(
     files: js_sys::Object,
-    options: js_sys::Object,
+    options: FlashOptions,
 ) -> Result<FlashJob, JsValue> {
-    let reboot_str = js_sys::Reflect::get(&options, &JsValue::from_str("reboot"))
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| "normal".to_string());
-    let reboot_mode = parse_reboot_mode(&reboot_str);
-
-    let erase = get_bool_option(&options, "erase", false);
-    let disable_verity = get_bool_option(&options, "disable_verity", false);
-    let disable_verification = get_bool_option(&options, "disable_verification", false);
-    let skip_size_check = get_bool_option(&options, "skip_size_check", false);
-    let skip_targets = get_skip_option(&options);
-
-    let sales_code = js_sys::Reflect::get(&options, &JsValue::from_str("sales_code"))
-        .ok()
-        .and_then(|v| v.as_string())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
     // Like the CLI, the slot alone decides how an input is used: package slots are
     // always TAR packages (`--bl`, `--ap`, ...), the PIT slot is always the PIT
     // (`--pit`), and `partitions` are always raw images (`-p` / `-f`).
@@ -307,14 +294,24 @@ pub async fn prepare_flash(
         }
     }
 
+    let reboot_mode = options
+        .reboot
+        .as_deref()
+        .map_or(RebootMode::Normal, parse_reboot_mode);
+    let sales_code = options
+        .sales_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let mut req = FlashRequest::new()
-        .erase(erase)
+        .erase(options.erase)
         .reboot_mode(reboot_mode)
-        .disable_verity(disable_verity)
-        .disable_verification(disable_verification)
-        .skip_size_check(skip_size_check)
-        .skip(&skip_targets)
-        .sales_code(sales_code.as_deref());
+        .disable_verity(options.disable_verity)
+        .disable_verification(options.disable_verification)
+        .skip_size_check(options.skip_size_check)
+        .skip(&options.skip)
+        .sales_code(sales_code);
 
     if let Some(pit) = pit_bytes {
         req = req.pit(pit);
@@ -327,5 +324,8 @@ pub async fn prepare_flash(
         .await
         .map_err(to_js_err)?;
 
-    Ok(FlashJob { prepared, erase })
+    Ok(FlashJob {
+        prepared,
+        erase: options.erase,
+    })
 }
