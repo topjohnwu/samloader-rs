@@ -15,24 +15,34 @@
 // limitations under the License.
 
 use indicatif::{ProgressBar, ProgressStyle};
-use samloader_odin::{FlashEvent, FlashProgress};
+use samloader_odin::{FlashEvent, FlashProgress, set_progress};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const PROGRESS_TEMPLATE: &str =
     "{msg}\n[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
+static PROGRESS: CliProgress = CliProgress::new();
+
+/// Initializes and registers the global CLI progress reporter.
+pub(crate) fn init(verbose: bool) {
+    PROGRESS.verbose.store(verbose, Ordering::Relaxed);
+    set_progress(&PROGRESS);
+}
+
 /// Reports library progress and diagnostics on the terminal, drawing a
 /// progress bar while a partition is flashed or verified.
 pub(crate) struct CliProgress {
-    progress_bar: std::sync::Mutex<Option<ProgressBar>>,
-    verbose: bool,
+    progress_bar: Mutex<Option<ProgressBar>>,
+    verbose: AtomicBool,
 }
 
 impl CliProgress {
-    pub(crate) fn new(verbose: bool) -> Self {
+    const fn new() -> Self {
         Self {
-            progress_bar: std::sync::Mutex::new(None),
-            verbose,
+            progress_bar: Mutex::new(None),
+            verbose: AtomicBool::new(false),
         }
     }
 }
@@ -59,17 +69,17 @@ impl FlashProgress for CliProgress {
     }
 
     fn println_verbose(&self, msg: &str) {
-        if self.verbose {
+        if self.is_verbose() {
             self.println(msg);
         }
     }
 
     fn is_verbose(&self) -> bool {
-        self.verbose
+        self.verbose.load(Ordering::Relaxed)
     }
 
     fn eprintln_verbose(&self, msg: &str) {
-        if !self.verbose {
+        if !self.is_verbose() {
             return;
         }
         match &*self.progress_bar.lock().unwrap() {

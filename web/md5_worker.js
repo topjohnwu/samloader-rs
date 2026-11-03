@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { verifyPackageMd5 } from "./bridge.js";
+import { setProgressCallback, verifyPackageMd5 } from "./bridge.js";
 
 let taskQueue = Promise.resolve();
 const activeRequestIds = new Map();
@@ -33,7 +33,7 @@ async function handleVerifyMd5({ fileId, requestId, file }) {
   }
 
   try {
-    await verifyPackageMd5(file, (eventOrMsg) => {
+    await setProgressCallback((eventOrMsg) => {
       if (activeRequestIds.get(fileId) !== requestId) {
         return;
       }
@@ -55,6 +55,8 @@ async function handleVerifyMd5({ fileId, requestId, file }) {
         });
       }
     });
+
+    await verifyPackageMd5(file);
 
     if (activeRequestIds.get(fileId) === requestId) {
       self.postMessage({

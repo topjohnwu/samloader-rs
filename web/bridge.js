@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import init, {
+  clear_progress_callback,
   detect_download_device,
   get_backend_options,
   pair_download_device,
@@ -20,6 +21,8 @@ import init, {
   print_pit,
   reboot_from_odin,
   reboot_to_download_at,
+  set_progress_callback,
+  set_verbose,
   start_flash,
   verify_package_md5,
 } from "./pkg/samloader_web.js";
@@ -50,6 +53,32 @@ export async function initWasm() {
     });
   }
   await initPromise;
+}
+
+/**
+ * Registers the thread-local callback receiving string log messages and progress objects.
+ * @param {(eventOrMsg: string | { type: "progress", percent: number, current: number, total: number, partition: string }) => void} onProgress
+ */
+export async function setProgressCallback(onProgress) {
+  await initWasm();
+  set_progress_callback(onProgress);
+}
+
+/**
+ * Clears the thread-local progress reporter.
+ */
+export async function clearProgressCallback() {
+  await initWasm();
+  clear_progress_callback();
+}
+
+/**
+ * Sets whether verbose log messages are emitted by the active progress reporter.
+ * @param {boolean} verbose
+ */
+export async function setVerbose(verbose) {
+  await initWasm();
+  set_verbose(Boolean(verbose));
 }
 
 /**
@@ -173,90 +202,68 @@ export async function pairSamsungDevice(backend) {
 
 /**
  * Detects a connected Samsung Download Mode device and queries DVIF device info.
- * @param {object} options
+ * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {boolean} [options.wait=false]
- * @param {boolean} [options.verbose=false]
- * @param {(msg: string) => void} [options.onLog]
  * @returns {Promise<string>}
  */
-export async function detectDownloadDevice({
-  backend,
-  wait = false,
-  verbose = false,
-  onLog = () => {},
-} = {}) {
+export async function detectDownloadDevice({ backend, wait = false } = {}) {
   await initWasm();
-  return await detect_download_device(backend, wait, verbose, onLog);
+  return await detect_download_device(backend, wait);
 }
 
 /**
  * Reboots a normal-mode/AT-mode Samsung device into Download Mode via `AT+SUDDLMOD=0,0\r`.
- * @param {object} options
+ * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
- * @param {boolean} [options.verbose=false]
- * @param {(msg: string) => void} [options.onLog]
  * @returns {Promise<boolean>} True if the AT command was sent, false if already in Download Mode
  */
-export async function rebootToDownloadAt({
-  backend,
-  verbose = false,
-  onLog = () => {},
-} = {}) {
+export async function rebootToDownloadAt({ backend } = {}) {
   await initWasm();
-  return await reboot_to_download_at(backend, verbose, onLog);
+  return await reboot_to_download_at(backend);
 }
 
 /**
  * Opens an Odin session on a Download Mode device and reboots it.
- * @param {object} options
+ * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {"download" | "normal" | "none"} [options.rebootMode="download"]
  * @param {boolean} [options.wait=false]
- * @param {boolean} [options.verbose=false]
- * @param {(msg: string) => void} [options.onLog]
  */
 export async function rebootFromOdin({
   backend,
   rebootMode = "download",
   wait = false,
-  verbose = false,
-  onLog = () => {},
 } = {}) {
   await initWasm();
-  await reboot_from_odin(backend, rebootMode, wait, verbose, onLog);
+  await reboot_from_odin(backend, rebootMode, wait);
 }
 
 /**
  * Downloads and formats the connected Download Mode device's PIT table.
- * @param {object} options
+ * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {"normal" | "download" | "none"} [options.rebootMode="normal"]
  * @param {boolean} [options.wait=false]
- * @param {boolean} [options.verbose=false]
- * @param {(msg: string) => void} [options.onLog]
  * @returns {Promise<string>} Formatted PIT table text
  */
 export async function printPit({
   backend,
   rebootMode = "normal",
   wait = false,
-  verbose = false,
-  onLog = () => {},
 } = {}) {
   await initWasm();
-  return await print_pit(backend, rebootMode, wait, verbose, onLog);
+  return await print_pit(backend, rebootMode, wait);
 }
 
 /**
  * Verifies the trailing MD5 checksum appended to `.tar.md5` package files using `samloader-odin`.
  * @param {File|Blob|Uint8Array|Object} file Package file or data object
- * @param {Function} [onProgress] Callback function receiving string log messages or progress objects
  * @returns {Promise<void>}
  */
-export async function verifyPackageMd5(file, onProgress = () => {}) {
+export async function verifyPackageMd5(file) {
   await initWasm();
-  return await verify_package_md5(file, onProgress);
+  return await verify_package_md5(file);
 }
 
 /**
@@ -272,11 +279,9 @@ export async function verifyPackageMd5(file, onProgress = () => {}) {
  * @param {string} [options.sales_code]
  * @param {string[] | string} [options.skip]
  * @param {boolean} [options.wait=false]
- * @param {boolean} [options.verbose=true]
- * @param {Function} [onProgress] Callback function receiving string log messages or progress objects
  * @returns {Promise<void>}
  */
-export async function startFlash(backend, files, options = {}, onProgress = () => {}) {
+export async function startFlash(backend, files, options = {}) {
   await initWasm();
-  return await start_flash(backend, files, options, onProgress);
+  return await start_flash(backend, files, options);
 }

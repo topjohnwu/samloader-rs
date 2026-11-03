@@ -15,11 +15,10 @@
 // limitations under the License.
 
 use crate::cli::FlashArgs;
-use crate::progress::CliProgress;
+use crate::progress;
 use crate::readahead::ReadaheadFile;
 use samloader_odin::{
-    FlashRequest, OdinSession, UsbBackendOption, futures::executor::block_on, set_progress,
-    verify_md5_footer,
+    FlashRequest, OdinSession, UsbBackendOption, futures::executor::block_on, verify_md5_footer,
 };
 use std::error::Error;
 use std::fs::File;
@@ -91,7 +90,7 @@ pub(crate) fn run(
         None => None,
     };
 
-    set_progress(CliProgress::new(verbose));
+    progress::init(verbose);
 
     if !args.skip_md5 {
         for (pkg, reader) in &mut opened_packages {

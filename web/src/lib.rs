@@ -189,9 +189,13 @@ impl AsyncSeek for JsReader {
     }
 }
 
+thread_local! {
+    static PROGRESS: &'static WebProgress = Box::leak(Box::new(WebProgress::new()));
+}
+
 struct WebProgress {
-    verbose: bool,
-    log_cb: Function,
+    verbose: Cell<bool>,
+    log_cb: RefCell<Option<Function>>,
     total_bytes: Cell<u64>,
     current_bytes: Cell<u64>,
     last_percent: Cell<Option<u32>>,
@@ -199,10 +203,10 @@ struct WebProgress {
 }
 
 impl WebProgress {
-    fn new(verbose: bool, log_cb: Function) -> Self {
+    fn new() -> Self {
         Self {
-            verbose,
-            log_cb,
+            verbose: Cell::new(false),
+            log_cb: RefCell::new(None),
             total_bytes: Cell::new(0),
             current_bytes: Cell::new(0),
             last_percent: Cell::new(None),
@@ -211,10 +215,16 @@ impl WebProgress {
     }
 
     fn emit_log(&self, msg: &str) {
-        let _ = self.log_cb.call1(&JsValue::NULL, &JsValue::from_str(msg));
+        if let Some(cb) = self.log_cb.borrow().as_ref() {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(msg));
+        }
     }
 
     fn emit_progress(&self, force: bool) {
+        let Some(cb) = self.log_cb.borrow().clone() else {
+            return;
+        };
+
         let total = self.total_bytes.get();
         let curr = self.current_bytes.get();
         let percent = (curr * 100)
@@ -238,22 +248,7 @@ impl WebProgress {
             &self.current_partition.borrow().as_str().into(),
         );
 
-        let _ = self.log_cb.call1(&JsValue::NULL, &obj);
-    }
-}
-
-struct ProgressGuard;
-
-impl ProgressGuard {
-    fn new(verbose: bool, log_cb: Function) -> Self {
-        set_progress(WebProgress::new(verbose, log_cb));
-        Self
-    }
-}
-
-impl Drop for ProgressGuard {
-    fn drop(&mut self) {
-        clear_progress();
+        let _ = cb.call1(&JsValue::NULL, &obj);
     }
 }
 
@@ -350,14 +345,36 @@ impl FlashProgress for WebProgress {
     }
 
     fn println_verbose(&self, msg: &str) {
-        if self.verbose {
+        if self.verbose.get() {
             self.emit_log(msg);
         }
     }
 
     fn is_verbose(&self) -> bool {
-        self.verbose
+        self.verbose.get()
     }
+}
+
+/// Registers the thread-local JavaScript callback for receiving log messages and progress events.
+#[wasm_bindgen]
+pub fn set_progress_callback(log_cb: Function) {
+    let progress = PROGRESS.with(|&p| p);
+    *progress.log_cb.borrow_mut() = Some(log_cb);
+    set_progress(progress);
+}
+
+/// Clears the thread-local progress reporter.
+#[wasm_bindgen]
+pub fn clear_progress_callback() {
+    let progress = PROGRESS.with(|&p| p);
+    *progress.log_cb.borrow_mut() = None;
+    clear_progress();
+}
+
+/// Sets whether verbose log messages are emitted by the active progress reporter.
+#[wasm_bindgen]
+pub fn set_verbose(verbose: bool) {
+    PROGRESS.with(|&p| p.verbose.set(verbose));
 }
 
 fn parse_backend(backend: Option<&str>) -> Result<UsbBackendOption, JsValue> {
@@ -492,10 +509,7 @@ pub async fn pair_samsung_device(backend_str: Option<String>) -> Result<(), JsVa
 pub async fn detect_download_device(
     backend_str: Option<String>,
     wait: bool,
-    verbose: bool,
-    log_cb: Function,
 ) -> Result<String, JsValue> {
-    let _progress = ProgressGuard::new(verbose, log_cb);
     let backend = parse_backend(backend_str.as_deref())?;
     let mut connection = OdinConnection::open(backend, wait)
         .await
@@ -510,12 +524,7 @@ pub async fn detect_download_device(
 /// Reboots a normal-mode/AT-mode Samsung device into Download Mode using `AT+SUDDLMOD=0,0\r`.
 /// Returns `true` if the AT reboot command was sent, or `false` if the device is already in Download Mode.
 #[wasm_bindgen]
-pub async fn reboot_to_download_at(
-    backend_str: Option<String>,
-    verbose: bool,
-    log_cb: Function,
-) -> Result<bool, JsValue> {
-    let _progress = ProgressGuard::new(verbose, log_cb);
+pub async fn reboot_to_download_at(backend_str: Option<String>) -> Result<bool, JsValue> {
     let backend = parse_backend(backend_str.as_deref())?;
     match reboot_download(backend).await.map_err(to_js_err)? {
         DownloadModeReboot::Sent => Ok(true),
@@ -529,10 +538,7 @@ pub async fn reboot_from_odin(
     backend_str: Option<String>,
     reboot_mode: String,
     wait: bool,
-    verbose: bool,
-    log_cb: Function,
 ) -> Result<(), JsValue> {
-    let _progress = ProgressGuard::new(verbose, log_cb);
     let backend = parse_backend(backend_str.as_deref())?;
     let mode = parse_reboot_mode(&reboot_mode);
 
@@ -548,21 +554,13 @@ pub async fn print_pit(
     backend_str: Option<String>,
     reboot_mode: String,
     wait: bool,
-    verbose: bool,
-    log_cb: Function,
 ) -> Result<String, JsValue> {
-    let _progress = ProgressGuard::new(verbose, log_cb.clone());
     let backend = parse_backend(backend_str.as_deref())?;
     let mode = parse_reboot_mode(&reboot_mode);
 
     let mut session = OdinSession::connect(backend, wait)
         .await
         .map_err(to_js_err)?;
-
-    let _ = log_cb.call1(
-        &JsValue::NULL,
-        &JsValue::from_str("Downloading device's PIT file..."),
-    );
 
     let pit_res = match session.receive_pit_info().await {
         Ok(pit_bytes) => PitData::new(&pit_bytes)
@@ -580,8 +578,7 @@ pub async fn print_pit(
 
 /// Verifies the trailing MD5 checksum appended to `.tar.md5` package files using `samloader_odin`.
 #[wasm_bindgen]
-pub async fn verify_package_md5(file: JsValue, log_cb: Function) -> Result<(), JsValue> {
-    let _progress = ProgressGuard::new(false, log_cb);
+pub async fn verify_package_md5(file: JsValue) -> Result<(), JsValue> {
     let reader = extract_reader_from_js(&file)?;
     let filename =
         extract_explicit_name_from_js(&file).unwrap_or_else(|| "package.tar.md5".to_string());
@@ -636,11 +633,7 @@ pub async fn start_flash(
     backend_str: Option<String>,
     files: js_sys::Object,
     options: js_sys::Object,
-    js_callback: js_sys::Function,
 ) -> Result<(), JsValue> {
-    let verbose = get_bool_option(&options, "verbose", true);
-    let _progress = ProgressGuard::new(verbose, js_callback);
-
     let reboot_str = js_sys::Reflect::get(&options, &JsValue::from_str("reboot"))
         .ok()
         .and_then(|v| v.as_string())

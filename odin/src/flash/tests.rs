@@ -582,14 +582,15 @@ fn test_execute_reports_read_errors_while_sending() {
 
 #[test]
 fn test_execute_with_local_pit_reports_once() {
-    #[derive(Clone, Default)]
-    struct Collector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    struct Collector(std::sync::Mutex<Vec<String>>);
 
     impl crate::FlashProgress for Collector {
         fn println(&self, msg: &str) {
             self.0.lock().unwrap().push(msg.to_string());
         }
     }
+
+    static COLLECTOR: Collector = Collector(std::sync::Mutex::new(Vec::new()));
 
     let _guard = crate::progress::TEST_MUTEX
         .lock()
@@ -600,8 +601,8 @@ fn test_execute_with_local_pit_reports_once() {
         ("dtbo.img", b"DUMMY DTBO IMAGE DATA"),
     ]);
 
-    let collector = Collector::default();
-    crate::progress::set_progress(collector.clone());
+    COLLECTOR.0.lock().unwrap().clear();
+    crate::progress::set_progress(&COLLECTOR);
     let res = futures::executor::block_on(async {
         let mut session = mock_session(MockBackend::new()).await;
 
@@ -617,7 +618,7 @@ fn test_execute_with_local_pit_reports_once() {
     crate::progress::clear_progress();
     res.unwrap();
 
-    let messages = collector.0.lock().unwrap();
+    let messages = COLLECTOR.0.lock().unwrap();
     let count = messages
         .iter()
         .filter(|m| m.as_str() == "Skipping DTBO_A (excluded with --skip)")

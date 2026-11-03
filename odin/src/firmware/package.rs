@@ -312,27 +312,34 @@ mod tests {
     use crate::test_util::build_tar;
     use futures::io::Cursor;
     use std::fmt::Write;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    #[derive(Clone)]
     struct TestProgress {
-        started_total: Arc<AtomicU64>,
-        inc_bytes: Arc<AtomicU64>,
-        ended: Arc<AtomicBool>,
-        failed: Arc<AtomicBool>,
+        started_total: AtomicU64,
+        inc_bytes: AtomicU64,
+        ended: AtomicBool,
+        failed: AtomicBool,
     }
 
     impl TestProgress {
-        fn new() -> Self {
+        const fn new() -> Self {
             Self {
-                started_total: Arc::new(AtomicU64::new(0)),
-                inc_bytes: Arc::new(AtomicU64::new(0)),
-                ended: Arc::new(AtomicBool::new(false)),
-                failed: Arc::new(AtomicBool::new(false)),
+                started_total: AtomicU64::new(0),
+                inc_bytes: AtomicU64::new(0),
+                ended: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
             }
         }
+
+        fn reset(&self) {
+            self.started_total.store(0, Ordering::Relaxed);
+            self.inc_bytes.store(0, Ordering::Relaxed);
+            self.ended.store(false, Ordering::Relaxed);
+            self.failed.store(false, Ordering::Relaxed);
+        }
     }
+
+    static TEST_PROGRESS: TestProgress = TestProgress::new();
 
     impl FlashProgress for TestProgress {
         fn set_length(&self, _len: u64) {}
@@ -383,20 +390,23 @@ mod tests {
         let footer = format!("{}  test.tar\n", hex_str);
         data.extend_from_slice(footer.as_bytes());
 
-        let progress = TestProgress::new();
-        crate::progress::set_progress(progress.clone());
+        TEST_PROGRESS.reset();
+        crate::progress::set_progress(&TEST_PROGRESS);
         let res = futures::executor::block_on(verify_md5_footer(Cursor::new(&data), "test.tar"));
         crate::progress::clear_progress();
 
         assert!(res.is_ok());
         let expected_total = (payload.len() + 1) as u64;
         assert_eq!(
-            progress.started_total.load(Ordering::Relaxed),
+            TEST_PROGRESS.started_total.load(Ordering::Relaxed),
             expected_total
         );
-        assert_eq!(progress.inc_bytes.load(Ordering::Relaxed), expected_total);
-        assert!(progress.ended.load(Ordering::Relaxed));
-        assert!(!progress.failed.load(Ordering::Relaxed));
+        assert_eq!(
+            TEST_PROGRESS.inc_bytes.load(Ordering::Relaxed),
+            expected_total
+        );
+        assert!(TEST_PROGRESS.ended.load(Ordering::Relaxed));
+        assert!(!TEST_PROGRESS.failed.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -414,14 +424,14 @@ mod tests {
         let footer = "0123456789abcdef0123456789abcdef  test.tar\n";
         data.extend_from_slice(footer.as_bytes());
 
-        let progress = TestProgress::new();
-        crate::progress::set_progress(progress.clone());
+        TEST_PROGRESS.reset();
+        crate::progress::set_progress(&TEST_PROGRESS);
         let res = futures::executor::block_on(verify_md5_footer(Cursor::new(&data), "test.tar"));
         crate::progress::clear_progress();
 
         assert!(res.is_err());
-        assert!(progress.failed.load(Ordering::Relaxed));
-        assert!(!progress.ended.load(Ordering::Relaxed));
+        assert!(TEST_PROGRESS.failed.load(Ordering::Relaxed));
+        assert!(!TEST_PROGRESS.ended.load(Ordering::Relaxed));
     }
 
     #[test]

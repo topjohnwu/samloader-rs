@@ -14,6 +14,8 @@
 
 import {
   initWasm,
+  setProgressCallback,
+  setVerbose,
   getBackendOptions,
   isBackendSupported,
   isWebUsbSupported,
@@ -778,6 +780,7 @@ function updateControlsState() {
     "backend-select",
     "opt-reboot-mode",
     "opt-skip-md5",
+    "opt-verbose",
     "btn-pair-download",
     "btn-pair-normal",
     "btn-reboot-download",
@@ -982,8 +985,6 @@ async function queryAndShowDeviceInfo() {
       appendLog("Querying Download Mode device info (DVIF)...");
       const info = await detectDownloadDevice({
         backend: state.selectedBackend,
-        verbose: true,
-        onLog: appendLog,
       });
       renderDeviceInfo(info);
       updateConnectionChip(true, "Device Ready");
@@ -1062,10 +1063,27 @@ async function handlePairNormal() {
   }
 }
 
+function handleProgressEvent(eventOrMsg) {
+  if (typeof eventOrMsg === "string") {
+    appendLog(eventOrMsg);
+  } else if (eventOrMsg && typeof eventOrMsg === "object" && eventOrMsg.type === "progress") {
+    const { percent, partition } = eventOrMsg;
+    const progressBar = document.getElementById("flash-progress-bar");
+    const percentText = document.getElementById("flash-percent-text");
+    const statusText = document.getElementById("flash-status-text");
+    if (progressBar) progressBar.style.width = `${percent}%`;
+    if (percentText) percentText.textContent = `${percent}%`;
+    if (statusText && partition) {
+      statusText.textContent = `Status: Flashing ${partition} (${percent}%)`;
+    }
+  }
+}
+
 // --- WASM & Event Wiring ---
 async function setupWasmAndEvents() {
   try {
     await initWasm();
+    await setProgressCallback(handleProgressEvent);
     appendLog("WASM engine initialized successfully.");
 
     const backendOptions = await getBackendOptions();
@@ -1114,6 +1132,11 @@ async function setupWasmAndEvents() {
     document.getElementById("opt-skip-md5")?.addEventListener("change", (e) => {
       handleSkipMd5Change(e.target.checked);
     });
+    document.getElementById("opt-verbose")?.addEventListener("change", async (e) => {
+      const enabled = e.target.checked;
+      await setVerbose(enabled);
+      appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
+    });
     document.getElementById("opt-nand-erase")?.addEventListener("change", updateControlsState);
     document.getElementById("opt-sales-code")?.addEventListener("input", updateControlsState);
 
@@ -1135,8 +1158,6 @@ async function setupWasmAndEvents() {
           appendLog("Requesting reboot to Download Mode via AT interface...");
           const sent = await rebootToDownloadAt({
             backend: state.selectedBackend,
-            verbose: true,
-            onLog: appendLog,
           });
           if (sent) {
             appendLog(
@@ -1159,8 +1180,6 @@ async function setupWasmAndEvents() {
           await rebootFromOdin({
             backend: state.selectedBackend,
             rebootMode: state.rebootMode,
-            verbose: true,
-            onLog: appendLog,
           });
           appendLog("Odin reboot executed successfully.");
         } catch (err) {
@@ -1177,8 +1196,6 @@ async function setupWasmAndEvents() {
           const pitText = await printPit({
             backend: state.selectedBackend,
             rebootMode: state.rebootMode,
-            verbose: true,
-            onLog: appendLog,
           });
           appendLog("--- PIT Table Output ---");
           appendLog(pitText);
@@ -1282,20 +1299,7 @@ async function executeFlashProcess() {
 
       appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
 
-      await startFlash(state.selectedBackend, files, options, (eventOrMsg) => {
-        if (typeof eventOrMsg === "string") {
-          appendLog(eventOrMsg);
-        } else if (eventOrMsg && typeof eventOrMsg === "object") {
-          if (eventOrMsg.type === "progress") {
-            const { percent, partition } = eventOrMsg;
-            if (progressBar) progressBar.style.width = `${percent}%`;
-            if (percentText) percentText.textContent = `${percent}%`;
-            if (statusText && partition) {
-              statusText.textContent = `Status: Flashing ${partition} (${percent}%)`;
-            }
-          }
-        }
-      });
+      await startFlash(state.selectedBackend, files, options);
 
       if (progressBar) progressBar.style.width = "100%";
       if (percentText) percentText.textContent = "100%";

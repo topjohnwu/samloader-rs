@@ -14,8 +14,8 @@
 // limitations under the License.
 
 use crate::cli::{DumpPitArgs, OdinArgs, PrintPitArgs};
-use crate::progress::CliProgress;
-use samloader_odin::{OdinSession, UsbBackendOption, futures::executor::block_on, set_progress};
+use crate::progress;
+use samloader_odin::{OdinSession, UsbBackendOption, futures::executor::block_on};
 use samloader_pit::PitData;
 use std::error::Error;
 use std::fs::File;
@@ -80,7 +80,7 @@ fn with_device_pit(
     verbose: bool,
     handle: impl FnOnce(Vec<u8>) -> Result<(), Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
-    set_progress(CliProgress::new(verbose));
+    progress::init(verbose);
 
     block_on(async {
         let mut session = OdinSession::connect(usb_backend, odin.wait).await?;

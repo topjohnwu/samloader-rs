@@ -886,11 +886,7 @@ mod tests {
     fn test_session_reports_lifecycle_events() {
         // Other tests may report events at the same time, so only events
         // from this test's thread are recorded
-        #[derive(Clone)]
-        struct Recorder(
-            std::thread::ThreadId,
-            std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        );
+        struct Recorder(std::thread::ThreadId, std::sync::Mutex<Vec<String>>);
 
         impl crate::FlashProgress for Recorder {
             fn on_event(&self, event: FlashEvent<'_>) {
@@ -904,8 +900,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        let recorder = Recorder(std::thread::current().id(), Default::default());
-        crate::progress::set_progress(recorder.clone());
+        let recorder = Box::leak(Box::new(Recorder(
+            std::thread::current().id(),
+            Default::default(),
+        )));
+        crate::progress::set_progress(recorder);
         let res = futures::executor::block_on(async {
             let mut session = mock_session(MockBackend::new()).await;
             session.nand_erase().await?;

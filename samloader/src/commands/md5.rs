@@ -16,16 +16,16 @@
 use super::AlreadyReported;
 use crate::cli::VerifyMd5Args;
 use crate::print_error;
-use crate::progress::CliProgress;
+use crate::progress;
 use crate::readahead::ReadaheadFile;
-use samloader_odin::{futures::executor::block_on, set_progress, verify_md5_footer};
+use samloader_odin::{futures::executor::block_on, verify_md5_footer};
 use std::error::Error;
 use std::fs::File;
 
 /// Verifies the MD5 footers of `.tar.md5` packages.
 pub(crate) fn run(args: VerifyMd5Args) -> Result<(), Box<dyn Error>> {
     let mut success = true;
-    set_progress(CliProgress::new(false));
+    progress::init(false);
     block_on(async {
         // Verify every file, reporting each failure as it is found
         for file_path in &args.files {

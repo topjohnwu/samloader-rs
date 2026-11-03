@@ -114,15 +114,15 @@ pub trait FlashProgress: MaybeSend + MaybeSync {
 impl FlashProgress for () {}
 
 #[cfg(not(target_arch = "wasm32"))]
-static GLOBAL_PROGRESS: std::sync::RwLock<Option<Box<dyn FlashProgress>>> =
+static GLOBAL_PROGRESS: std::sync::RwLock<Option<&'static dyn FlashProgress>> =
     std::sync::RwLock::new(None);
 
 // Reporters are not required to be `Sync` on WASM, so they cannot be stored in
 // a static. Instead, each thread has its own reporter.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static GLOBAL_PROGRESS: std::cell::RefCell<Option<Box<dyn FlashProgress>>> =
-        const { std::cell::RefCell::new(None) };
+    static GLOBAL_PROGRESS: std::cell::Cell<Option<&'static dyn FlashProgress>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Sets the global progress reporter.
@@ -131,8 +131,8 @@ thread_local! {
 /// reported from anywhere in the crate, down to individual USB transfers. This
 /// assumes a single flash at a time per process. On WASM, the reporter is only
 /// active on the calling thread, allowing one flash per thread.
-pub fn set_progress(progress: impl FlashProgress + 'static) {
-    replace_progress(Some(Box::new(progress)));
+pub fn set_progress(progress: &'static dyn FlashProgress) {
+    replace_progress(Some(progress));
 }
 
 /// Clears the global progress reporter, reverting to no-op.
@@ -141,38 +141,35 @@ pub fn clear_progress() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn replace_progress(progress: Option<Box<dyn FlashProgress>>) {
+fn replace_progress(progress: Option<&'static dyn FlashProgress>) {
     let mut lock = GLOBAL_PROGRESS.write().unwrap();
     *lock = progress;
 }
 
 #[cfg(target_arch = "wasm32")]
-fn replace_progress(progress: Option<Box<dyn FlashProgress>>) {
-    // Drop the previous reporter after releasing the borrow, in case its
-    // destructor reports progress.
-    let _old = GLOBAL_PROGRESS.replace(progress);
+fn replace_progress(progress: Option<&'static dyn FlashProgress>) {
+    GLOBAL_PROGRESS.set(progress);
 }
 
 /// Invokes a closure with a reference to the active global progress reporter,
 /// falling back to a no-op reporter if none is configured.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn with_progress<R>(f: impl FnOnce(&dyn FlashProgress) -> R) -> R {
-    if let Ok(guard) = GLOBAL_PROGRESS.read()
-        && let Some(p) = guard.as_deref()
-    {
-        return f(p);
+    let progress = GLOBAL_PROGRESS.read().ok().and_then(|guard| *guard);
+    match progress {
+        Some(p) => f(p),
+        None => f(&()),
     }
-    f(&())
 }
 
 /// Invokes a closure with a reference to the active global progress reporter,
 /// falling back to a no-op reporter if none is configured.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn with_progress<R>(f: impl FnOnce(&dyn FlashProgress) -> R) -> R {
-    GLOBAL_PROGRESS.with_borrow(|p| match p.as_deref() {
+    match GLOBAL_PROGRESS.get() {
         Some(p) => f(p),
         None => f(&()),
-    })
+    }
 }
 
 /// Sets the total length of the active progress (in bytes).

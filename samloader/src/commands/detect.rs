@@ -14,9 +14,9 @@
 // limitations under the License.
 
 use crate::cli::DetectArgs;
-use crate::progress::CliProgress;
+use crate::progress;
 use samloader_odin::{
-    OdinConnection, UsbBackendOption, detect_device, futures::executor::block_on, set_progress,
+    OdinConnection, UsbBackendOption, detect_device, futures::executor::block_on,
 };
 use std::error::Error;
 
@@ -24,7 +24,7 @@ use std::error::Error;
 pub(crate) fn run(args: DetectArgs, usb_backend: UsbBackendOption) -> Result<(), Box<dyn Error>> {
     let DetectArgs { wait, json } = args;
     if !json {
-        set_progress(CliProgress::new(false));
+        progress::init(false);
     }
     block_on(async {
         if !detect_device(usb_backend, wait).await {
