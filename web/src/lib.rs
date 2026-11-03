@@ -19,8 +19,9 @@ mod reader;
 
 use futures::io::AsyncReadExt;
 use samloader_odin::{
-    DownloadModeReboot, FlashRequest, OdinConnection, OdinSession, PreparedFlash, RebootMode,
-    UsbBackendOption, reboot_download, request_device, request_reboot_device, verify_md5_footer,
+    DeviceMode, DownloadModeReboot, FlashRequest, OdinConnection, OdinSession, PreparedFlash,
+    RebootMode, UsbBackendOption, reboot_download, request_device, request_reboot_device,
+    verify_md5_footer,
 };
 use samloader_pit::PitData;
 use wasm_bindgen::prelude::*;
@@ -50,6 +51,19 @@ fn parse_reboot_mode(mode: &str) -> RebootMode {
 
 fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+/// Returns the mode of a Samsung device with the given USB VID/PID: "download" or
+/// "normal", or `undefined` if it is not a Samsung device.
+#[wasm_bindgen]
+pub fn device_mode(vid: u16, pid: u16) -> Option<String> {
+    DeviceMode::of(vid, pid).map(|mode| {
+        match mode {
+            DeviceMode::Download => "download",
+            DeviceMode::Normal => "normal",
+        }
+        .to_string()
+    })
 }
 
 /// Returns array of supported backend option names ("nusb", "vcom", "mock").

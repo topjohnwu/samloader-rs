@@ -35,7 +35,7 @@ mod transport;
 
 pub use backend::UsbBackendOption;
 pub(crate) use backend::with_backend;
-pub(crate) use discovery::DeviceMode;
+pub use discovery::DeviceMode;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use discovery::VID_SAMSUNG;
 #[cfg(target_arch = "wasm32")]

@@ -19,6 +19,7 @@ import init, {
   clear_log,
   clear_progress_callback,
   detect_download_device,
+  device_mode,
   export_logs,
   get_backend_options,
   log_line_height,
@@ -195,6 +196,17 @@ export function renderLogViewport(scrollTop, viewportHeight, stickToBottom) {
 export async function getBackendOptions() {
   await initWasm();
   return get_backend_options();
+}
+
+/**
+ * Classifies a USB device by its VID/PID, using samloader-odin's list of Download Mode PIDs.
+ * Requires WASM to be initialized.
+ * @param {number} vid
+ * @param {number} pid
+ * @returns {"download" | "normal" | undefined} undefined if it is not a Samsung device
+ */
+export function deviceMode(vid, pid) {
+  return device_mode(vid, pid);
 }
 
 /**

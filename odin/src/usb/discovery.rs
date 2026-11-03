@@ -32,9 +32,9 @@ const DOWNLOAD_MODE_DEVICES: &[(u16, u16)] = &[
     (VID_SAMSUNG, PID_DROID_CHARGE),
 ];
 
-/// Which mode a Samsung device is expected to be in.
-#[derive(Clone, Copy)]
-pub(crate) enum DeviceMode {
+/// The mode a Samsung device is in, as identified by its USB VID/PID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceMode {
     /// Download Mode, where Odin flashing happens.
     Download,
     /// Normal mode, where the modem interface accepts AT commands.
@@ -42,13 +42,21 @@ pub(crate) enum DeviceMode {
 }
 
 impl DeviceMode {
+    /// Returns the mode of a Samsung device with the given VID/PID, or `None` if
+    /// it is not a Samsung device.
+    pub fn of(vid: u16, pid: u16) -> Option<Self> {
+        if DOWNLOAD_MODE_DEVICES.contains(&(vid, pid)) {
+            Some(DeviceMode::Download)
+        } else if vid == VID_SAMSUNG {
+            Some(DeviceMode::Normal)
+        } else {
+            None
+        }
+    }
+
     /// Returns whether a device with the given VID/PID is a Samsung device in this mode.
     fn matches(self, vid: u16, pid: u16) -> bool {
-        let download = DOWNLOAD_MODE_DEVICES.contains(&(vid, pid));
-        match self {
-            DeviceMode::Download => download,
-            DeviceMode::Normal => vid == VID_SAMSUNG && !download,
-        }
+        Self::of(vid, pid) == Some(self)
     }
 
     /// Finds the first connected device in this mode.
@@ -224,6 +232,18 @@ mod tests {
 
     const PID_NORMAL: u16 = 0x6860;
     const PID_PORTABLE_SSD: u16 = 0x61F5;
+
+    #[test]
+    fn test_device_mode_of() {
+        for pid in [PID_GALAXY_S, PID_GALAXY_S2, PID_DROID_CHARGE] {
+            assert_eq!(DeviceMode::of(VID_SAMSUNG, pid), Some(DeviceMode::Download));
+        }
+        assert_eq!(
+            DeviceMode::of(VID_SAMSUNG, PID_NORMAL),
+            Some(DeviceMode::Normal)
+        );
+        assert_eq!(DeviceMode::of(0x18D1, PID_GALAXY_S2), None);
+    }
 
     #[derive(Clone, Copy)]
     enum Open {

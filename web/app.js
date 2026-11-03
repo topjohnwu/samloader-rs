@@ -34,6 +34,7 @@ import {
   rebootFromOdin,
   printPit,
   prepareFlash,
+  deviceMode,
 } from "./bridge.js";
 
 // --- Constants & Application State ---
@@ -46,8 +47,6 @@ const PACKAGE_SLOTS = [
   { id: "USERDATA", badge: "USER", label: "User Data" },
 ];
 const SLOTS = [...PACKAGE_SLOTS.map((s) => s.id), "PIT"];
-const SAMSUNG_VID = 0x04e8;
-const DOWNLOAD_MODE_PIDS = new Set([0x6601, 0x685d, 0x68c3]);
 
 const state = {
   selectedBackend: "nusb",
@@ -147,13 +146,6 @@ function formatBytes(bytes) {
   const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
   const i = Math.max(0, Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-}
-
-function classifyDeviceMode(vid, pid) {
-  if (vid === SAMSUNG_VID && DOWNLOAD_MODE_PIDS.has(pid)) {
-    return "download";
-  }
-  return "normal";
 }
 
 // --- Progress Bars & Announcements ---
@@ -1150,10 +1142,10 @@ async function refreshPairedDevicesStatus() {
 
   // Prefer a Download Mode device, so a Normal Mode device that happens to be listed
   // first does not disable the Download Mode actions
-  const samsung = devices.filter((dev) => dev.vendorId === SAMSUNG_VID);
-  const d =
-    samsung.find((dev) => classifyDeviceMode(dev.vendorId, dev.productId) === "download") ??
-    samsung[0];
+  const samsung = devices
+    .map((dev) => ({ dev, mode: deviceMode(dev.vendorId, dev.productId) }))
+    .filter(({ mode }) => mode !== undefined);
+  const { dev: d, mode } = samsung.find((s) => s.mode === "download") ?? samsung[0] ?? {};
 
   // Only drop the queried device info when the device itself changed or disappeared
   const key = d ? deviceKey(backend, d) : null;
@@ -1171,7 +1163,6 @@ async function refreshPairedDevicesStatus() {
   } else {
     const vid = d.vendorId.toString(16).padStart(4, "0");
     const pid = d.productId.toString(16).padStart(4, "0");
-    const mode = classifyDeviceMode(d.vendorId, d.productId);
     const name =
       d.productName ||
       (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
