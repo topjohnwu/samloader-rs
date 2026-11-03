@@ -18,6 +18,7 @@ import {
   appendWasmLog,
   clearWasmLog,
   exportWasmLogs,
+  lastWasmLogLine,
   renderLogViewport,
   logLineHeight,
 } from "../bridge.js";
@@ -32,6 +33,12 @@ function flushLogViewport(stickToBottom = logStickToBottom) {
   const container = document.querySelector(".log-terminal");
   const logElem = document.getElementById("log-output");
   if (!container || !logElem) return;
+
+  // Keep the latest line visible in the header while the log is folded. Before WASM
+  // is initialized, appendLog() shows the queued lines instead.
+  const preview = document.getElementById("log-preview");
+  const lastLine = lastWasmLogLine();
+  if (preview && lastLine !== null) preview.textContent = lastLine;
 
   const view = renderLogViewport(container.scrollTop, container.clientHeight, stickToBottom);
   if (!view) return;
@@ -82,6 +89,39 @@ export function setupLogScroller() {
   flushLogViewport(true);
 }
 
+// --- Folding ---
+// The log is folded by default. It opens on errors and for output that is the result
+// of an action (e.g. a PIT dump), as that would otherwise go unnoticed.
+function setLogExpanded(expanded) {
+  const toggle = document.getElementById("log-toggle");
+  const body = document.getElementById("log-body");
+  const actions = document.getElementById("log-actions");
+  if (!toggle || !body) return;
+  if ((toggle.getAttribute("aria-expanded") === "true") === expanded) return;
+
+  toggle.setAttribute("aria-expanded", String(expanded));
+  body.hidden = !expanded;
+  if (actions) actions.hidden = !expanded;
+  if (expanded) {
+    // The viewport has no size while folded, so render it again at the bottom
+    const container = document.querySelector(".log-terminal");
+    logStickToBottom = true;
+    flushLogViewport(true);
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+}
+
+export function openLog() {
+  setLogExpanded(true);
+}
+
+export function setupLogPanel() {
+  const toggle = document.getElementById("log-toggle");
+  toggle?.addEventListener("click", () => {
+    setLogExpanded(toggle.getAttribute("aria-expanded") !== "true");
+  });
+}
+
 // --- Log Buffer ---
 export function appendLog(msg) {
   const queuedLines = appendWasmLog(msg);
@@ -92,7 +132,15 @@ export function appendLog(msg) {
       const separator = logElem.textContent ? "\n" : "";
       logElem.textContent += `${separator}${queuedLines.join("\n")}`;
     }
+    const preview = document.getElementById("log-preview");
+    if (preview) preview.textContent = queuedLines.at(-1) ?? "";
   }
+}
+
+// Logs an error and unfolds the log, so the failure is not hidden
+export function reportError(msg) {
+  appendLog(msg);
+  openLog();
 }
 
 export function clearLog() {

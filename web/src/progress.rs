@@ -423,6 +423,20 @@ pub fn export_logs() -> String {
     PROGRESS.with(|&p| p.lines.borrow().join("\n"))
 }
 
+/// Returns the most recent non-blank log line, shown while the activity log is folded.
+#[wasm_bindgen]
+pub fn last_log_line() -> String {
+    PROGRESS.with(|&p| {
+        p.lines
+            .borrow()
+            .iter()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
 /// Returns the height in pixels of a single log line. The log element's CSS `line-height`
 /// must match it for the virtualized viewport to line up.
 #[wasm_bindgen]

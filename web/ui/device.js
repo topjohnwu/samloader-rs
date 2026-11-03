@@ -27,7 +27,7 @@ import {
 } from "../bridge.js";
 import { state } from "./state.js";
 import { downloadFile } from "./util.js";
-import { appendLog } from "./log.js";
+import { appendLog, reportError, openLog } from "./log.js";
 import { updateControlsState, runExclusive } from "./controls.js";
 
 // --- Device List & Hardware Info Rendering ---
@@ -173,7 +173,7 @@ async function handleDisconnectDevice(dev) {
     appendLog(`Disconnected device: ${dev.name}`);
     await refreshPairedDevicesStatus();
   } catch (err) {
-    appendLog(`Failed to disconnect device: ${err}`);
+    reportError(`Failed to disconnect device: ${err}`);
   }
 }
 
@@ -187,7 +187,7 @@ export async function queryAndShowDeviceInfo() {
       renderDeviceInfo(info);
       updateConnectionChip(true, "Device Ready");
     } catch (err) {
-      appendLog(`Detection failed: ${err}`);
+      reportError(`Detection failed: ${err}`);
     }
   });
 }
@@ -229,7 +229,7 @@ export async function refreshPairedDevicesStatus() {
     devices = await getPairedDevices(backend);
   } catch (err) {
     if (gen === refreshGen) {
-      appendLog(`Failed to enumerate paired device: ${err}`);
+      reportError(`Failed to enumerate paired device: ${err}`);
     }
     return;
   }
@@ -320,7 +320,7 @@ export async function handleRebootToDownload() {
         appendLog("Device is already in Download Mode (no AT command needed).");
       }
     } catch (err) {
-      appendLog(`Reboot command failed: ${err}`);
+      reportError(`Reboot command failed: ${err}`);
     }
   });
 }
@@ -338,7 +338,7 @@ export async function handleRebootOdin(target) {
       });
       appendLog(`Reboot to ${label} command sent.`);
     } catch (err) {
-      appendLog(`Odin reboot failed: ${err}`);
+      reportError(`Odin reboot failed: ${err}`);
     }
   });
 }
@@ -356,8 +356,10 @@ export async function handleDumpPit() {
       lastPit = { data: pit.data, model: state.deviceModel };
       const savePitBtn = document.getElementById("btn-save-pit");
       if (savePitBtn) savePitBtn.hidden = false;
+      // The PIT table is printed to the log, so show it
+      openLog();
     } catch (err) {
-      appendLog(`PIT dump failed: ${err}`);
+      reportError(`PIT dump failed: ${err}`);
     }
   });
 }

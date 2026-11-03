@@ -1264,7 +1264,8 @@ textarea {
   border-bottom-right-radius: 0;
 }
 
-.advanced-chevron {
+/* Chevron of the foldable sections, pointing down when unfolded */
+.fold-chevron {
   width: 18px;
   height: 18px;
   flex-shrink: 0;
@@ -1272,7 +1273,8 @@ textarea {
   transition: transform 0.2s;
 }
 
-.advanced-options[open] .advanced-chevron {
+.advanced-options[open] .fold-chevron,
+.log-toggle[aria-expanded="true"] .fold-chevron {
   transform: rotate(90deg);
 }
 
@@ -1446,15 +1448,22 @@ textarea {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+/* Flash actions; replaced by the progress panel while flashing */
 .action-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--md-sys-color-outline-subtle);
+}
+
+.action-controls {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  margin-top: 20px;
-  padding-top: 18px;
-  border-top: 1px solid var(--md-sys-color-outline-subtle);
 }
 
 .when-done-group {
@@ -1472,15 +1481,34 @@ textarea {
   margin-left: auto;
 }
 
-/* Step 3: Progress & Activity Log */
-.terminal-actions {
+/* Flash Progress Panel */
+.flash-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 44px;
+  justify-content: center;
+}
+
+.flash-progress-header {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 12px;
 }
 
+.flash-status-text {
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .progress-percent-pill {
+  flex-shrink: 0;
   font-family: 'Roboto Mono', monospace;
   font-size: 0.78rem;
   font-weight: 600;
@@ -1491,8 +1519,10 @@ textarea {
 }
 
 .main-progress-bg {
-  height: 4px;
-  background-color: var(--md-sys-color-primary-container);
+  height: 8px;
+  border-radius: var(--md-shape-full);
+  /* Neutral track, so the unfilled part never reads as progress (notably in dark mode) */
+  background-color: var(--md-sys-color-surface-container-high);
   overflow: hidden;
 }
 
@@ -1500,20 +1530,122 @@ textarea {
   background-color: var(--md-sys-color-primary);
 }
 
-/* Current partition progress, below the overall flash progress */
-.partition-progress-bg {
-  height: 2px;
-  background-color: var(--md-sys-color-surface-container-high);
+/* Transfer speed and time left, below the progress bar */
+.flash-detail-text {
+  min-height: 1.25em;
+  font-size: 0.8125rem;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* Outcome of the last flash */
+.flash-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 16px;
+  border-radius: var(--md-shape-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.flash-result.result-success {
+  background-color: var(--status-success-bg);
+  color: var(--status-success);
+}
+
+.flash-result.result-error {
+  background-color: var(--status-error-bg);
+  color: var(--status-error);
+}
+
+.flash-result-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.flash-result-link {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  border-radius: var(--md-shape-xs);
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.flash-result-link:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.flash-result .btn-clear-slot {
+  color: inherit;
+}
+
+/* Activity Log (folded by default, showing the latest line) */
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 24px 8px 12px;
+  flex-wrap: wrap;
+}
+
+.log-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--md-shape-md);
+  background: none;
+  color: var(--md-sys-color-on-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.log-toggle:hover {
+  background-color: var(--md-sys-color-surface-container-low);
+}
+
+.log-toggle:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.log-title {
+  flex-shrink: 0;
+  font-family: 'DM Sans', 'Roboto', sans-serif;
+  font-size: 1.125rem;
+  font-weight: 500;
+}
+
+.log-preview {
+  min-width: 0;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--md-sys-color-on-surface-variant);
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.partition-progress-fill {
-  background-color: var(--md-sys-color-primary);
-  opacity: 0.5;
+.log-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
-.terminal-body {
-  padding: 18px 24px 24px;
+.log-body {
+  padding: 0 24px 24px;
 }
 
 .log-terminal {

@@ -17,7 +17,7 @@
 import { prepareFlash } from "../bridge.js";
 import { state } from "./state.js";
 import { formatBytes, setBarPercent, announce, formatDuration } from "./util.js";
-import { scheduleLogFlush, appendLog } from "./log.js";
+import { scheduleLogFlush, appendLog, reportError, openLog } from "./log.js";
 import { runExclusive } from "./controls.js";
 
 // --- Flash Progress, Speed & ETA ---
@@ -61,9 +61,9 @@ export function handleProgressEvent(event) {
   } else if (event.type === "progress") {
     const { percent, partition, overallPercent } = event;
     const progressBar = document.getElementById("flash-progress-bar");
-    const partitionBar = document.getElementById("partition-progress-bar");
     const percentText = document.getElementById("flash-percent-text");
     const statusText = document.getElementById("flash-status-text");
+    const detailText = document.getElementById("flash-detail-text");
 
     if (overallPercent === undefined) {
       // Progress outside of a flash only has the current operation's percentage
@@ -72,45 +72,101 @@ export function handleProgressEvent(event) {
       return;
     }
 
-    // The main bar shows the whole flash, the thin bar below it the current partition
+    // A single bar shows the whole flash. Partitions are weighted by size, so large
+    // ones still move it steadily; the current partition is named in the text.
     const stats = updateFlashStats(event.sent, overallPercent);
     setBarPercent(progressBar, overallPercent);
-    setBarPercent(partitionBar, percent);
     if (percentText) percentText.textContent = `${Math.floor(overallPercent)}%`;
-    if (statusText && partition) {
-      const details = [`${percent}%`];
+    if (detailText) {
+      const details = [];
       if (stats.speed !== null) {
         details.push(`${formatBytes(stats.speed)}/s`);
       }
       if (stats.rate > 0) {
-        details.push(`ETA ${formatDuration((100 - overallPercent) / stats.rate)}`);
+        details.push(`About ${formatDuration((100 - overallPercent) / stats.rate)} left`);
       }
-      const position = `${event.partitionIndex}/${event.partitionCount}`;
+      detailText.textContent = details.join(" · ");
+    }
+    if (statusText && partition) {
+      const position = `${event.partitionIndex} of ${event.partitionCount}`;
       if (partition !== lastAnnouncedPartition) {
         lastAnnouncedPartition = partition;
         announce(`Flashing ${partition} (${position})`);
       }
-      statusText.textContent =
-        `Status: Flashing ${partition} (${position}) — ${details.join(" • ")}`;
+      statusText.textContent = `Flashing ${partition} (${position})`;
     }
   }
+}
+
+// --- Flash Panel ---
+// While flashing, the progress panel replaces the flash controls in the action bar,
+// and the outcome is shown above them afterwards.
+function setFlashInProgress(inProgress) {
+  const controls = document.getElementById("action-controls");
+  const panel = document.getElementById("flash-progress-panel");
+  if (controls) controls.hidden = inProgress;
+  if (panel) panel.hidden = !inProgress;
+}
+
+function showFlashResult(success, message) {
+  const result = document.getElementById("flash-result");
+  const text = document.getElementById("flash-result-text");
+  const showLogBtn = document.getElementById("btn-show-log");
+  if (!result || !text) return;
+  result.classList.toggle("result-success", success);
+  result.classList.toggle("result-error", !success);
+  text.textContent = message;
+  if (showLogBtn) showLogBtn.hidden = success;
+  result.hidden = false;
+}
+
+function hideFlashResult() {
+  const result = document.getElementById("flash-result");
+  if (result) result.hidden = true;
+}
+
+// Brings the action bar into view, in case the page was scrolled elsewhere
+function revealActionBar() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document
+    .querySelector(".action-bar")
+    ?.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+}
+
+function rebootOutcome() {
+  switch (state.rebootMode) {
+    case "download":
+      return "The device is rebooting to Download Mode.";
+    case "none":
+      return "The device stays in Download Mode.";
+    default:
+      return "The device is rebooting to Android.";
+  }
+}
+
+export function setupFlashPanel() {
+  document.getElementById("btn-dismiss-result")?.addEventListener("click", hideFlashResult);
+  document.getElementById("btn-show-log")?.addEventListener("click", () => {
+    openLog();
+    document.querySelector(".log-card")?.scrollIntoView({ block: "nearest" });
+  });
 }
 
 export async function executeFlashProcess() {
   await runExclusive(async () => {
     const statusText = document.getElementById("flash-status-text");
+    const detailText = document.getElementById("flash-detail-text");
     const percentText = document.getElementById("flash-percent-text");
     const progressBar = document.getElementById("flash-progress-bar");
-    const partitionBar = document.getElementById("partition-progress-bar");
 
     resetFlashStats();
-    if (progressBar) {
-      progressBar.classList.remove("progress-bar-error");
-      setBarPercent(progressBar, 0);
-    }
-    setBarPercent(partitionBar, 0);
+    setBarPercent(progressBar, 0);
+    if (detailText) detailText.textContent = "";
     if (percentText) percentText.textContent = "0%";
-    if (statusText) statusText.textContent = "Status: Preparing Firmware...";
+    if (statusText) statusText.textContent = "Preparing firmware...";
+    hideFlashResult();
+    setFlashInProgress(true);
+    revealActionBar();
     appendLog("=== Starting Flashing Session ===");
 
     const activeSlots = Object.entries(state.slots).filter(([_, file]) => file !== null);
@@ -171,27 +227,27 @@ export async function executeFlashProcess() {
         !confirm(`${wipeReasons.join("\n")}\n\nThis will wipe the device's data. Continue?`)
       ) {
         job.free();
-        if (statusText) statusText.textContent = "Status: Flashing Aborted";
         announce("Flashing aborted");
         appendLog("Flashing aborted by user.");
         return;
       }
 
-      if (statusText) statusText.textContent = "Status: Flashing Firmware...";
+      if (statusText) statusText.textContent = "Flashing firmware...";
       appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
       await job.execute(state.selectedBackend, false);
 
       setBarPercent(progressBar, 100);
-      setBarPercent(partitionBar, 100);
       if (percentText) percentText.textContent = "100%";
-      if (statusText) statusText.textContent = "Status: Flashing Complete!";
+      showFlashResult(true, `Flashing complete. ${rebootOutcome()}`);
       announce("Flashing complete");
       appendLog("=== Flashing Process Finished Successfully ===");
     } catch (err) {
-      if (progressBar) progressBar.classList.add("progress-bar-error");
-      if (statusText) statusText.textContent = "Status: Flashing Failed!";
+      // Errors may span many lines; the banner shows the first, the log all of them
+      showFlashResult(false, `Flashing failed: ${String(err).split("\n")[0]}`);
       announce("Flashing failed");
-      appendLog(`[FLASH ERROR] ${err}`);
+      reportError(`[FLASH ERROR] ${err}`);
+    } finally {
+      setFlashInProgress(false);
     }
   });
 }

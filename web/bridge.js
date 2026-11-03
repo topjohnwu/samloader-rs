@@ -22,6 +22,7 @@ import init, {
   device_mode,
   export_logs,
   get_backend_options,
+  last_log_line,
   log_line_height,
   pair_download_device,
   pair_samsung_device,
@@ -167,6 +168,14 @@ export function takeWasmLogs() {
  */
 export function exportWasmLogs() {
   return wasmReady ? export_logs() : "";
+}
+
+/**
+ * Returns the most recent non-blank line of the Rust log buffer.
+ * @returns {string | null} The last log line, or null before WASM init
+ */
+export function lastWasmLogLine() {
+  return wasmReady ? last_log_line() : null;
 }
 
 /**

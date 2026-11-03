@@ -238,7 +238,7 @@
         <!-- Advanced Options: folded by default, with a summary of the active ones -->
         <details id="advanced-options" class="advanced-options">
           <summary class="advanced-summary">
-            <svg class="advanced-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <span class="advanced-title">Advanced options</span>
@@ -305,46 +305,73 @@
         </details>
 
         <div class="action-bar">
-          <div class="when-done-group">
-            <label for="opt-reboot-mode" class="field-title">When done</label>
-            <select id="opt-reboot-mode" class="select-input select-input-action" title="What the device does after flashing or dumping the PIT">
-              <option value="normal" selected>Reboot to Android</option>
-              <option value="download">Reboot to Download Mode</option>
-              <option value="none">Stay in Download Mode</option>
-            </select>
+          <!-- Outcome of the last flash, kept until dismissed or the next flash -->
+          <div id="flash-result" class="flash-result" hidden>
+            <span id="flash-result-text" class="flash-result-text"></span>
+            <button type="button" id="btn-show-log" class="flash-result-link" hidden>Show log</button>
+            <button type="button" id="btn-dismiss-result" class="btn-clear-slot" title="Dismiss" aria-label="Dismiss">&times;</button>
           </div>
-          <!-- Both actions open an Odin session and apply the "When done" setting afterwards -->
-          <div class="action-bar-group">
-            <button type="button" id="btn-dump-pit" class="btn btn-outline" title="Download and print the device's Partition Information Table (PIT), then apply the &quot;When done&quot; setting">
-              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                <rect x="4" y="3" width="12" height="14" rx="1.5"/>
-                <path d="M7 7h6M7 10.5h6M7 14h4" stroke-linecap="round"/>
-              </svg>
-              Dump PIT
-            </button>
-            <button type="button" id="btn-flash-firmware" class="btn btn-flash" disabled>
-              <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                <path d="M11.3 1.5L4.5 11h5l-.8 7.5L15.5 9h-5l.8-7.5z"/>
-              </svg>
-              Flash Firmware
-            </button>
+
+          <div id="action-controls" class="action-controls">
+            <div class="when-done-group">
+              <label for="opt-reboot-mode" class="field-title">When done</label>
+              <select id="opt-reboot-mode" class="select-input select-input-action" title="What the device does after flashing or dumping the PIT">
+                <option value="normal" selected>Reboot to Android</option>
+                <option value="download">Reboot to Download Mode</option>
+                <option value="none">Stay in Download Mode</option>
+              </select>
+            </div>
+            <!-- Both actions open an Odin session and apply the "When done" setting afterwards -->
+            <div class="action-bar-group">
+              <button type="button" id="btn-dump-pit" class="btn btn-outline" title="Download and print the device's Partition Information Table (PIT), then apply the &quot;When done&quot; setting">
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <rect x="4" y="3" width="12" height="14" rx="1.5"/>
+                  <path d="M7 7h6M7 10.5h6M7 14h4" stroke-linecap="round"/>
+                </svg>
+                Dump PIT
+              </button>
+              <button type="button" id="btn-save-pit" class="btn btn-outline" title="Save the last dumped PIT as a .pit file" hidden>
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 16h12" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Save PIT
+              </button>
+              <button type="button" id="btn-flash-firmware" class="btn btn-flash" disabled>
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M11.3 1.5L4.5 11h5l-.8 7.5L15.5 9h-5l.8-7.5z"/>
+                </svg>
+                Flash Firmware
+              </button>
+            </div>
           </div>
+
+          <!-- Replaces the controls while flashing -->
+          <div id="flash-progress-panel" class="flash-progress" hidden>
+            <div class="flash-progress-header">
+              <span id="flash-status-text" class="flash-status-text">Preparing firmware...</span>
+              <span id="flash-percent-text" class="progress-percent-pill">0%</span>
+            </div>
+            <div class="main-progress-bg" role="progressbar" aria-label="Flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
+            </div>
+            <span id="flash-detail-text" class="flash-detail-text"></span>
+          </div>
+          <p id="flash-announcer" class="visually-hidden" aria-live="polite"></p>
         </div>
       </div>
     </section>
 
-    <!-- Step 3: Progress & Activity Log -->
-    <section class="card terminal-card">
-      <div class="card-header">
-        <div class="card-title-group">
-          <span class="step-number">3</span>
-          <div>
-            <h2 class="card-title">Progress &amp; activity log</h2>
-            <p id="flash-status-text" class="card-subtitle">Status: Ready</p>
-            <p id="flash-announcer" class="visually-hidden" aria-live="polite"></p>
-          </div>
-        </div>
-        <div class="terminal-actions">
+    <!-- Activity Log: folded by default, showing the latest line -->
+    <section class="card log-card" aria-label="Activity log">
+      <div class="log-header">
+        <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false" aria-controls="log-body">
+          <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="log-title">Activity log</span>
+          <span id="log-preview" class="log-preview"></span>
+        </button>
+        <div id="log-actions" class="log-actions" hidden>
           <label class="inline-check-toggle" for="opt-verbose">
             <input type="checkbox" id="opt-verbose" role="switch">
             <span class="md-switch-track" aria-hidden="true">
@@ -352,21 +379,11 @@
             </span>
             <span>Verbose</span>
           </label>
-          <span id="flash-percent-text" class="progress-percent-pill">0%</span>
-          <button type="button" id="btn-save-pit" class="btn btn-sm btn-outline" title="Save the last dumped PIT as a .pit file" hidden>Save PIT</button>
           <button type="button" id="btn-save-log" class="btn btn-sm btn-outline" title="Save the activity log as a text file">Save Log</button>
           <button type="button" id="btn-clear-log" class="btn btn-sm btn-outline">Clear Log</button>
         </div>
       </div>
-
-      <div class="main-progress-bg" role="progressbar" aria-label="Overall flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
-      </div>
-      <div class="partition-progress-bg" role="progressbar" aria-label="Current partition progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div id="partition-progress-bar" class="progress-bar-fill partition-progress-fill" style="width: 0%"></div>
-      </div>
-
-      <div class="card-body terminal-body">
+      <div id="log-body" class="log-body" hidden>
         <div class="log-terminal" role="log" aria-label="Activity log" aria-live="off" tabindex="0">
           <pre id="log-output" class="log-output"></pre>
         </div>

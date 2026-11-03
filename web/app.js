@@ -23,7 +23,14 @@ import {
   isWebSerialSupported,
 } from "./bridge.js";
 import { state } from "./ui/state.js";
-import { setupLogScroller, appendLog, clearLog, saveLog } from "./ui/log.js";
+import {
+  setupLogScroller,
+  setupLogPanel,
+  appendLog,
+  reportError,
+  clearLog,
+  saveLog,
+} from "./ui/log.js";
 import { updateControlsState, setupExclusiveGuards } from "./ui/controls.js";
 import {
   renderPackageSlots,
@@ -41,7 +48,7 @@ import {
   handleDumpPit,
   savePit,
 } from "./ui/device.js";
-import { handleProgressEvent, executeFlashProcess } from "./ui/flash.js";
+import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "./ui/flash.js";
 import { setupThemeToggle } from "./ui/theme.js";
 
 // --- WASM & Event Wiring ---
@@ -149,13 +156,15 @@ async function setupWasmAndEvents() {
     document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
     document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
   } catch (err) {
-    appendLog(`WASM Initialization Error: ${err}`);
+    reportError(`WASM Initialization Error: ${err}`);
   }
 }
 
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
   setupThemeToggle();
+  setupLogPanel();
+  setupFlashPanel();
   renderPackageSlots();
   setupExclusiveGuards();
   setupDropzones();
