@@ -31,7 +31,7 @@ import {
   rebootToDownloadAt,
   rebootFromOdin,
   printPit,
-  startFlash,
+  prepareFlash,
 } from "./bridge.js";
 
 // --- Constants & Application State ---
@@ -126,11 +126,12 @@ function setupLogScroller() {
 
 // --- Helper Functions ---
 function appendLog(msg) {
-  if (!appendWasmLog(msg)) {
+  const queuedLines = appendWasmLog(msg);
+  if (queuedLines) {
+    // WASM is still initializing; show the queued lines until Rust takes over rendering
     const logElem = document.getElementById("log-output");
     if (logElem) {
-      const timestamp = new Date().toISOString().substring(11, 19);
-      logElem.textContent += `\n[${timestamp}] ${msg}`;
+      logElem.textContent += `\n${queuedLines.join("\n")}`;
     }
   }
 }
@@ -822,12 +823,13 @@ function updateControlsState() {
     const res = state.md5Results[slot];
     return !res || res.status === "verifying" || res.status === "invalid";
   });
+  const hasDownloadDevice = state.device?.mode === "download";
 
   if (flashBtn) {
-    flashBtn.disabled = !hasAction || state.isBusy || hasPendingOrInvalidMd5;
+    flashBtn.disabled =
+      !hasAction || !hasDownloadDevice || state.isBusy || hasPendingOrInvalidMd5;
   }
 
-  const hasDownloadDevice = state.device?.mode === "download";
   const downloadActionIds = ["btn-detect-device", "btn-dump-pit"];
   downloadActionIds.forEach((id) => {
     const el = document.getElementById(id);
@@ -1033,14 +1035,59 @@ async function handleDisconnectDevice(dev) {
   }
 }
 
+// --- Exclusive Device Operations ---
+// While an operation holds the device, keep the screen (and thus the USB link) awake,
+// and warn before the tab is closed or reloaded, since that aborts the operation midway.
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (wakeLock || !navigator.wakeLock) return;
+  try {
+    const lock = await navigator.wakeLock.request("screen");
+    lock.addEventListener("release", () => {
+      if (wakeLock === lock) wakeLock = null;
+    });
+    wakeLock = lock;
+  } catch {
+    // Wake lock may be denied (e.g. battery saver); the operation proceeds without it
+  }
+}
+
+async function releaseWakeLock() {
+  const lock = wakeLock;
+  wakeLock = null;
+  try {
+    await lock?.release();
+  } catch {
+    // Already released by the browser
+  }
+}
+
+function setupExclusiveGuards() {
+  window.addEventListener("beforeunload", (e) => {
+    if (state.isBusy) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+  // Browsers drop the wake lock whenever the page is hidden; re-acquire it on return
+  document.addEventListener("visibilitychange", () => {
+    if (state.isBusy && document.visibilityState === "visible") {
+      acquireWakeLock();
+    }
+  });
+}
+
 async function runExclusive(fn) {
   if (state.isBusy) return;
   state.isBusy = true;
   updateControlsState();
+  await acquireWakeLock();
   try {
     await fn();
   } finally {
     state.isBusy = false;
+    await releaseWakeLock();
     updateControlsState();
   }
 }
@@ -1315,7 +1362,7 @@ async function executeFlashProcess() {
       progressBar.style.width = "0%";
     }
     if (percentText) percentText.textContent = "0%";
-    if (statusText) statusText.textContent = "Status: Flashing Firmware...";
+    if (statusText) statusText.textContent = "Status: Preparing Firmware...";
     appendLog("=== Starting Flashing Session ===");
 
     const activeSlots = Object.entries(state.slots).filter(([_, file]) => file !== null);
@@ -1364,9 +1411,26 @@ async function executeFlashProcess() {
             : undefined,
       };
 
-      appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
+      appendLog("Validating firmware files...");
+      const job = await prepareFlash(files, options);
 
-      await startFlash(state.selectedBackend, files, options);
+      // Mirror the CLI: confirm before a flash that wipes the device's data
+      const wipeReasons = [];
+      if (job.erases_userdata()) wipeReasons.push("NAND Erase is enabled.");
+      if (job.flashes_userdata()) wipeReasons.push("The flash list contains userdata.");
+      if (
+        wipeReasons.length > 0 &&
+        !confirm(`${wipeReasons.join("\n")}\n\nThis will wipe the device's data. Continue?`)
+      ) {
+        job.free();
+        if (statusText) statusText.textContent = "Status: Flashing Aborted";
+        appendLog("Flashing aborted by user.");
+        return;
+      }
+
+      if (statusText) statusText.textContent = "Status: Flashing Firmware...";
+      appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
+      await job.execute(state.selectedBackend, false);
 
       if (progressBar) progressBar.style.width = "100%";
       if (percentText) percentText.textContent = "100%";
@@ -1383,6 +1447,7 @@ async function executeFlashProcess() {
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
   initMd5Worker();
+  setupExclusiveGuards();
   setupDropzones();
   setupWasmAndEvents();
 });

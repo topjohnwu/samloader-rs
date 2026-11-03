@@ -21,13 +21,13 @@ import init, {
   get_backend_options,
   pair_download_device,
   pair_samsung_device,
+  prepare_flash,
   print_pit,
   reboot_from_odin,
   reboot_to_download_at,
   render_log_viewport,
   set_progress_callback,
   set_verbose,
-  start_flash,
   take_logs,
   verify_package_md5,
 } from "./pkg/samloader_web.js";
@@ -58,7 +58,7 @@ export async function initWasm() {
       .then((res) => {
         wasmReady = true;
         if (pendingLogs.length > 0) {
-          pendingLogs.splice(0).forEach((msg) => append_log(msg));
+          append_raw_logs(pendingLogs.splice(0));
         }
         return res;
       })
@@ -98,18 +98,33 @@ export async function setVerbose(verbose) {
 }
 
 /**
- * Appends a log message to the Rust log buffer, queuing it if WASM is still initializing.
+ * Formats a log message like the Rust log buffer does: the first line is prefixed
+ * with a local `[HH:MM:SS]` timestamp, and continuation lines are kept as-is.
  * @param {string} msg
- * @returns {boolean} True if appended directly to WASM, false if queued before WASM init
+ * @returns {string[]}
+ */
+function formatLogLines(msg) {
+  const timestamp = new Date().toTimeString().slice(0, 8);
+  const [first, ...rest] = msg.split("\n");
+  return [`[${timestamp}] ${first}`, ...rest];
+}
+
+/**
+ * Appends a log message to the Rust log buffer, queuing it if WASM is still initializing.
+ * Queued messages are timestamped at the time they are logged, not when they are flushed.
+ * @param {string} msg
+ * @returns {string[] | null} null if appended directly to WASM, or the formatted lines
+ *   that were queued before WASM init (so callers can display them immediately)
  */
 export function appendWasmLog(msg) {
   const text = String(msg);
   if (wasmReady) {
     append_log(text);
-    return true;
+    return null;
   }
-  pendingLogs.push(text);
-  return false;
+  const lines = formatLogLines(text);
+  pendingLogs.push(...lines);
+  return lines;
 }
 
 /**
@@ -338,8 +353,9 @@ export async function verifyPackageMd5(file) {
 }
 
 /**
- * Flashes firmware package files to a connected Samsung Download Mode device.
- * @param {string} backend Backend option ("nusb", "vcom", "mock")
+ * Validates and indexes firmware package files without connecting to a device.
+ * Inspect the returned job (e.g. to confirm data-wiping flashes), then either call
+ * `job.execute(backend, wait)` to flash, or `job.free()` to discard it.
  * @param {Object} files Object mapping slot names / filenames to File/Blob/Uint8Array objects or { name, data }, and optional `partitions` array of `{ file, partition? }`
  * @param {Object} [options] Flashing options
  * @param {"download" | "normal" | "none"} [options.reboot="normal"]
@@ -349,10 +365,10 @@ export async function verifyPackageMd5(file) {
  * @param {boolean} [options.skip_size_check=false]
  * @param {string} [options.sales_code]
  * @param {string[] | string} [options.skip]
- * @param {boolean} [options.wait=false]
- * @returns {Promise<void>}
+ * @returns {Promise<FlashJob>} Job with `flashes_userdata(): boolean`, `erases_userdata(): boolean`,
+ *   `execute(backend: string, wait: boolean): Promise<void>` (consumes the job), and `free(): void`
  */
-export async function startFlash(backend, files, options = {}) {
+export async function prepareFlash(files, options = {}) {
   await initWasm();
-  return await start_flash(backend, files, options);
+  return await prepare_flash(files, options);
 }

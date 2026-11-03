@@ -24,7 +24,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, Cursor};
 use js_sys::Function;
 use samloader_odin::{
     DownloadModeReboot, FlashEvent, FlashProgress, FlashRequest, OdinConnection, OdinSession,
-    RebootMode, UsbBackendOption, clear_progress, reboot_download, request_device,
+    PreparedFlash, RebootMode, UsbBackendOption, clear_progress, reboot_download, request_device,
     request_reboot_device, set_progress, verify_md5_footer,
 };
 use samloader_pit::PitData;
@@ -242,10 +242,10 @@ impl WebProgress {
     }
 
     fn push_log(&self, msg: &str) {
-        let total_secs = (js_sys::Date::now() as u64) / 1000;
-        let secs = total_secs % 60;
-        let mins = (total_secs / 60) % 60;
-        let hours = (total_secs / 3600) % 24;
+        let now = js_sys::Date::new_0();
+        let hours = now.get_hours();
+        let mins = now.get_minutes();
+        let secs = now.get_seconds();
 
         {
             let mut lines = self.lines.borrow_mut();
@@ -782,13 +782,41 @@ fn slot_sort_rank(key: &str) -> usize {
     }
 }
 
-/// Flashes firmware package files to a connected Samsung Download Mode device.
+/// A validated flash, ready to be executed on a device. Created by [`prepare_flash`].
 #[wasm_bindgen]
-pub async fn start_flash(
-    backend_str: Option<String>,
+pub struct FlashJob {
+    prepared: PreparedFlash<JsReader, JsReader>,
+    erase: bool,
+}
+
+#[wasm_bindgen]
+impl FlashJob {
+    /// Returns whether the flash list writes userdata, which wipes the device's data.
+    pub fn flashes_userdata(&self) -> bool {
+        self.prepared.flashes_userdata()
+    }
+
+    /// Returns whether a NAND erase of USERDATA was requested, which wipes the device's data.
+    pub fn erases_userdata(&self) -> bool {
+        self.erase
+    }
+
+    /// Connects to a Samsung Download Mode device and executes the flash, consuming the job.
+    pub async fn execute(self, backend_str: Option<String>, wait: bool) -> Result<(), JsValue> {
+        let backend = parse_backend(backend_str.as_deref())?;
+        let mut session = OdinSession::connect(backend, wait)
+            .await
+            .map_err(to_js_err)?;
+        self.prepared.execute(&mut session).await.map_err(to_js_err)
+    }
+}
+
+/// Validates and indexes firmware package files without connecting to a device.
+#[wasm_bindgen]
+pub async fn prepare_flash(
     files: js_sys::Object,
     options: js_sys::Object,
-) -> Result<(), JsValue> {
+) -> Result<FlashJob, JsValue> {
     let reboot_str = js_sys::Reflect::get(&options, &JsValue::from_str("reboot"))
         .ok()
         .and_then(|v| v.as_string())
@@ -799,7 +827,6 @@ pub async fn start_flash(
     let disable_verity = get_bool_option(&options, "disable_verity", false);
     let disable_verification = get_bool_option(&options, "disable_verification", false);
     let skip_size_check = get_bool_option(&options, "skip_size_check", false);
-    let wait = get_bool_option(&options, "wait", false);
     let skip_targets = get_skip_option(&options);
 
     let sales_code = js_sys::Reflect::get(&options, &JsValue::from_str("sales_code"))
@@ -896,10 +923,5 @@ pub async fn start_flash(
         .await
         .map_err(to_js_err)?;
 
-    let backend = parse_backend(backend_str.as_deref())?;
-    let mut session = OdinSession::connect(backend, wait)
-        .await
-        .map_err(to_js_err)?;
-
-    prepared.execute(&mut session).await.map_err(to_js_err)
+    Ok(FlashJob { prepared, erase })
 }
