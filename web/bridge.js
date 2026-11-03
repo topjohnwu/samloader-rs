@@ -18,6 +18,7 @@ import init, {
   clear_log,
   clear_progress_callback,
   detect_download_device,
+  export_logs,
   get_backend_options,
   log_line_height,
   pair_download_device,
@@ -74,7 +75,9 @@ export async function initWasm() {
 
 /**
  * Registers the thread-local callback receiving log/progress event objects.
- * @param {(event: { type: "log" } | { type: "progress", percent: number, current: number, total: number, partition: string }) => void} onProgress
+ * @param {(event: { type: "log" } | { type: "progress", percent: number, current: number, total: number, partition: string, overallPercent?: number, partitionIndex?: number, partitionCount?: number, sent?: number }) => void} onProgress
+ *   `overallPercent`, `partitionIndex`, `partitionCount` and `sent` (bytes sent to the device)
+ *   are only present while flashing
  */
 export async function setProgressCallback(onProgress) {
   await initWasm();
@@ -154,6 +157,14 @@ export function clearWasmLog() {
 export function takeWasmLogs() {
   if (!wasmReady) return [];
   return take_logs();
+}
+
+/**
+ * Returns the full contents of the Rust log buffer.
+ * @returns {string} All log lines joined with newlines, or an empty string before WASM init
+ */
+export function exportWasmLogs() {
+  return wasmReady ? export_logs() : "";
 }
 
 /**
@@ -340,7 +351,7 @@ export async function rebootFromOdin({
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {"normal" | "download" | "none"} [options.rebootMode="normal"]
  * @param {boolean} [options.wait=false]
- * @returns {Promise<string>} Formatted PIT table text
+ * @returns {Promise<{ text: string, data: Uint8Array }>} Formatted PIT table and raw PIT bytes
  */
 export async function printPit({
   backend,

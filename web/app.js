@@ -19,6 +19,7 @@ import {
   appendWasmLog,
   appendRawWasmLogs,
   clearWasmLog,
+  exportWasmLogs,
   renderLogViewport,
   logLineHeight,
   getBackendOptions,
@@ -54,6 +55,7 @@ const state = {
     PIT: null,
   },
   md5Results: {},
+  deviceModel: null, // Model reported by the last DVIF query of the current device
   partitions: [],
   nextPartitionId: 1,
   isBusy: false,
@@ -142,7 +144,7 @@ function formatBytes(bytes) {
   if (bytes === 0) return "0 Bytes";
   const k = 1024;
   const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+  const i = Math.max(0, Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
@@ -809,6 +811,10 @@ function renderDeviceInfo(infoText) {
       const val = line.substring(colonIdx + 1).trim();
       if (!label || !val) return;
 
+      if (label.toLowerCase() === "model") {
+        state.deviceModel = val;
+      }
+
       const card = document.createElement("div");
       card.className =
         label.toLowerCase() === "storage" || val.length > 20
@@ -838,6 +844,7 @@ function renderDeviceInfo(infoText) {
 }
 
 function clearDeviceInfo() {
+  state.deviceModel = null;
   const gridEl = document.getElementById("device-info-grid");
   const boxEl = document.getElementById("device-info-box");
   if (gridEl) {
@@ -1118,21 +1125,121 @@ async function handlePairNormal() {
   }
 }
 
+// --- Flash Progress, Speed & ETA ---
+const STATS_SAMPLE_MS = 1000;
+let flashStats = null;
+
+function resetFlashStats() {
+  flashStats = null;
+}
+
+// Samples the bytes sent to the device and the overall progress at most once per
+// STATS_SAMPLE_MS, smoothing the transfer speed and progress rate with an
+// exponential moving average
+function updateFlashStats(sent, overallPercent) {
+  const now = performance.now();
+  if (!flashStats || sent < flashStats.sent) {
+    flashStats = { time: now, sent, overallPercent, speed: null, rate: null };
+    return flashStats;
+  }
+  const elapsedMs = now - flashStats.time;
+  if (elapsedMs >= STATS_SAMPLE_MS) {
+    const seconds = elapsedMs / 1000;
+    const ema = (prev, value) => (prev === null ? value : prev * 0.7 + value * 0.3);
+    flashStats.speed = ema(flashStats.speed, (sent - flashStats.sent) / seconds);
+    flashStats.rate = ema(flashStats.rate, (overallPercent - flashStats.overallPercent) / seconds);
+    flashStats.time = now;
+    flashStats.sent = sent;
+    flashStats.overallPercent = overallPercent;
+  }
+  return flashStats;
+}
+
+function formatDuration(totalSeconds) {
+  const secs = Math.max(0, Math.round(totalSeconds));
+  const pad = (n) => String(n).padStart(2, "0");
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 function handleProgressEvent(event) {
   if (!event || typeof event !== "object") return;
   if (event.type === "log") {
     scheduleLogFlush();
   } else if (event.type === "progress") {
-    const { percent, partition } = event;
+    const { percent, partition, overallPercent } = event;
     const progressBar = document.getElementById("flash-progress-bar");
+    const partitionBar = document.getElementById("partition-progress-bar");
     const percentText = document.getElementById("flash-percent-text");
     const statusText = document.getElementById("flash-status-text");
-    if (progressBar) progressBar.style.width = `${percent}%`;
-    if (percentText) percentText.textContent = `${percent}%`;
+
+    if (overallPercent === undefined) {
+      // Progress outside of a flash only has the current operation's percentage
+      if (progressBar) progressBar.style.width = `${percent}%`;
+      if (percentText) percentText.textContent = `${percent}%`;
+      return;
+    }
+
+    // The main bar shows the whole flash, the thin bar below it the current partition
+    const stats = updateFlashStats(event.sent, overallPercent);
+    if (progressBar) progressBar.style.width = `${overallPercent}%`;
+    if (partitionBar) partitionBar.style.width = `${percent}%`;
+    if (percentText) percentText.textContent = `${Math.floor(overallPercent)}%`;
     if (statusText && partition) {
-      statusText.textContent = `Status: Flashing ${partition} (${percent}%)`;
+      const details = [`${percent}%`];
+      if (stats.speed !== null) {
+        details.push(`${formatBytes(stats.speed)}/s`);
+      }
+      if (stats.rate > 0) {
+        details.push(`ETA ${formatDuration((100 - overallPercent) / stats.rate)}`);
+      }
+      const position = `${event.partitionIndex}/${event.partitionCount}`;
+      statusText.textContent =
+        `Status: Flashing ${partition} (${position}) — ${details.join(" • ")}`;
     }
   }
+}
+
+// --- File Downloads ---
+function downloadFile(filename, data, type) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoke later, as some browsers start the download asynchronously
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function localTimestampForFilename() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
+    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  );
+}
+
+function saveLog() {
+  downloadFile(
+    `samloader-web-${localTimestampForFilename()}.log`,
+    `${exportWasmLogs()}\n`,
+    "text/plain"
+  );
+}
+
+// The most recently dumped PIT, kept after the device reboots so it can still be saved.
+// It is named after the device model if it was queried (DVIF) before dumping.
+let lastPit = null;
+
+function savePit() {
+  if (!lastPit) return;
+  const name = (lastPit.model || "device").replace(/[^\w.-]/g, "_");
+  downloadFile(`${name}.pit`, lastPit.data, "application/octet-stream");
 }
 
 // --- WASM & Event Wiring ---
@@ -1250,12 +1357,15 @@ async function setupWasmAndEvents() {
       await runExclusive(async () => {
         try {
           appendLog("Downloading device PIT table...");
-          const pitText = await printPit({
+          const pit = await printPit({
             backend: state.selectedBackend,
             rebootMode: state.rebootMode,
           });
           appendLog("--- PIT Table Output ---");
-          appendLog(pitText);
+          appendLog(pit.text);
+          lastPit = { data: pit.data, model: state.deviceModel };
+          const savePitBtn = document.getElementById("btn-save-pit");
+          if (savePitBtn) savePitBtn.hidden = false;
         } catch (err) {
           appendLog(`PIT dump failed: ${err}`);
         }
@@ -1279,6 +1389,10 @@ async function setupWasmAndEvents() {
     document.getElementById("btn-clear-log")?.addEventListener("click", () => {
       clearLog();
     });
+
+    // Save Log / Save PIT
+    document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
+    document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
   } catch (err) {
     appendLog(`WASM Initialization Error: ${err}`);
   }
@@ -1298,11 +1412,14 @@ async function executeFlashProcess() {
     const statusText = document.getElementById("flash-status-text");
     const percentText = document.getElementById("flash-percent-text");
     const progressBar = document.getElementById("flash-progress-bar");
+    const partitionBar = document.getElementById("partition-progress-bar");
 
+    resetFlashStats();
     if (progressBar) {
       progressBar.classList.remove("progress-bar-error");
       progressBar.style.width = "0%";
     }
+    if (partitionBar) partitionBar.style.width = "0%";
     if (percentText) percentText.textContent = "0%";
     if (statusText) statusText.textContent = "Status: Preparing Firmware...";
     appendLog("=== Starting Flashing Session ===");
@@ -1375,6 +1492,7 @@ async function executeFlashProcess() {
       await job.execute(state.selectedBackend, false);
 
       if (progressBar) progressBar.style.width = "100%";
+      if (partitionBar) partitionBar.style.width = "100%";
       if (percentText) percentText.textContent = "100%";
       if (statusText) statusText.textContent = "Status: Flashing Complete!";
       appendLog("=== Flashing Process Finished Successfully ===");

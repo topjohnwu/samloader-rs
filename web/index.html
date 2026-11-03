@@ -403,12 +403,17 @@
             <span>Verbose</span>
           </label>
           <span id="flash-percent-text" class="progress-percent-pill">0%</span>
+          <button type="button" id="btn-save-pit" class="btn btn-sm btn-outline" title="Save the last dumped PIT as a .pit file" hidden>Save PIT</button>
+          <button type="button" id="btn-save-log" class="btn btn-sm btn-outline" title="Save the activity log as a text file">Save Log</button>
           <button type="button" id="btn-clear-log" class="btn btn-sm btn-outline">Clear Log</button>
         </div>
       </div>
 
       <div class="main-progress-bg">
         <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
+      </div>
+      <div class="partition-progress-bg">
+        <div id="partition-progress-bar" class="progress-bar-fill partition-progress-fill" style="width: 0%"></div>
       </div>
 
       <div class="card-body terminal-body">

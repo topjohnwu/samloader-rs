@@ -211,6 +211,27 @@ struct WebProgress {
     current_bytes: Cell<u64>,
     last_percent: Cell<Option<u32>>,
     current_partition: RefCell<String>,
+    flash: FlashTotals,
+}
+
+/// Progress across all partitions of a flash, from [`FlashEvent::FlashStart`].
+///
+/// Partitions are weighted by their uncompressed size. Within a partition, progress
+/// is the fraction of its transfer, as LZ4 images may be sent compressed.
+#[derive(Default)]
+struct FlashTotals {
+    /// Total uncompressed bytes of the flash; zero when no flash is in progress.
+    total: Cell<u64>,
+    /// Uncompressed bytes of the partitions already flashed.
+    done: Cell<u64>,
+    /// Uncompressed bytes of the partition being flashed.
+    current: Cell<u64>,
+    /// 1-based index of the partition being flashed.
+    index: Cell<usize>,
+    /// Number of partitions to flash.
+    count: Cell<usize>,
+    /// Bytes sent to the device so far, for measuring transfer speed.
+    sent: Cell<u64>,
 }
 
 impl WebProgress {
@@ -227,6 +248,7 @@ impl WebProgress {
             current_bytes: Cell::new(0),
             last_percent: Cell::new(None),
             current_partition: RefCell::new(String::new()),
+            flash: FlashTotals::default(),
         }
     }
 
@@ -376,6 +398,30 @@ impl WebProgress {
             &self.current_partition.borrow().as_str().into(),
         );
 
+        let flash = &self.flash;
+        let flash_total = flash.total.get();
+        if flash_total > 0 {
+            let fraction = if total > 0 {
+                (curr as f64 / total as f64).min(1.0)
+            } else {
+                0.0
+            };
+            let done = flash.done.get() as f64 + flash.current.get() as f64 * fraction;
+            let overall = (done / flash_total as f64 * 100.0).min(100.0);
+            let _ = js_sys::Reflect::set(&obj, &"overallPercent".into(), &overall.into());
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &"partitionIndex".into(),
+                &(flash.index.get() as f64).into(),
+            );
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &"partitionCount".into(),
+                &(flash.count.get() as f64).into(),
+            );
+            let _ = js_sys::Reflect::set(&obj, &"sent".into(), &(flash.sent.get() as f64).into());
+        }
+
         let _ = cb.call1(&JsValue::NULL, &obj);
     }
 }
@@ -392,6 +438,7 @@ impl FlashProgress for WebProgress {
 
     fn inc(&self, bytes: u64) {
         self.current_bytes.set(self.current_bytes.get() + bytes);
+        self.flash.sent.set(self.flash.sent.get() + bytes);
         self.emit_progress(false);
     }
 
@@ -432,7 +479,21 @@ impl FlashProgress for WebProgress {
             FlashEvent::EraseEnd { sectors } => {
                 self.emit_log(&format!("USERDATA partition erased ({sectors} sectors)."));
             }
+            FlashEvent::FlashStart {
+                total_bytes,
+                partitions,
+            } => {
+                let flash = &self.flash;
+                flash.total.set(total_bytes);
+                flash.done.set(0);
+                flash.current.set(0);
+                flash.index.set(0);
+                flash.count.set(partitions);
+                flash.sent.set(0);
+            }
             FlashEvent::PartitionStart { name, size } => {
+                self.flash.current.set(size);
+                self.flash.index.set(self.flash.index.get() + 1);
                 *self.current_partition.borrow_mut() = name.to_string();
                 self.current_bytes.set(0);
                 self.total_bytes.set(size);
@@ -441,6 +502,8 @@ impl FlashProgress for WebProgress {
                 self.emit_progress(true);
             }
             FlashEvent::PartitionEnd(name) => {
+                let flash = &self.flash;
+                flash.done.set(flash.done.get() + flash.current.replace(0));
                 self.current_partition.borrow_mut().clear();
                 self.emit_log(&format!("Finished flashing {name}."));
             }
@@ -521,6 +584,12 @@ pub fn clear_log() {
 #[wasm_bindgen]
 pub fn take_logs() -> Vec<String> {
     PROGRESS.with(|&p| p.take_logs())
+}
+
+/// Returns the full contents of the Rust log buffer, one line per log line.
+#[wasm_bindgen]
+pub fn export_logs() -> String {
+    PROGRESS.with(|&p| p.lines.borrow().join("\n"))
 }
 
 /// Returns the height in pixels of a single log line. The log element's CSS `line-height`
@@ -711,13 +780,15 @@ pub async fn reboot_from_odin(
     session.finish(mode).await.map_err(to_js_err)
 }
 
-/// Connects to a Download Mode device, downloads and formats its PIT table, and applies `reboot_mode`.
+/// Connects to a Download Mode device, downloads its PIT, and applies `reboot_mode`.
+///
+/// Returns `{ text, data }`: the formatted PIT table and the raw PIT bytes as a `Uint8Array`.
 #[wasm_bindgen]
 pub async fn print_pit(
     backend_str: Option<String>,
     reboot_mode: String,
     wait: bool,
-) -> Result<String, JsValue> {
+) -> Result<JsValue, JsValue> {
     let backend = parse_backend(backend_str.as_deref())?;
     let mode = parse_reboot_mode(&reboot_mode);
 
@@ -727,16 +798,23 @@ pub async fn print_pit(
 
     let pit_res = match session.receive_pit_info().await {
         Ok(pit_bytes) => PitData::new(&pit_bytes)
-            .map(|pit_data| format!("{pit_data}"))
+            .map(|pit_data| (pit_data, pit_bytes))
             .map_err(|e| JsValue::from_str(&format!("Failed to unpack device's PIT file: {e}"))),
         Err(e) => Err(to_js_err(e)),
     };
 
     let finish_res = session.finish(mode).await.map_err(to_js_err);
-    let formatted_pit = pit_res?;
+    let (pit_data, pit_bytes) = pit_res?;
     finish_res?;
 
-    Ok(formatted_pit)
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &"text".into(), &format!("{pit_data}").into())?;
+    js_sys::Reflect::set(
+        &obj,
+        &"data".into(),
+        &js_sys::Uint8Array::from(pit_bytes.as_slice()).into(),
+    )?;
+    Ok(obj.into())
 }
 
 /// Verifies the trailing MD5 checksum appended to `.tar.md5` package files using `samloader_odin`.

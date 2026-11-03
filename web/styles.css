@@ -1199,6 +1199,7 @@ textarea {
 .terminal-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -1220,6 +1221,18 @@ textarea {
 
 .main-progress-fill {
   background-color: var(--md-sys-color-primary);
+}
+
+/* Current partition progress, below the overall flash progress */
+.partition-progress-bg {
+  height: 2px;
+  background-color: var(--md-sys-color-surface-container-high);
+  overflow: hidden;
+}
+
+.partition-progress-fill {
+  background-color: var(--md-sys-color-primary);
+  opacity: 0.5;
 }
 
 .terminal-body {
