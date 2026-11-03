@@ -254,8 +254,8 @@ function clearSlot(slot) {
   updateControlsState();
 }
 
-// Clears the firmware selections of step 2. The PIT file is a step 3 option with its
-// own clear button, so it is kept.
+// Clears the package slots and partition files. The PIT file is an advanced option
+// with its own clear button, so it is kept.
 export function clearFirmwareSelections() {
   if (state.isBusy) return;
   PACKAGE_SLOTS.forEach(({ id }) => clearSlot(id));

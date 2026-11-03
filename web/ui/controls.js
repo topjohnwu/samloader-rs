@@ -16,7 +16,27 @@
 
 import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
 
+// Lists the advanced options that differ from their defaults next to the folded
+// "Advanced options" heading, so that e.g. a NAND erase is never hidden from view
+function updateAdvancedSummary() {
+  const el = document.getElementById("advanced-active");
+  if (!el) return;
+  const active = [];
+  if (state.slots.PIT) active.push("PIT");
+  const salesCode = document.getElementById("opt-sales-code")?.value.trim();
+  if (salesCode) active.push(`CSC ${salesCode.toUpperCase()}`);
+  document.querySelectorAll("#advanced-options .option-tile").forEach((tile) => {
+    if (tile.querySelector("input[type=checkbox]")?.checked) {
+      active.push(tile.querySelector(".option-tile-title")?.textContent ?? "");
+    }
+  });
+  el.textContent = active.join(" · ");
+  el.title = el.textContent;
+  el.hidden = active.length === 0;
+}
+
 export function updateControlsState() {
+  updateAdvancedSummary();
   const flashBtn = document.getElementById("btn-flash-firmware");
   const activeEntries = Object.entries(state.slots).filter(([_, f]) => f !== null);
   const eraseChk = document.getElementById("opt-nand-erase");
@@ -56,7 +76,7 @@ export function updateControlsState() {
     rebootDownloadBtn.disabled = state.isBusy || state.device?.mode !== "normal";
   }
 
-  // Clears the firmware selections of step 2, so only offer it when there is any
+  // Clears the package slots and partition files, so only offer it when there is any
   const clearSlotsBtn = document.getElementById("btn-clear-slots");
   if (clearSlotsBtn) {
     const hasSelection =

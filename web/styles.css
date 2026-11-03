@@ -313,11 +313,9 @@ textarea {
   cursor: not-allowed;
 }
 
-/* Full-width select matching the height of the other step 3 fields */
-.select-input-field {
-  width: 100%;
-  height: 46px;
-  padding-left: 14px;
+/* Select matching the height of the buttons next to it */
+.select-input-action {
+  height: 40px;
   font-size: 0.875rem;
 }
 
@@ -1227,11 +1225,85 @@ textarea {
   }
 }
 
-/* Step 3: Configure & Flash */
-.options-body {
+/* Step 2: Advanced Options (folded by default) */
+.advanced-options {
+  margin-top: 20px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-md);
+  background-color: var(--md-sys-color-surface);
+}
+
+.advanced-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 16px;
+  border-radius: var(--md-shape-md);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s;
+}
+
+.advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-summary:hover {
+  background-color: var(--md-sys-color-surface-container-low);
+}
+
+.advanced-summary:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.advanced-options[open] > .advanced-summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.advanced-chevron {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  transition: transform 0.2s;
+}
+
+.advanced-options[open] .advanced-chevron {
+  transform: rotate(90deg);
+}
+
+.advanced-title {
+  font-family: 'DM Sans', 'Roboto', sans-serif;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+}
+
+/* Non-default options, listed so they stay visible while folded */
+.advanced-active {
+  min-width: 0;
+  padding: 3px 10px;
+  border-radius: var(--md-shape-full);
+  background-color: var(--status-warning-bg);
+  color: var(--status-warning);
+  font-family: 'DM Sans', 'Roboto', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.advanced-body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  padding: 16px;
+  border-top: 1px solid var(--md-sys-color-outline-subtle);
 }
 
 .options-fields-row {
@@ -1380,8 +1452,15 @@ textarea {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
+  margin-top: 20px;
   padding-top: 18px;
   border-top: 1px solid var(--md-sys-color-outline-subtle);
+}
+
+.when-done-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .action-bar-group {
@@ -1393,7 +1472,7 @@ textarea {
   margin-left: auto;
 }
 
-/* Step 4: Progress & Activity Log */
+/* Step 3: Progress & Activity Log */
 .terminal-actions {
   display: flex;
   align-items: center;

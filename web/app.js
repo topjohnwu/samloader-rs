@@ -102,8 +102,10 @@ async function setupWasmAndEvents() {
       await setVerbose(enabled);
       appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
     });
-    document.getElementById("opt-nand-erase")?.addEventListener("change", updateControlsState);
-    document.getElementById("opt-sales-code")?.addEventListener("input", updateControlsState);
+    // Advanced options affect whether there is anything to flash, and their summary
+    const advancedOptions = document.getElementById("advanced-options");
+    advancedOptions?.addEventListener("input", updateControlsState);
+    advancedOptions?.addEventListener("change", updateControlsState);
 
     // Pair Download Device button
     document.getElementById("btn-pair-download")?.addEventListener("click", handlePairDownload);

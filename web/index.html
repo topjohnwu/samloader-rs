@@ -169,13 +169,13 @@
       </div>
     </section>
 
-    <!-- Step 2: Select Firmware Packages -->
+    <!-- Step 2: Select Firmware & Flash -->
     <section class="card slots-card">
       <div class="card-header">
         <div class="card-title-group">
           <span class="step-number">2</span>
           <div>
-            <h2 class="card-title">Select firmware packages</h2>
+            <h2 class="card-title">Select firmware &amp; flash</h2>
             <p class="card-subtitle">Select TAR packages for Odin slots or add individual partition files</p>
           </div>
         </div>
@@ -234,88 +234,85 @@
           </div>
           <div id="partition-list" class="partition-list" role="list" aria-label="Individual partition files"></div>
         </div>
-      </div>
-    </section>
 
-    <!-- Step 3: Configure & Flash -->
-    <section class="card options-card">
-      <div class="card-header">
-        <div class="card-title-group">
-          <span class="step-number">3</span>
-          <div>
-            <h2 class="card-title">Configure &amp; flash</h2>
-            <p class="card-subtitle">Configure custom PIT, optional AVB patching, storage erase, or carrier sales code</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="card-body options-body">
-        <div class="options-fields-row">
-          <div class="field-group">
-            <span class="field-title">Partition Table (PIT) <span class="field-optional">(optional)</span></span>
-            <div class="slot-box pit-config-box" data-slot="PIT" id="slot-box-PIT">
-              <input type="file" id="input-PIT" class="slot-file-input" accept=".pit" hidden>
-              <div class="dropzone pit-dropzone" id="dropzone-PIT" tabindex="0" role="button" aria-label="Select PIT file">
-                <div class="slot-left">
-                  <span class="slot-badge">PIT</span>
-                  <div class="dropzone-content">
-                    <span class="file-name" id="file-name-PIT">Select *.pit file</span>
+        <!-- Advanced Options: folded by default, with a summary of the active ones -->
+        <details id="advanced-options" class="advanced-options">
+          <summary class="advanced-summary">
+            <svg class="advanced-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="advanced-title">Advanced options</span>
+            <span id="advanced-active" class="advanced-active" hidden></span>
+          </summary>
+          <div class="advanced-body">
+            <div class="options-fields-row">
+              <div class="field-group">
+                <span class="field-title">Partition Table (PIT) <span class="field-optional">(optional)</span></span>
+                <div class="slot-box pit-config-box" data-slot="PIT" id="slot-box-PIT">
+                  <input type="file" id="input-PIT" class="slot-file-input" accept=".pit" hidden>
+                  <div class="dropzone pit-dropzone" id="dropzone-PIT" tabindex="0" role="button" aria-label="Select PIT file">
+                    <div class="slot-left">
+                      <span class="slot-badge">PIT</span>
+                      <div class="dropzone-content">
+                        <span class="file-name" id="file-name-PIT">Select *.pit file</span>
+                      </div>
+                    </div>
+                    <div class="slot-right">
+                      <span class="file-size" id="file-size-PIT"></span>
+                      <span class="badge badge-idle" id="md5-badge-PIT">Empty</span>
+                      <button type="button" class="btn-clear-slot" id="clear-PIT" title="Remove file" hidden>&times;</button>
+                    </div>
                   </div>
                 </div>
-                <div class="slot-right">
-                  <span class="file-size" id="file-size-PIT"></span>
-                  <span class="badge badge-idle" id="md5-badge-PIT">Empty</span>
-                  <button type="button" class="btn-clear-slot" id="clear-PIT" title="Remove file" hidden>&times;</button>
-                </div>
+              </div>
+              <div class="field-group">
+                <label for="opt-sales-code" class="field-title">CSC / Sales Code <span class="field-optional">(optional)</span></label>
+                <input type="text" id="opt-sales-code" class="text-input-sm" maxlength="3" placeholder="e.g. XAA">
               </div>
             </div>
+
+            <div class="options-checks-grid">
+              <label class="option-tile">
+                <input type="checkbox" id="opt-nand-erase">
+                <div class="option-tile-text">
+                  <span class="option-tile-title">NAND Erase (USERDATA)</span>
+                  <span class="option-tile-desc">Perform low-level storage erase before flashing</span>
+                </div>
+              </label>
+              <label class="option-tile">
+                <input type="checkbox" id="opt-disable-verity">
+                <div class="option-tile-text">
+                  <span class="option-tile-title">Disable dm-verity</span>
+                  <span class="option-tile-desc">Patch VBMETA flags to disable hashtree verification</span>
+                </div>
+              </label>
+              <label class="option-tile">
+                <input type="checkbox" id="opt-disable-verification">
+                <div class="option-tile-text">
+                  <span class="option-tile-title">Disable AVB Verification</span>
+                  <span class="option-tile-desc">Patch VBMETA flags to disable boot verification</span>
+                </div>
+              </label>
+              <label class="option-tile">
+                <input type="checkbox" id="opt-skip-size-check">
+                <div class="option-tile-text">
+                  <span class="option-tile-title">Skip Size Check</span>
+                  <span class="option-tile-desc">Allow images larger than PIT partition size</span>
+                </div>
+              </label>
+            </div>
           </div>
-          <div class="field-group">
-            <label for="opt-sales-code" class="field-title">CSC / Sales Code <span class="field-optional">(optional)</span></label>
-            <input type="text" id="opt-sales-code" class="text-input-sm" maxlength="3" placeholder="e.g. XAA">
-          </div>
-          <div class="field-group">
-            <label for="opt-reboot-mode" class="field-title" title="What the device does after flashing or dumping the PIT">When done</label>
-            <select id="opt-reboot-mode" class="select-input select-input-field">
+        </details>
+
+        <div class="action-bar">
+          <div class="when-done-group">
+            <label for="opt-reboot-mode" class="field-title">When done</label>
+            <select id="opt-reboot-mode" class="select-input select-input-action" title="What the device does after flashing or dumping the PIT">
               <option value="normal" selected>Reboot to Android</option>
               <option value="download">Reboot to Download Mode</option>
               <option value="none">Stay in Download Mode</option>
             </select>
           </div>
-        </div>
-
-        <div class="options-checks-grid">
-          <label class="option-tile">
-            <input type="checkbox" id="opt-nand-erase">
-            <div class="option-tile-text">
-              <span class="option-tile-title">NAND Erase (USERDATA)</span>
-              <span class="option-tile-desc">Perform low-level storage erase before flashing</span>
-            </div>
-          </label>
-          <label class="option-tile">
-            <input type="checkbox" id="opt-disable-verity">
-            <div class="option-tile-text">
-              <span class="option-tile-title">Disable dm-verity</span>
-              <span class="option-tile-desc">Patch VBMETA flags to disable hashtree verification</span>
-            </div>
-          </label>
-          <label class="option-tile">
-            <input type="checkbox" id="opt-disable-verification">
-            <div class="option-tile-text">
-              <span class="option-tile-title">Disable AVB Verification</span>
-              <span class="option-tile-desc">Patch VBMETA flags to disable boot verification</span>
-            </div>
-          </label>
-          <label class="option-tile">
-            <input type="checkbox" id="opt-skip-size-check">
-            <div class="option-tile-text">
-              <span class="option-tile-title">Skip Size Check</span>
-              <span class="option-tile-desc">Allow images larger than PIT partition size</span>
-            </div>
-          </label>
-        </div>
-
-        <div class="action-bar">
           <!-- Both actions open an Odin session and apply the "When done" setting afterwards -->
           <div class="action-bar-group">
             <button type="button" id="btn-dump-pit" class="btn btn-outline" title="Download and print the device's Partition Information Table (PIT), then apply the &quot;When done&quot; setting">
@@ -336,11 +333,11 @@
       </div>
     </section>
 
-    <!-- Step 4: Progress & Activity Log -->
+    <!-- Step 3: Progress & Activity Log -->
     <section class="card terminal-card">
       <div class="card-header">
         <div class="card-title-group">
-          <span class="step-number">4</span>
+          <span class="step-number">3</span>
           <div>
             <h2 class="card-title">Progress &amp; activity log</h2>
             <p id="flash-status-text" class="card-subtitle">Status: Ready</p>
