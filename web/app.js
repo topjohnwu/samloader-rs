@@ -156,6 +156,21 @@ function classifyDeviceMode(vid, pid) {
   return "normal";
 }
 
+// --- Progress Bars & Announcements ---
+// Sets a progress bar's fill and its container's ARIA value
+function setBarPercent(bar, percent) {
+  if (!bar) return;
+  bar.style.width = `${percent}%`;
+  bar.parentElement?.setAttribute("aria-valuenow", String(Math.round(percent)));
+}
+
+// Announces a status change to screen readers. Used for milestones only, as the
+// status line itself changes with every percent.
+function announce(message) {
+  const el = document.getElementById("flash-announcer");
+  if (el) el.textContent = message;
+}
+
 // --- Slot Status ---
 const SLOT_STATUS = {
   empty: { cls: "badge-idle", text: () => "Empty", width: 0 },
@@ -190,7 +205,7 @@ function setSlotStatus(slot, status, percent, error) {
   }
   if (bar) {
     bar.classList.toggle("progress-bar-error", Boolean(def.error));
-    bar.style.width = `${def.width ?? percent ?? 0}%`;
+    setBarPercent(bar, def.width ?? percent ?? 0);
   }
 }
 
@@ -294,7 +309,9 @@ function renderPackageSlots() {
     box.id = `slot-box-${id}`;
     box.dataset.slot = id;
     box.querySelector(".slot-file-input").id = `input-${id}`;
-    box.querySelector(".dropzone").id = `dropzone-${id}`;
+    const dropzone = box.querySelector(".dropzone");
+    dropzone.id = `dropzone-${id}`;
+    dropzone.setAttribute("aria-label", `Select ${label} (${id}) package`);
     const badgeEl = box.querySelector(".slot-badge");
     badgeEl.textContent = badge;
     box.querySelector(".slot-label").textContent = label;
@@ -456,6 +473,18 @@ function reorderPartitionFile(draggedId, targetId, insertAfter) {
   renderPartitionList();
 }
 
+// Moves a partition file up (-1) or down (+1) with the keyboard, keeping it focused
+function movePartitionFile(id, delta) {
+  if (state.isBusy) return;
+  const from = state.partitions.findIndex((p) => p.id === id);
+  const to = from + delta;
+  if (from === -1 || to < 0 || to >= state.partitions.length) return;
+  const [moved] = state.partitions.splice(from, 1);
+  state.partitions.splice(to, 0, moved);
+  renderPartitionList();
+  document.querySelector(`.partition-item[data-partition-id="${id}"]`)?.focus();
+}
+
 function renderPartitionList() {
   const sectionEl = document.getElementById("partition-files-section");
   const listEl = document.getElementById("partition-list");
@@ -475,6 +504,15 @@ function renderPartitionList() {
     item.setAttribute("role", "listitem");
     item.dataset.partitionId = String(entry.id);
     item.draggable = !state.isBusy;
+    item.tabIndex = 0;
+    item.setAttribute("aria-label", `${entry.file.name}; Alt+Up or Alt+Down to reorder`);
+    item.addEventListener("keydown", (e) => {
+      if (e.target !== item || !e.altKey) return;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        movePartitionFile(entry.id, e.key === "ArrowUp" ? -1 : 1);
+      }
+    });
 
     item.addEventListener("mousedown", (e) => {
       if (e.target.closest("input, button")) {
@@ -555,8 +593,17 @@ function renderPartitionList() {
     const fileTrigger = document.createElement("div");
     fileTrigger.className = "partition-file-trigger";
     fileTrigger.title = "Click to change file";
+    fileTrigger.tabIndex = 0;
+    fileTrigger.setAttribute("role", "button");
+    fileTrigger.setAttribute("aria-label", `Change file ${entry.file.name}`);
     fileTrigger.addEventListener("click", () => {
       if (!state.isBusy) replaceInput.click();
+    });
+    fileTrigger.addEventListener("keydown", (e) => {
+      if (isActivationKey(e)) {
+        e.preventDefault();
+        if (!state.isBusy) replaceInput.click();
+      }
     });
 
     const badge = document.createElement("span");
@@ -625,6 +672,10 @@ function renderPartitionList() {
   });
 }
 
+function isActivationKey(e) {
+  return e.key === "Enter" || e.key === " ";
+}
+
 function setupDropzones() {
   SLOTS.forEach((slot) => {
     const dropzone = document.getElementById(`dropzone-${slot}`);
@@ -635,6 +686,12 @@ function setupDropzones() {
       dropzone.addEventListener("click", (e) => {
         if (state.isBusy) return;
         if (e.target !== clearBtn) fileInput.click();
+      });
+      dropzone.addEventListener("keydown", (e) => {
+        if (e.target === dropzone && isActivationKey(e)) {
+          e.preventDefault();
+          if (!state.isBusy) fileInput.click();
+        }
       });
 
       fileInput.addEventListener("change", () => {
@@ -807,6 +864,8 @@ function updateControlsState() {
     if (clearBtn) {
       clearBtn.disabled = state.isBusy;
     }
+    const dropzone = document.getElementById(`dropzone-${slot}`);
+    dropzone?.setAttribute("aria-disabled", String(state.isBusy));
   });
 
   document
@@ -1158,9 +1217,11 @@ async function handlePairNormal() {
 // --- Flash Progress, Speed & ETA ---
 const STATS_SAMPLE_MS = 1000;
 let flashStats = null;
+let lastAnnouncedPartition = null;
 
 function resetFlashStats() {
   flashStats = null;
+  lastAnnouncedPartition = null;
 }
 
 // Samples the bytes sent to the device and the overall progress at most once per
@@ -1207,15 +1268,15 @@ function handleProgressEvent(event) {
 
     if (overallPercent === undefined) {
       // Progress outside of a flash only has the current operation's percentage
-      if (progressBar) progressBar.style.width = `${percent}%`;
+      setBarPercent(progressBar, percent);
       if (percentText) percentText.textContent = `${percent}%`;
       return;
     }
 
     // The main bar shows the whole flash, the thin bar below it the current partition
     const stats = updateFlashStats(event.sent, overallPercent);
-    if (progressBar) progressBar.style.width = `${overallPercent}%`;
-    if (partitionBar) partitionBar.style.width = `${percent}%`;
+    setBarPercent(progressBar, overallPercent);
+    setBarPercent(partitionBar, percent);
     if (percentText) percentText.textContent = `${Math.floor(overallPercent)}%`;
     if (statusText && partition) {
       const details = [`${percent}%`];
@@ -1226,6 +1287,10 @@ function handleProgressEvent(event) {
         details.push(`ETA ${formatDuration((100 - overallPercent) / stats.rate)}`);
       }
       const position = `${event.partitionIndex}/${event.partitionCount}`;
+      if (partition !== lastAnnouncedPartition) {
+        lastAnnouncedPartition = partition;
+        announce(`Flashing ${partition} (${position})`);
+      }
       statusText.textContent =
         `Status: Flashing ${partition} (${position}) — ${details.join(" • ")}`;
     }
@@ -1447,9 +1512,9 @@ async function executeFlashProcess() {
     resetFlashStats();
     if (progressBar) {
       progressBar.classList.remove("progress-bar-error");
-      progressBar.style.width = "0%";
+      setBarPercent(progressBar, 0);
     }
-    if (partitionBar) partitionBar.style.width = "0%";
+    setBarPercent(partitionBar, 0);
     if (percentText) percentText.textContent = "0%";
     if (statusText) statusText.textContent = "Status: Preparing Firmware...";
     appendLog("=== Starting Flashing Session ===");
@@ -1513,6 +1578,7 @@ async function executeFlashProcess() {
       ) {
         job.free();
         if (statusText) statusText.textContent = "Status: Flashing Aborted";
+        announce("Flashing aborted");
         appendLog("Flashing aborted by user.");
         return;
       }
@@ -1521,14 +1587,16 @@ async function executeFlashProcess() {
       appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
       await job.execute(state.selectedBackend, false);
 
-      if (progressBar) progressBar.style.width = "100%";
-      if (partitionBar) partitionBar.style.width = "100%";
+      setBarPercent(progressBar, 100);
+      setBarPercent(partitionBar, 100);
       if (percentText) percentText.textContent = "100%";
       if (statusText) statusText.textContent = "Status: Flashing Complete!";
+      announce("Flashing complete");
       appendLog("=== Flashing Process Finished Successfully ===");
     } catch (err) {
       if (progressBar) progressBar.classList.add("progress-bar-error");
       if (statusText) statusText.textContent = "Status: Flashing Failed!";
+      announce("Flashing failed");
       appendLog(`[FLASH ERROR] ${err}`);
     }
   });

@@ -121,6 +121,28 @@
   display: none !important;
 }
 
+/* Hidden visually but still read by screen readers */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus for custom interactive elements */
+.dropzone:focus-visible,
+.partition-file-trigger:focus-visible,
+.partition-item:focus-visible,
+.log-terminal:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
 body {
   font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
   background-color: var(--md-sys-color-surface-dim);

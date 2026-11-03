@@ -174,7 +174,7 @@
         <template id="slot-template">
           <div class="slot-box">
             <input type="file" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone">
+            <div class="dropzone" tabindex="0" role="button">
               <div class="slot-left">
                 <span class="slot-badge"></span>
                 <div class="dropzone-content">
@@ -188,7 +188,7 @@
                 <button type="button" class="btn-clear-slot" title="Remove file" hidden>&times;</button>
               </div>
             </div>
-            <div class="slot-progress-track">
+            <div class="slot-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               <div class="progress-bar-fill" style="width: 0%"></div>
             </div>
           </div>
@@ -226,7 +226,7 @@
             <span class="field-title">Partition Table (PIT) <span class="field-optional">(optional)</span></span>
             <div class="slot-box pit-config-box" data-slot="PIT" id="slot-box-PIT">
               <input type="file" id="input-PIT" class="slot-file-input" accept=".pit" hidden>
-              <div class="dropzone pit-dropzone" id="dropzone-PIT">
+              <div class="dropzone pit-dropzone" id="dropzone-PIT" tabindex="0" role="button" aria-label="Select PIT file">
                 <div class="slot-left">
                   <span class="slot-badge">PIT</span>
                   <div class="dropzone-content">
@@ -300,6 +300,7 @@
           <div>
             <h2 class="card-title">Progress &amp; activity log</h2>
             <p id="flash-status-text" class="card-subtitle">Status: Ready</p>
+            <p id="flash-announcer" class="visually-hidden" aria-live="polite"></p>
           </div>
         </div>
         <div class="terminal-actions">
@@ -317,15 +318,15 @@
         </div>
       </div>
 
-      <div class="main-progress-bg">
+      <div class="main-progress-bg" role="progressbar" aria-label="Overall flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
       </div>
-      <div class="partition-progress-bg">
+      <div class="partition-progress-bg" role="progressbar" aria-label="Current partition progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div id="partition-progress-bar" class="progress-bar-fill partition-progress-fill" style="width: 0%"></div>
       </div>
 
       <div class="card-body terminal-body">
-        <div class="log-terminal">
+        <div class="log-terminal" role="log" aria-label="Activity log" aria-live="off" tabindex="0">
           <pre id="log-output" class="log-output"></pre>
         </div>
       </div>
