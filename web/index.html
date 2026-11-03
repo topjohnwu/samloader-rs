@@ -169,119 +169,30 @@
       </div>
 
       <div class="card-body">
-        <div class="slots-grid">
-
-          <!-- BL Slot -->
-          <div class="slot-box" data-slot="BL" id="slot-box-BL">
-            <input type="file" id="input-BL" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" id="dropzone-BL">
+        <!-- Package slots, rendered from PACKAGE_SLOTS in app.js -->
+        <div id="slots-grid" class="slots-grid"></div>
+        <template id="slot-template">
+          <div class="slot-box">
+            <input type="file" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
+            <div class="dropzone">
               <div class="slot-left">
-                <span class="slot-badge slot-badge-bl">BL</span>
+                <span class="slot-badge"></span>
                 <div class="dropzone-content">
-                  <span class="slot-label">Bootloader</span>
-                  <span class="file-name" id="file-name-BL">Select BL_*.tar.md5</span>
+                  <span class="slot-label"></span>
+                  <span class="file-name"></span>
                 </div>
               </div>
               <div class="slot-right">
-                <span class="file-size" id="file-size-BL"></span>
-                <span class="badge badge-idle" id="md5-badge-BL">Empty</span>
-                <button type="button" class="btn-clear-slot" id="clear-BL" title="Remove file" hidden>&times;</button>
+                <span class="file-size"></span>
+                <span class="badge badge-idle">Empty</span>
+                <button type="button" class="btn-clear-slot" title="Remove file" hidden>&times;</button>
               </div>
             </div>
             <div class="slot-progress-track">
-              <div class="progress-bar-fill" id="md5-bar-BL" style="width: 0%"></div>
+              <div class="progress-bar-fill" style="width: 0%"></div>
             </div>
           </div>
-
-          <!-- AP Slot -->
-          <div class="slot-box" data-slot="AP" id="slot-box-AP">
-            <input type="file" id="input-AP" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" id="dropzone-AP">
-              <div class="slot-left">
-                <span class="slot-badge slot-badge-ap">AP</span>
-                <div class="dropzone-content">
-                  <span class="slot-label">System / Application</span>
-                  <span class="file-name" id="file-name-AP">Select AP_*.tar.md5</span>
-                </div>
-              </div>
-              <div class="slot-right">
-                <span class="file-size" id="file-size-AP"></span>
-                <span class="badge badge-idle" id="md5-badge-AP">Empty</span>
-                <button type="button" class="btn-clear-slot" id="clear-AP" title="Remove file" hidden>&times;</button>
-              </div>
-            </div>
-            <div class="slot-progress-track">
-              <div class="progress-bar-fill" id="md5-bar-AP" style="width: 0%"></div>
-            </div>
-          </div>
-
-          <!-- CP Slot -->
-          <div class="slot-box" data-slot="CP" id="slot-box-CP">
-            <input type="file" id="input-CP" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" id="dropzone-CP">
-              <div class="slot-left">
-                <span class="slot-badge slot-badge-cp">CP</span>
-                <div class="dropzone-content">
-                  <span class="slot-label">Modem / Radio</span>
-                  <span class="file-name" id="file-name-CP">Select CP_*.tar.md5</span>
-                </div>
-              </div>
-              <div class="slot-right">
-                <span class="file-size" id="file-size-CP"></span>
-                <span class="badge badge-idle" id="md5-badge-CP">Empty</span>
-                <button type="button" class="btn-clear-slot" id="clear-CP" title="Remove file" hidden>&times;</button>
-              </div>
-            </div>
-            <div class="slot-progress-track">
-              <div class="progress-bar-fill" id="md5-bar-CP" style="width: 0%"></div>
-            </div>
-          </div>
-
-          <!-- CSC Slot -->
-          <div class="slot-box" data-slot="CSC" id="slot-box-CSC">
-            <input type="file" id="input-CSC" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" id="dropzone-CSC">
-              <div class="slot-left">
-                <span class="slot-badge slot-badge-csc">CSC</span>
-                <div class="dropzone-content">
-                  <span class="slot-label">CSC / HOME_CSC</span>
-                  <span class="file-name" id="file-name-CSC">Select CSC_*.tar.md5</span>
-                </div>
-              </div>
-              <div class="slot-right">
-                <span class="file-size" id="file-size-CSC"></span>
-                <span class="badge badge-idle" id="md5-badge-CSC">Empty</span>
-                <button type="button" class="btn-clear-slot" id="clear-CSC" title="Remove file" hidden>&times;</button>
-              </div>
-            </div>
-            <div class="slot-progress-track">
-              <div class="progress-bar-fill" id="md5-bar-CSC" style="width: 0%"></div>
-            </div>
-          </div>
-
-          <!-- USERDATA Slot -->
-          <div class="slot-box" data-slot="USERDATA" id="slot-box-USERDATA">
-            <input type="file" id="input-USERDATA" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" id="dropzone-USERDATA">
-              <div class="slot-left">
-                <span class="slot-badge slot-badge-userdata">USER</span>
-                <div class="dropzone-content">
-                  <span class="slot-label">User Data</span>
-                  <span class="file-name" id="file-name-USERDATA">Select USERDATA_*.tar.md5</span>
-                </div>
-              </div>
-              <div class="slot-right">
-                <span class="file-size" id="file-size-USERDATA"></span>
-                <span class="badge badge-idle" id="md5-badge-USERDATA">Empty</span>
-                <button type="button" class="btn-clear-slot" id="clear-USERDATA" title="Remove file" hidden>&times;</button>
-              </div>
-            </div>
-            <div class="slot-progress-track">
-              <div class="progress-bar-fill" id="md5-bar-USERDATA" style="width: 0%"></div>
-            </div>
-          </div>
-
-        </div>
+        </template>
 
         <!-- Individual Partition Files List -->
         <div id="partition-files-section" class="partition-files-section" hidden>
@@ -317,7 +228,7 @@
               <input type="file" id="input-PIT" class="slot-file-input" accept=".pit" hidden>
               <div class="dropzone pit-dropzone" id="dropzone-PIT">
                 <div class="slot-left">
-                  <span class="slot-badge slot-badge-pit">PIT</span>
+                  <span class="slot-badge">PIT</span>
                   <div class="dropzone-content">
                     <span class="file-name" id="file-name-PIT">Select *.pit file</span>
                   </div>

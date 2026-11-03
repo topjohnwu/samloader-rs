@@ -37,7 +37,15 @@ import {
 } from "./bridge.js";
 
 // --- Constants & Application State ---
-const SLOTS = ["BL", "AP", "CP", "CSC", "USERDATA", "PIT"];
+// Odin package slots, in flashing order. Their markup is rendered from #slot-template.
+const PACKAGE_SLOTS = [
+  { id: "BL", badge: "BL", label: "Bootloader" },
+  { id: "AP", badge: "AP", label: "System / Application" },
+  { id: "CP", badge: "CP", label: "Modem / Radio" },
+  { id: "CSC", badge: "CSC", label: "CSC / HOME_CSC" },
+  { id: "USERDATA", badge: "USER", label: "User Data" },
+];
+const SLOTS = [...PACKAGE_SLOTS.map((s) => s.id), "PIT"];
 const SAMSUNG_VID = 0x04e8;
 const DOWNLOAD_MODE_PIDS = new Set([0x6601, 0x685d, 0x68c3]);
 
@@ -46,14 +54,7 @@ const state = {
   rebootMode: "normal",
   skipMd5: false,
   device: null,
-  slots: {
-    BL: null,
-    AP: null,
-    CP: null,
-    CSC: null,
-    USERDATA: null,
-    PIT: null,
-  },
+  slots: Object.fromEntries(SLOTS.map((slot) => [slot, null])),
   md5Results: {},
   deviceModel: null, // Model reported by the last DVIF query of the current device
   partitions: [],
@@ -279,6 +280,35 @@ function pumpMd5Queue() {
 }
 
 // --- Slot Handling & Dropzones ---
+function slotPlaceholder(slot) {
+  return slot === "PIT" ? "Select *.pit file" : `Select ${slot}_*.tar.md5`;
+}
+
+function renderPackageSlots() {
+  const grid = document.getElementById("slots-grid");
+  const template = document.getElementById("slot-template");
+  if (!grid || !template) return;
+
+  PACKAGE_SLOTS.forEach(({ id, badge, label }) => {
+    const box = template.content.firstElementChild.cloneNode(true);
+    box.id = `slot-box-${id}`;
+    box.dataset.slot = id;
+    box.querySelector(".slot-file-input").id = `input-${id}`;
+    box.querySelector(".dropzone").id = `dropzone-${id}`;
+    const badgeEl = box.querySelector(".slot-badge");
+    badgeEl.textContent = badge;
+    box.querySelector(".slot-label").textContent = label;
+    const fileName = box.querySelector(".file-name");
+    fileName.id = `file-name-${id}`;
+    fileName.textContent = slotPlaceholder(id);
+    box.querySelector(".file-size").id = `file-size-${id}`;
+    box.querySelector(".badge").id = `md5-badge-${id}`;
+    box.querySelector(".btn-clear-slot").id = `clear-${id}`;
+    box.querySelector(".progress-bar-fill").id = `md5-bar-${id}`;
+    grid.appendChild(box);
+  });
+}
+
 function assignFileToSlot(slot, file) {
   if (state.isBusy) return;
 
@@ -345,7 +375,7 @@ function clearSlot(slot) {
 
   if (slotBox) slotBox.classList.remove("slot-populated");
   if (fileNameElem) {
-    fileNameElem.textContent = slot === "PIT" ? "Select *.pit file" : `Select ${slot}_*.tar.md5`;
+    fileNameElem.textContent = slotPlaceholder(slot);
   }
   if (fileSizeElem) fileSizeElem.textContent = "";
   if (clearBtn) clearBtn.hidden = true;
@@ -1506,6 +1536,7 @@ async function executeFlashProcess() {
 
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
+  renderPackageSlots();
   setupExclusiveGuards();
   setupDropzones();
   setupWasmAndEvents();
