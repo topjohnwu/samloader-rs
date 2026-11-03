@@ -157,7 +157,7 @@ const WEB_STATIC_FILES: &[&str] = &[
     "md5_worker.js",
 ];
 /// Static directories of the web app, relative to `web/`.
-const WEB_STATIC_DIRS: &[&str] = &["fonts"];
+const WEB_STATIC_DIRS: &[&str] = &["fonts", "ui"];
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;
