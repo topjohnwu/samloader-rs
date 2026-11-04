@@ -19,6 +19,7 @@ import {
   setProgressCallback,
   setVerbose,
   getBackendOptions,
+  getVersion,
   isWebUsbSupported,
   isWebSerialSupported,
 } from "./bridge.js";
@@ -58,6 +59,14 @@ async function setupWasmAndEvents() {
     await setProgressCallback(handleProgressEvent);
     setupLogScroller();
     appendLog("WASM engine initialized successfully.");
+
+    const version = await getVersion();
+    const versionEl = document.getElementById("app-version");
+    if (versionEl) {
+      versionEl.textContent = `v${version}`;
+      versionEl.hidden = false;
+    }
+    appendLog(`samloader-web version: ${version}`);
 
     const backendOptions = await getBackendOptions();
     appendLog(`Available backends: ${backendOptions.join(", ")}`);

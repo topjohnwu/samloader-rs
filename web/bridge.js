@@ -35,6 +35,7 @@ import init, {
   set_verbose,
   take_logs,
   verify_package_md5,
+  version,
 } from "./pkg/samloader_web.js";
 
 let initPromise = null;
@@ -205,6 +206,15 @@ export function renderLogViewport(scrollTop, viewportHeight, stickToBottom) {
 export async function getBackendOptions() {
   await initWasm();
   return get_backend_options();
+}
+
+/**
+ * Returns the version of samloader-web, which all samloader-rs crates share.
+ * @returns {Promise<string>}
+ */
+export async function getVersion() {
+  await initWasm();
+  return version();
 }
 
 /**

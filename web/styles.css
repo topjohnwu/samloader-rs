@@ -257,6 +257,13 @@ textarea {
   white-space: nowrap;
 }
 
+.brand-version {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+}
+
 .header-controls {
   display: flex;
   align-items: center;

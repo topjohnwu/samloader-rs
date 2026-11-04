@@ -66,6 +66,12 @@ pub fn device_mode(vid: u16, pid: u16) -> Option<String> {
     })
 }
 
+/// Returns the version of samloader-web. All samloader-rs crates share the same version.
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Returns array of supported backend option names ("nusb", "vcom", "mock").
 #[wasm_bindgen]
 pub fn get_backend_options() -> Vec<String> {
