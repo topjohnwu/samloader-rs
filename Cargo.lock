@@ -1378,7 +1378,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "samloader"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "cfg-if",
  "clap",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "samloader-fus"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "aes",
  "ecb",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "samloader-odin"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "binrw",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "samloader-pit"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "binrw",
  "modular-bitfield",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "samloader-web"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "futures",
  "js-sys",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",

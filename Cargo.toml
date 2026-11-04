@@ -10,16 +10,16 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.2.0"
+version = "3.0.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/topjohnwu/samloader-rs"
 readme = "README.md"
 
 [workspace.dependencies]
-samloader-fus = { version = "2.2.0", path = "fus" }
-samloader-pit = { version = "2.2.0", path = "pit" }
-samloader-odin = { version = "2.2.0", path = "odin", default-features = false }
+samloader-fus = { version = "3.0.0", path = "fus" }
+samloader-pit = { version = "3.0.0", path = "pit" }
+samloader-odin = { version = "3.0.0", path = "odin", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "cookies"] }
 aes = "0.9"
 ecb = "0.2"
