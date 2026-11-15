@@ -214,6 +214,15 @@ export async function refreshPairedDevicesStatus() {
   const backend = state.selectedBackend;
   const summaryEl = document.getElementById("paired-devices-summary");
 
+  if (!backend) {
+    clearDeviceInfo();
+    state.device = null;
+    if (summaryEl) summaryEl.textContent = "No USB backend is available in this build";
+    updateConnectionChip(false, "No Backend");
+    renderDeviceList();
+    return;
+  }
+
   if (!isBackendSupported(backend)) {
     clearDeviceInfo();
     state.device = null;
@@ -282,7 +291,7 @@ export async function refreshPairedDevicesStatus() {
 }
 
 export async function handlePairDownload() {
-  if (state.isBusy) return;
+  if (state.isBusy || !state.selectedBackend) return;
   try {
     appendLog(`Pairing Download Mode device via ${state.selectedBackend}...`);
     await pairDownloadDevice(state.selectedBackend);
@@ -294,7 +303,7 @@ export async function handlePairDownload() {
 }
 
 export async function handlePairNormal() {
-  if (state.isBusy) return;
+  if (state.isBusy || !state.selectedBackend) return;
   try {
     appendLog(`Pairing Normal Mode device via ${state.selectedBackend}...`);
     await pairSamsungDevice(state.selectedBackend);

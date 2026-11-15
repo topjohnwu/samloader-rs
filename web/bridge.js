@@ -200,8 +200,8 @@ export function renderLogViewport(scrollTop, viewportHeight, stickToBottom) {
 }
 
 /**
- * Returns list of available USB backend option names ("nusb", "vcom", "mock").
- * @returns {Promise<string[]>}
+ * Returns list of available USB backend options (`{ id, label }`), in preference order.
+ * @returns {Promise<{ id: string, label: string }[]>}
  */
 export async function getBackendOptions() {
   await initWasm();
@@ -249,7 +249,8 @@ export function isWebSerialSupported() {
 export function isBackendSupported(backend) {
   if (backend === "mock") return true;
   if (backend === "vcom") return isWebSerialSupported();
-  return isWebUsbSupported();
+  if (backend === "nusb") return isWebUsbSupported();
+  return false;
 }
 
 /**
@@ -287,7 +288,7 @@ export async function getPairedDevices(backend = "nusb") {
       })
       .filter((d) => d.vendorId != null && d.productId != null);
   }
-  if (!isWebUsbSupported()) {
+  if (backend !== "nusb" || !isWebUsbSupported()) {
     return [];
   }
   const devices = await navigator.usb.getDevices();

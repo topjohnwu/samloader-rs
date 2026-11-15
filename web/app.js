@@ -69,11 +69,26 @@ async function setupWasmAndEvents() {
     appendLog(`samloader-web version: ${version}`);
 
     const backendOptions = await getBackendOptions();
-    appendLog(`Available backends: ${backendOptions.join(", ")}`);
+    appendLog(`Available backends: ${backendOptions.map((b) => b.id).join(", ") || "none"}`);
+
+    if (!backendOptions.some((b) => b.id === state.selectedBackend)) {
+      state.selectedBackend = backendOptions[0]?.id ?? null;
+    }
 
     const backendSelect = document.getElementById("backend-select");
     if (backendSelect) {
-      backendSelect.value = state.selectedBackend;
+      backendSelect.replaceChildren(
+        ...backendOptions.map(({ id, label }) => {
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = label;
+          return opt;
+        })
+      );
+      if (state.selectedBackend !== null) {
+        backendSelect.value = state.selectedBackend;
+      }
+      backendSelect.disabled = state.isBusy || backendOptions.length === 0;
       backendSelect.addEventListener("change", async (e) => {
         state.selectedBackend = e.target.value;
         appendLog(`Backend selected: ${state.selectedBackend}`);

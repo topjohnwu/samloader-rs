@@ -101,7 +101,7 @@ export function updateControlsState() {
   generalControlIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
-      el.disabled = state.isBusy;
+      el.disabled = state.isBusy || (id === "backend-select" && el.options.length === 0);
     }
   });
 

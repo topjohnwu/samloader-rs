@@ -33,11 +33,8 @@
       <div class="header-controls">
         <div class="backend-selector-group">
           <label for="backend-select" class="backend-label">Backend</label>
-          <select id="backend-select" class="select-input">
-            <option value="nusb">WebUSB (nusb)</option>
-            <option value="vcom">WebSerial (vcom)</option>
-            <option value="mock">Mock Device (Debug)</option>
-          </select>
+          <!-- Filled in once WASM is initialized -->
+          <select id="backend-select" class="select-input" disabled></select>
         </div>
         <div id="connection-chip" class="status-chip chip-disconnected">
           <span class="chip-dot"></span>

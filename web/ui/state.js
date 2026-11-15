@@ -27,7 +27,7 @@ export const PACKAGE_SLOTS = [
 export const SLOTS = [...PACKAGE_SLOTS.map((s) => s.id), "PIT"];
 
 export const state = {
-  selectedBackend: "nusb",
+  selectedBackend: null,
   rebootMode: "normal",
   skipMd5: false,
   device: null,

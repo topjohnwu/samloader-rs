@@ -14,6 +14,9 @@
 
 #![cfg(target_arch = "wasm32")]
 
+#[cfg(not(any(feature = "nusb", feature = "serialport")))]
+compile_error!("At least one USB backend must be enabled!");
+
 mod progress;
 mod reader;
 
@@ -32,13 +35,19 @@ use crate::reader::{
 };
 
 fn parse_backend(backend: Option<&str>) -> Result<UsbBackendOption, JsValue> {
-    let s = backend.unwrap_or("nusb");
-    match s.to_lowercase().as_str() {
-        "webusb" | "nusb" => Ok(UsbBackendOption::Nusb),
-        "webserial" | "vcom" | "serial" => Ok(UsbBackendOption::Vcom),
-        "mock" => Ok(UsbBackendOption::Mock),
-        _ => s.parse::<UsbBackendOption>().map_err(to_js_err),
-    }
+    let Some(raw) = backend else {
+        return UsbBackendOption::ALL
+            .first()
+            .copied()
+            .ok_or_else(|| JsValue::from_str("No USB backend enabled in this build"));
+    };
+    let s = raw.to_ascii_lowercase();
+    let canonical = match s.as_str() {
+        "webusb" => "nusb",
+        "webserial" | "serial" => "vcom",
+        other => other,
+    };
+    canonical.parse::<UsbBackendOption>().map_err(to_js_err)
 }
 
 fn parse_reboot_mode(mode: &str) -> RebootMode {
@@ -72,13 +81,26 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Returns array of supported backend option names ("nusb", "vcom", "mock").
+fn backend_label(backend: UsbBackendOption) -> &'static str {
+    match backend.to_str() {
+        "nusb" => "WebUSB (nusb)",
+        "vcom" => "WebSerial (vcom)",
+        "mock" => "Mock Device (Debug)",
+        other => other,
+    }
+}
+
+/// Returns the supported USB backend options as `{ id, label }` objects, in preference order.
 #[wasm_bindgen]
-pub fn get_backend_options() -> Vec<String> {
-    UsbBackendOption::ALL
-        .iter()
-        .map(|b| b.to_str().to_string())
-        .collect()
+pub fn get_backend_options() -> Result<js_sys::Array, JsValue> {
+    let options = js_sys::Array::new();
+    for &backend in UsbBackendOption::ALL {
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &"id".into(), &backend.to_str().into())?;
+        js_sys::Reflect::set(&obj, &"label".into(), &backend_label(backend).into())?;
+        options.push(&obj);
+    }
+    Ok(options)
 }
 
 /// Prompts the browser's device picker for a Samsung device in Download Mode.
