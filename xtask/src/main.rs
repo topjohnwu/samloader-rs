@@ -155,6 +155,8 @@ const WEB_STATIC_FILES: &[&str] = &[
     "app.js",
     "bridge.js",
     "md5_worker.js",
+    "favicon.svg",
+    "logo.svg",
 ];
 /// Static directories of the web app, relative to `web/`.
 const WEB_STATIC_DIRS: &[&str] = &["fonts", "ui"];
