@@ -69,15 +69,12 @@
   <!-- Main Content -->
   <main class="app-container">
 
-    <!-- Step 1: Connect a Device -->
+    <!-- Connect a Device -->
     <section class="card device-card">
       <div class="card-header">
-        <div class="card-title-group">
-          <span class="step-number">1</span>
-          <div>
-            <h2 class="card-title">Connect a device</h2>
-            <p id="paired-devices-summary" class="card-subtitle">Connect a Samsung device in Download Mode or Normal Mode</p>
-          </div>
+        <div>
+          <h2 class="card-title">Connect a device</h2>
+          <p id="paired-devices-summary" class="card-subtitle">Connect a Samsung device in Download Mode or Normal Mode</p>
         </div>
       </div>
 
@@ -164,15 +161,12 @@
       </div>
     </section>
 
-    <!-- Step 2: Select Firmware & Flash -->
-    <section class="card slots-card">
+    <!-- Select Firmware & Flash (shown when a Download Mode device is connected) -->
+    <section id="slots-card" class="card slots-card" hidden>
       <div class="card-header">
-        <div class="card-title-group">
-          <span class="step-number">2</span>
-          <div>
-            <h2 class="card-title">Select firmware &amp; flash</h2>
-            <p class="card-subtitle">Select TAR packages for Odin slots or add individual partition files</p>
-          </div>
+        <div>
+          <h2 class="card-title">Select firmware &amp; flash</h2>
+          <p class="card-subtitle">Select TAR packages for Odin slots or add individual partition files</p>
         </div>
         <div class="slots-header-actions">
           <label class="inline-check-toggle" for="opt-skip-md5">

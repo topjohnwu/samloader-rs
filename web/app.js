@@ -135,7 +135,6 @@ async function setupWasmAndEvents() {
       navigator.serial.addEventListener("connect", onSerialHotplug);
       navigator.serial.addEventListener("disconnect", onSerialHotplug);
     }
-    await refreshPairedDevicesStatus();
 
     document.getElementById("opt-skip-md5")?.addEventListener("change", (e) => {
       handleSkipMd5Change(e.target.checked);
@@ -191,6 +190,8 @@ async function setupWasmAndEvents() {
     // Save Log / Save PIT
     document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
     document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
+
+    await refreshPairedDevicesStatus();
   } catch (err) {
     reportError(`WASM Initialization Error: ${err}`);
   }

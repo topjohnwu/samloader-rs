@@ -52,6 +52,11 @@ export function updateControlsState() {
   });
   const hasDownloadDevice = state.device?.mode === "download";
 
+  const slotsCard = document.getElementById("slots-card");
+  if (slotsCard) {
+    slotsCard.hidden = !hasDownloadDevice;
+  }
+
   if (flashBtn) {
     flashBtn.disabled =
       !hasAction || !hasDownloadDevice || state.isBusy || hasPendingOrInvalidMd5;

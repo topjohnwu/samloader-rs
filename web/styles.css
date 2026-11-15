@@ -443,27 +443,6 @@ textarea {
   flex-wrap: wrap;
 }
 
-.card-title-group {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.step-number {
-  background-color: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-family: 'DM Sans', 'Roboto', sans-serif;
-  font-size: 0.875rem;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
 .card-title {
   font-family: 'DM Sans', 'Roboto', sans-serif;
   font-size: 1.125rem;
@@ -568,7 +547,7 @@ textarea {
   box-shadow: none;
 }
 
-/* Step 1: Device Empty State & Connected State */
+/* Device Empty State & Connected State */
 .device-empty-state {
   padding: 20px 16px 8px;
   text-align: center;
@@ -791,7 +770,7 @@ textarea {
   flex-wrap: wrap;
 }
 
-/* Step 2: Unified Single-Layer Firmware Slots */
+/* Unified Single-Layer Firmware Slots */
 .slots-header-actions {
   display: flex;
   align-items: center;
@@ -1235,7 +1214,7 @@ textarea {
   }
 }
 
-/* Step 2: Advanced Options (folded by default) */
+/* Advanced Options (folded by default) */
 .advanced-options {
   margin-top: 20px;
   border: 1px solid var(--md-sys-color-outline-variant);
