@@ -52,6 +52,17 @@ import {
 import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "./ui/flash.js";
 import { setupThemeToggle } from "./ui/theme.js";
 
+// Use Web Serial (vcom) by default on Windows, since WebUSB requires replacing
+// Samsung/usbser.sys drivers with WinUSB, whereas Web Serial works out of the box.
+function isWindows() {
+  if (typeof navigator === "undefined") return false;
+  const uaPlatform = navigator.userAgentData?.platform;
+  if (uaPlatform && uaPlatform !== "Unknown") {
+    return uaPlatform === "Windows";
+  }
+  return /^win/i.test(navigator.platform || "") || /\bwindows\b/i.test(navigator.userAgent || "");
+}
+
 // --- WASM & Event Wiring ---
 async function setupWasmAndEvents() {
   try {
@@ -72,7 +83,8 @@ async function setupWasmAndEvents() {
     appendLog(`Available backends: ${backendOptions.map((b) => b.id).join(", ") || "none"}`);
 
     if (!backendOptions.some((b) => b.id === state.selectedBackend)) {
-      state.selectedBackend = backendOptions[0]?.id ?? null;
+      const preferVcom = isWindows() && backendOptions.some((b) => b.id === "vcom");
+      state.selectedBackend = preferVcom ? "vcom" : (backendOptions[0]?.id ?? null);
     }
 
     const backendSelect = document.getElementById("backend-select");
