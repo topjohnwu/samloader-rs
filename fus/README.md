@@ -15,11 +15,11 @@ A pure-Rust client library for interacting with the Samsung Firmware Update Serv
 ### Basic Version Checking & Downloading
 
 ```rust
-use samloader_fus::{DownloadOptions, FusClient, download_firmware, fetch_version_xml};
+use samloader_fus::{DownloadOptions, FusClient, download_firmware, fetch_history};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch version info
-    let version_info = fetch_version_xml("SM-S931U1", "XAA")?;
+    let version_info = fetch_history("SM-S931U1", "XAA")?;
     println!("Latest firmware version: {}", version_info.latest);
 
     // 2. Initialize the FUS Client

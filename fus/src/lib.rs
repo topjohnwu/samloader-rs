@@ -31,8 +31,9 @@ pub use xml::{BinaryInform, VersionInfo};
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
 pub use reqwest;
 
-/// Queries and fetches the standard firmware `version.xml` document for the specified device model and region.
-pub fn fetch_version_xml(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+/// Queries and fetches the standard firmware `version.xml` document for the specified
+/// device model and region.
+fn fetch_version_xml(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
     let version_url = format!(
         "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
         region, model
@@ -45,4 +46,31 @@ pub fn fetch_version_xml(model: &str, region: &str) -> reqwest::Result<VersionIn
         .text()?;
 
     Ok(xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml"))
+}
+
+/// Fetches the historical list of released firmware versions for the target model and region
+/// through the `SmartHistory.do` endpoint.
+fn fetch_smart_history(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+    let (nonce, signature) = auth::compute_history_headers(model);
+    let auth_val = format!(
+        "FUS nonce=\"{nonce}\", signature=\"{signature}\", \
+         nc=\"00000001\", type=\"auth\", realm=\"interface\"",
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let xml = client
+        .post("https://neofussvr.sslcs.cdngc.net/SmartHistory.do")
+        .header(reqwest::header::AUTHORIZATION, auth_val)
+        .header(reqwest::header::USER_AGENT, "SMART 2.0")
+        .body(xml::history_req_xml(model, region))
+        .send()?
+        .error_for_status()?
+        .text()?;
+
+    Ok(xml::parse_history_xml(&xml).expect("Failed to parse history.xml"))
+}
+
+/// Fetches the historical list of released firmware versions for the target model and region.
+pub fn fetch_history(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+    fetch_smart_history(model, region).or_else(|_| fetch_version_xml(model, region))
 }

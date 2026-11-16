@@ -15,7 +15,7 @@
 use crate::cli::DownloadArgs;
 use indicatif::{ProgressBar, ProgressStyle};
 use samloader_fus::{
-    DownloadOptions, DownloadProgress, FusClient, download_firmware, fetch_version_xml,
+    DownloadOptions, DownloadProgress, FusClient, download_firmware, fetch_history,
 };
 use std::error::Error;
 use std::time::Duration;
@@ -61,19 +61,16 @@ impl DownloadProgress for ProgressWrapper<'_> {
 
 /// Downloads and decrypts a firmware from Samsung's update servers.
 pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error>> {
-    let mut client = FusClient::new().expect("Unable to establish FusClient");
-
     let version = match &args.version {
         Some(v) => v.clone(),
         None => {
-            let version_info = client
-                .fetch_history(&args.fus.model, &args.fus.region)
-                .or_else(|_| fetch_version_xml(&args.fus.model, &args.fus.region))
+            let version_info = fetch_history(&args.fus.model, &args.fus.region)
                 .expect("Failed to fetch version info");
             version_info.latest
         }
     };
 
+    let mut client = FusClient::new().expect("Unable to establish FusClient");
     client.fetch_binary_info(&args.fus.model, &args.fus.region, &version);
 
     println!("Firmware Version: {}", client.info.version);

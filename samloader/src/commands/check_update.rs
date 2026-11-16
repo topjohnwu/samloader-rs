@@ -15,15 +15,13 @@
 // limitations under the License.
 
 use crate::cli::CheckUpdateArgs;
-use samloader_fus::{FusClient, fetch_version_xml};
+use samloader_fus::fetch_history;
 use std::error::Error;
 
 /// Prints the firmware versions available for a model and region.
 pub(crate) fn run(args: CheckUpdateArgs) -> Result<(), Box<dyn Error>> {
-    let info = FusClient::new()
-        .and_then(|client| client.fetch_history(&args.fus.model, &args.fus.region))
-        .or_else(|_| fetch_version_xml(&args.fus.model, &args.fus.region))
-        .expect("Failed to fetch version info");
+    let info =
+        fetch_history(&args.fus.model, &args.fus.region).expect("Failed to fetch version info");
 
     if args.all {
         println!("Latest Stable Version:");

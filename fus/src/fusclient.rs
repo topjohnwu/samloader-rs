@@ -20,7 +20,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RANGE, USER_AGENT};
 use std::io::{self, Read};
 use std::sync::Mutex;
 use std::time::Duration;
-use xml::{BinaryInform, VersionInfo};
+use xml::BinaryInform;
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
@@ -70,7 +70,7 @@ impl FusClient {
         };
 
         // Initialize nonce
-        fus.make_req("NF_SmartDownloadGenerateNonce.do", fus.make_headers(), "")?;
+        fus.make_req("NF_SmartDownloadGenerateNonce.do", "")?;
 
         Ok(fus)
     }
@@ -86,11 +86,7 @@ impl FusClient {
         let req_xml = xml::binary_inform_req_xml(model, region, &fw, &nonce);
 
         let xml = self
-            .make_req(
-                "NF_SmartDownloadBinaryInform.do",
-                self.make_headers(),
-                &req_xml,
-            )
+            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
             .and_then(Response::text)
             .expect("Info request failed");
 
@@ -113,25 +109,12 @@ impl FusClient {
         headers
     }
 
-    fn make_history_headers(&self, model: &str) -> HeaderMap {
-        let (client_nonce, signature) = auth::compute_history_headers(model);
-        let auth_val = format!(
-            "FUS nonce=\"{}\", signature=\"{}\", nc=\"00000001\", type=\"auth\", realm=\"interface\"",
-            client_nonce, signature
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
-        headers.insert(USER_AGENT, HeaderValue::from_static("SMART 2.0"));
-        headers
-    }
-
-    fn make_req(&self, path: &str, headers: HeaderMap, data: &str) -> reqwest::Result<Response> {
+    fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
         let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
         let resp = self
             .client
             .post(&url)
-            .headers(headers)
+            .headers(self.make_headers())
             .body(data.to_string())
             .send()?
             .error_for_status()?;
@@ -156,18 +139,6 @@ impl FusClient {
         Ok(resp)
     }
 
-    /// Fetches the historical list of released firmware versions for the target model and region.
-    pub fn fetch_history(&self, model: &str, region: &str) -> reqwest::Result<VersionInfo> {
-        let req_xml = xml::history_req_xml(model, region);
-        let resp = self.make_req(
-            "SmartHistory.do",
-            self.make_history_headers(model),
-            &req_xml,
-        )?;
-        let xml = resp.text()?;
-        Ok(xml::parse_history_xml(&xml).expect("Failed to parse history.xml"))
-    }
-
     /// Requests a download authorization ticket from FUS for the currently selected firmware file.
     pub fn init_download(&self) -> reqwest::Result<()> {
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
@@ -178,11 +149,7 @@ impl FusClient {
             &self.info.model_type,
             &self.info.region,
         );
-        self.make_req(
-            "NF_SmartDownloadBinaryInitForMass.do",
-            self.make_headers(),
-            &init_xml,
-        )?;
+        self.make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)?;
         Ok(())
     }
 
@@ -276,7 +243,7 @@ impl FusClient {
             return;
         }
         if self
-            .make_req("NF_SmartDownloadGenerateNonce.do", self.make_headers(), "")
+            .make_req("NF_SmartDownloadGenerateNonce.do", "")
             .is_ok()
             && self.init_download().is_ok()
         {
