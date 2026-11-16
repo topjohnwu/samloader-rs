@@ -105,11 +105,23 @@ fn test_skip_unknown_target_fails() {
 #[test]
 fn test_resolve_drops_skipped_partitions() {
     let partitions = vec![
-        (None, "boot.img", Cursor::new(&b"DUMMY IMAGE DATA"[..])),
-        (None, "vbmeta.img", Cursor::new(&b"DUMMY IMAGE DATA"[..])),
-        (None, "dtbo.img", Cursor::new(&b"DUMMY IMAGE DATA"[..])),
         (
-            Some("VBMETA_B".to_string()),
+            PartitionTarget::Auto,
+            "boot.img",
+            Cursor::new(&b"DUMMY IMAGE DATA"[..]),
+        ),
+        (
+            PartitionTarget::Auto,
+            "vbmeta.img",
+            Cursor::new(&b"DUMMY IMAGE DATA"[..]),
+        ),
+        (
+            PartitionTarget::Auto,
+            "dtbo.img",
+            Cursor::new(&b"DUMMY IMAGE DATA"[..]),
+        ),
+        (
+            PartitionTarget::Name("VBMETA_B".to_string()),
             "vbmeta.img",
             Cursor::new(&b"DUMMY IMAGE DATA"[..]),
         ),
@@ -181,11 +193,13 @@ fn test_execute_super_size_check_with_ddp_and_non_ddp_super_images() {
             let packages = (!packages.is_empty()).then(|| ("AP.tar", Cursor::new(&tar_bytes[..])));
             FlashRequest::new()
                 .packages(packages)
-                .partitions(
-                    partitions.iter().map(|&(name, data)| {
-                        (Some(name.to_string()), "super.img", Cursor::new(data))
-                    }),
-                )
+                .partitions(partitions.iter().map(|&(name, data)| {
+                    (
+                        PartitionTarget::Name(name.to_string()),
+                        "super.img",
+                        Cursor::new(data),
+                    )
+                }))
                 .run(&mut session)
                 .await
         })
@@ -222,7 +236,11 @@ fn rewrite_vbmeta(
 ) -> Result<(), FlashError> {
     futures::executor::block_on(async {
         let mut prepared = FlashRequest::new()
-            .partitions(partitions.into_iter().map(|r| (None, "part", r)))
+            .partitions(
+                partitions
+                    .into_iter()
+                    .map(|r| (PartitionTarget::Auto, "part", r)),
+            )
             .disable_verity(verity)
             .disable_verification(verification)
             .prepare()
@@ -436,7 +454,7 @@ fn test_execute_matches_partition_names_ignoring_case() {
             FlashRequest::new()
                 .pit(A14M_PIT)
                 .partitions([(
-                    Some(name.to_string()),
+                    PartitionTarget::Name(name.to_string()),
                     "init_boot.img",
                     Cursor::new(&image[..]),
                 )])
@@ -621,7 +639,7 @@ fn test_execute_with_local_pit_reports_once() {
     let messages = COLLECTOR.0.lock().unwrap();
     let count = messages
         .iter()
-        .filter(|m| m.as_str() == "Skipping DTBO_A (excluded with --skip)")
+        .filter(|m| m.as_str() == "Skipping DTBO_A (excluded by skip filter)")
         .count();
     assert_eq!(count, 1, "messages: {:?}", *messages);
 }
@@ -734,8 +752,12 @@ fn test_prepare_is_deterministic_without_device() {
             FlashRequest::new()
                 .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
                 .partitions([
-                    (Some("12".to_string()), "a.img", Cursor::new(&b"A"[..])),
-                    (Some("BOOT".to_string()), "b.img", Cursor::new(&b"BB"[..])),
+                    (PartitionTarget::Id(12), "a.img", Cursor::new(&b"A"[..])),
+                    (
+                        PartitionTarget::Name("BOOT".to_string()),
+                        "b.img",
+                        Cursor::new(&b"BB"[..]),
+                    ),
                 ])
                 // Skip targets are only resolved against a PIT during execution
                 .skip(&["nonexistent"])
@@ -780,9 +802,13 @@ fn test_prepare_rejects_corrupt_lz4_regardless_of_skip() {
     let res = futures::executor::block_on(
         FlashRequest::new()
             .partitions([
-                (None, "boot.img.lz4", Cursor::new(&[0xFFu8; 64][..])),
                 (
-                    Some("BOOT".to_string()),
+                    PartitionTarget::Auto,
+                    "boot.img.lz4",
+                    Cursor::new(&[0xFFu8; 64][..]),
+                ),
+                (
+                    PartitionTarget::Name("BOOT".to_string()),
                     "boot.img",
                     Cursor::new(&b"BOOT"[..]),
                 ),
@@ -828,11 +854,11 @@ fn test_prepare_inspects_super_images() {
             .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
             .partitions([
                 (
-                    Some("SUPER".to_string()),
+                    PartitionTarget::Name("SUPER".to_string()),
                     "a.img",
                     Cursor::new(&super_img[..]),
                 ),
-                (Some("7".to_string()), "b.img", Cursor::new(&super_img[..])),
+                (PartitionTarget::Id(7), "b.img", Cursor::new(&super_img[..])),
             ])
             .prepare(),
     )
@@ -852,7 +878,7 @@ fn test_prepare_inspects_super_images() {
         FlashRequest::new()
             .packages([("AP.tar", Cursor::new(tar_bytes.as_slice()))])
             .partitions([(
-                Some("SUPER".to_string()),
+                PartitionTarget::Name("SUPER".to_string()),
                 "override.img",
                 Cursor::new(&override_img[..]),
             )])
@@ -880,7 +906,7 @@ fn test_super_used_size_inspects_partition_id_targets() {
     futures::executor::block_on(async {
         let mut prepared = FlashRequest::new()
             .partitions([(
-                Some(super_id.to_string()),
+                PartitionTarget::Id(super_id),
                 "super.img",
                 Cursor::new(&super_img[..]),
             )])
@@ -909,7 +935,7 @@ fn test_prepared_flash_flashes_userdata() {
     let (userdata_lz4, _) = lz4_compress(b"DATA");
     let lz4_tar = build_tar(&[("AP/userdata.img.lz4", &userdata_lz4)]);
 
-    type Partitions<'a> = Vec<(Option<String>, &'a str, Cursor<&'a [u8]>)>;
+    type Partitions<'a> = Vec<(PartitionTarget, &'a str, Cursor<&'a [u8]>)>;
     let flashes_userdata = |tar: &[u8], partitions: Partitions, skip: &[&str]| {
         futures::executor::block_on(
             FlashRequest::new()
@@ -938,23 +964,31 @@ fn test_prepared_flash_flashes_userdata() {
     assert!(!flashes_userdata(&boot_tar, vec![], &[]));
     assert!(flashes_userdata(
         &boot_tar,
-        vec![(None, "userdata.img", data())],
+        vec![(PartitionTarget::Auto, "userdata.img", data())],
         &[]
     ));
     assert!(flashes_userdata(
         &boot_tar,
-        vec![(Some("USERDATA".to_string()), "data.img", data())],
+        vec![(
+            PartitionTarget::Name("USERDATA".to_string()),
+            "data.img",
+            data()
+        )],
         &[]
     ));
     assert!(!flashes_userdata(
         &boot_tar,
-        vec![(Some("USERDATA".to_string()), "data.img", data())],
+        vec![(
+            PartitionTarget::Name("USERDATA".to_string()),
+            "data.img",
+            data()
+        )],
         &["userdata"]
     ));
     // Partition IDs cannot be resolved without a PIT
     assert!(!flashes_userdata(
         &boot_tar,
-        vec![(Some("42".to_string()), "userdata.img", data())],
+        vec![(PartitionTarget::Id(42), "userdata.img", data())],
         &[]
     ));
 }
@@ -995,7 +1029,7 @@ fn test_resolve_last_writer_wins() {
         let mut prepared = FlashRequest::new()
             .packages(packages())
             .partitions([(
-                Some(boot_name.clone()),
+                PartitionTarget::Name(boot_name.clone()),
                 "my_boot.img",
                 Cursor::new(&b"MINE"[..]),
             )])

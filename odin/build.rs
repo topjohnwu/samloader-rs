@@ -30,16 +30,9 @@ fn has_feature(name: &str) -> bool {
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
 
-    // `PROFILE` is "debug" for the dev profile and any profile inheriting from it.
-    // Cargo discourages it in favor of e.g. `CARGO_CFG_DEBUG_ASSERTIONS`, but
-    // the mock backend is intentionally tied to the profile, not its settings.
-    let debug_build = env::var("PROFILE").is_ok_and(|p| p == "debug");
-
     // Any backend that communicates with real hardware (i.e. not the mock backend).
     cfg_alias(
         "real_backend",
         has_feature("nusb") || has_feature("rusb") || has_feature("serialport"),
     );
-    // The mock backend is always available in debug builds.
-    cfg_alias("mock_backend", has_feature("mock") || debug_build);
 }

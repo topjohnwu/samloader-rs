@@ -16,6 +16,7 @@
 
 use super::lp;
 use super::lz4::{self, Lz4FrameHeader};
+use crate::PartitionTarget;
 use futures::StreamExt;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, Cursor};
 use futures::stream::{self, Stream};
@@ -66,8 +67,8 @@ impl ImageSource {
 pub(crate) struct FirmwareReaders<P, I> {
     /// TAR packages as `(name, reader)`.
     pub(crate) packages: Vec<(String, P)>,
-    /// Standalone partition images as `(target_partition, filename, reader)`.
-    pub(crate) partitions: Vec<(Option<String>, String, I)>,
+    /// Standalone partition images as `(target, filename, reader)`.
+    pub(crate) partitions: Vec<(PartitionTarget, String, I)>,
 }
 
 impl<P, I> Default for FirmwareReaders<P, I> {
@@ -337,7 +338,7 @@ mod tests {
             };
             let mut readers: FirmwareReaders<Cursor<&[u8]>, _> = FirmwareReaders {
                 packages: Vec::new(),
-                partitions: vec![(None, "test.img.lz4".to_string(), cursor)],
+                partitions: vec![(PartitionTarget::Auto, "test.img.lz4".to_string(), cursor)],
             };
 
             // 1. Read a partial prefix and drop the stream (like reading super metadata)

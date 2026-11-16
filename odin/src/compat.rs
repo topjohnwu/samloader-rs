@@ -14,26 +14,40 @@
 
 //! Helpers that abstract over differences between native and WASM targets.
 
+mod sealed {
+    pub trait SendSealed {}
+    #[cfg(not(target_arch = "wasm32"))]
+    impl<T: ?Sized + Send> SendSealed for T {}
+    #[cfg(target_arch = "wasm32")]
+    impl<T: ?Sized> SendSealed for T {}
+
+    pub trait SyncSealed {}
+    #[cfg(not(target_arch = "wasm32"))]
+    impl<T: ?Sized + Sync> SyncSealed for T {}
+    #[cfg(target_arch = "wasm32")]
+    impl<T: ?Sized> SyncSealed for T {}
+}
+
 /// Helper trait representing `Send` on non-WASM targets and unbounded on WASM.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSend: Send {}
+pub trait MaybeSend: sealed::SendSealed + Send {}
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: Send> MaybeSend for T {}
+impl<T: ?Sized + Send> MaybeSend for T {}
 
 /// Helper trait representing `Send` on non-WASM targets and unbounded on WASM.
 #[cfg(target_arch = "wasm32")]
-pub trait MaybeSend {}
+pub trait MaybeSend: sealed::SendSealed {}
 #[cfg(target_arch = "wasm32")]
-impl<T> MaybeSend for T {}
+impl<T: ?Sized> MaybeSend for T {}
 
 /// Helper trait representing `Sync` on non-WASM targets and unbounded on WASM.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSync: Sync {}
+pub trait MaybeSync: sealed::SyncSealed + Sync {}
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: Sync> MaybeSync for T {}
+impl<T: ?Sized + Sync> MaybeSync for T {}
 
 /// Helper trait representing `Sync` on non-WASM targets and unbounded on WASM.
 #[cfg(target_arch = "wasm32")]
-pub trait MaybeSync {}
+pub trait MaybeSync: sealed::SyncSealed {}
 #[cfg(target_arch = "wasm32")]
-impl<T> MaybeSync for T {}
+impl<T: ?Sized> MaybeSync for T {}

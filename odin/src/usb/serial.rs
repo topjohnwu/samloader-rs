@@ -28,7 +28,7 @@ fn io_error(e: std::io::Error) -> TransportError {
 }
 
 /// Serial VCOM communication backend using virtual serial ports.
-pub struct SerialBackend {
+pub(crate) struct SerialBackend {
     port: Box<dyn serialport::SerialPort>,
     product: Option<String>,
 }

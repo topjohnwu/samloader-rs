@@ -19,7 +19,8 @@
 #[cfg(all(target_arch = "wasm32", feature = "rusb"))]
 compile_error!("Feature 'rusb' is not supported when building for WebAssembly!");
 
-mod compat;
+#[doc(hidden)]
+pub mod compat;
 mod device_info;
 mod error;
 mod firmware;
@@ -33,46 +34,24 @@ mod usb;
 #[cfg(test)]
 mod test_util;
 
-pub use compat::{MaybeSend, MaybeSync};
 pub use device_info::{DeviceInfo, SessionDeviceInfo};
 pub use error::{FlashError, LokeError, OdinError, SendPartitionError, TransportError};
 pub use firmware::verify_md5_footer;
-pub use flash::{FlashRequest, PreparedFlash};
+pub use flash::{FlashRequest, PartitionTarget, PreparedFlash};
 pub use modem::{DownloadModeReboot, reboot_download};
 pub use progress::{FlashEvent, FlashProgress, clear_progress, set_progress};
 pub use session::{OdinConnection, OdinSession, RebootMode, SalesCode};
-pub use usb::{
-    DeviceMode, UsbBackend, UsbBackendOption, UsbTransfer, create_backend, detect_device,
-};
+pub use usb::{DeviceMode, UsbBackendOption, UsbTransfer, create_backend, detect_device};
 
 #[cfg(target_arch = "wasm32")]
 pub use modem::request_reboot_device;
 #[cfg(target_arch = "wasm32")]
 pub use usb::request_device;
 
-#[cfg(feature = "nusb")]
-pub use usb::NusbBackend;
-
-#[cfg(feature = "rusb")]
-pub use usb::RusbBackend;
-
-#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
-pub use usb::SerialBackend;
-
-#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
-pub use usb::WebSerialBackend;
-
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
+pub use binrw;
 pub use futures;
-#[cfg(feature = "nusb")]
-pub use nusb;
-#[cfg(feature = "rusb")]
-pub use rusb;
 pub use samloader_pit;
-#[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
-pub use serialport;
-#[cfg(all(feature = "serialport", target_arch = "wasm32"))]
-pub use web_sys;
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

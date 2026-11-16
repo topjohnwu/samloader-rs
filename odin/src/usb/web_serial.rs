@@ -161,7 +161,7 @@ pub(crate) async fn request_port(filters: &[(u16, Option<u16>)]) -> Result<(), T
 /// Browsers only expose ports the user has granted access to, so a port must
 /// first be paired with [`request_device`](crate::request_device) or
 /// [`request_reboot_device`](crate::request_reboot_device).
-pub struct WebSerialBackend {
+pub(crate) struct WebSerialBackend {
     port: SerialPort,
     /// The reader locking the readable stream, acquired on first read.
     reader: Option<ReadableStreamDefaultReader>,

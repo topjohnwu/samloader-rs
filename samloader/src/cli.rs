@@ -18,7 +18,7 @@
 
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
-use samloader_odin::{RebootMode, UsbBackendOption};
+use samloader_odin::{PartitionTarget, RebootMode, UsbBackendOption};
 
 // On Windows, the default USB backend is set to VCOM rather than libusb/nusb.
 // This is because libusb/nusb requires replacing the standard device driver
@@ -291,15 +291,24 @@ impl FlashArgs {
             .map(String::as_str)
     }
 
-    /// The partition images to flash with their partition names, if given.
-    pub(crate) fn partitions(&self) -> impl Iterator<Item = (Option<String>, &str)> {
+    /// The partition images to flash with their resolved target, if given.
+    pub(crate) fn partitions(&self) -> impl Iterator<Item = (PartitionTarget, &str)> {
         let explicit = self
             .partition
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|[name, file]| (Some(name.clone()), file.as_str()));
-        let matched = self.file.iter().map(|file| (None, file.as_str()));
+            .map(|[part, file]| {
+                let target = match part.parse::<u32>() {
+                    Ok(id) => PartitionTarget::Id(id),
+                    Err(_) => PartitionTarget::Name(part.clone()),
+                };
+                (target, file.as_str())
+            });
+        let matched = self
+            .file
+            .iter()
+            .map(|file| (PartitionTarget::Auto, file.as_str()));
         explicit.chain(matched)
     }
 }

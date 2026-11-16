@@ -15,7 +15,9 @@
 
 use crate::cli::{DumpPitArgs, OdinArgs, PrintPitArgs};
 use crate::progress;
-use samloader_odin::{OdinSession, UsbBackendOption, futures::executor::block_on};
+use samloader_odin::{
+    OdinConnection, UsbBackendOption, create_backend, futures::executor::block_on,
+};
 use samloader_pit::PitData;
 use std::error::Error;
 use std::fs::File;
@@ -83,7 +85,8 @@ fn with_device_pit(
     progress::init(verbose);
 
     block_on(async {
-        let mut session = OdinSession::connect(usb_backend, odin.wait).await?;
+        let transport = create_backend(usb_backend, odin.wait).await?;
+        let mut session = OdinConnection::open(transport).begin_session().await?;
 
         println!("Downloading device's PIT file");
         let handled = match session.receive_pit_info().await {

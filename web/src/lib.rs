@@ -22,9 +22,9 @@ mod reader;
 
 use futures::io::AsyncReadExt;
 use samloader_odin::{
-    DeviceMode, DownloadModeReboot, FlashRequest, OdinConnection, OdinSession, PreparedFlash,
-    RebootMode, UsbBackendOption, reboot_download, request_device, request_reboot_device,
-    verify_md5_footer,
+    DeviceMode, DownloadModeReboot, FlashRequest, OdinConnection, PartitionTarget, PreparedFlash,
+    RebootMode, UsbBackendOption, create_backend, reboot_download, request_device,
+    request_reboot_device, verify_md5_footer,
 };
 use samloader_pit::PitData;
 use wasm_bindgen::prelude::*;
@@ -82,11 +82,14 @@ pub fn version() -> String {
 }
 
 fn backend_label(backend: UsbBackendOption) -> &'static str {
-    match backend.to_str() {
-        "nusb" => "WebUSB (nusb)",
-        "vcom" => "WebSerial (vcom)",
-        "mock" => "Mock Device (Debug)",
-        other => other,
+    match backend {
+        #[cfg(feature = "nusb")]
+        UsbBackendOption::Nusb => "WebUSB (nusb)",
+        #[cfg(feature = "serialport")]
+        UsbBackendOption::Vcom => "WebSerial (vcom)",
+        #[cfg(feature = "mock")]
+        UsbBackendOption::Mock => "Mock Device (Debug)",
+        other => other.to_str(),
     }
 }
 
@@ -127,9 +130,8 @@ pub async fn detect_download_device(
     wait: bool,
 ) -> Result<JsValue, JsValue> {
     let backend = parse_backend(backend_str.as_deref())?;
-    let mut connection = OdinConnection::open(backend, wait)
-        .await
-        .map_err(to_js_err)?;
+    let transport = create_backend(backend, wait).await.map_err(to_js_err)?;
+    let mut connection = OdinConnection::open(transport);
 
     let info = connection.query_device_info().await.ok();
     let fields = js_sys::Array::new();
@@ -166,7 +168,9 @@ pub async fn reboot_from_odin(
     let backend = parse_backend(backend_str.as_deref())?;
     let mode = parse_reboot_mode(&reboot_mode);
 
-    let mut session = OdinSession::connect(backend, wait)
+    let transport = create_backend(backend, wait).await.map_err(to_js_err)?;
+    let mut session = OdinConnection::open(transport)
+        .begin_session()
         .await
         .map_err(to_js_err)?;
     session.finish(mode).await.map_err(to_js_err)
@@ -184,7 +188,9 @@ pub async fn print_pit(
     let backend = parse_backend(backend_str.as_deref())?;
     let mode = parse_reboot_mode(&reboot_mode);
 
-    let mut session = OdinSession::connect(backend, wait)
+    let transport = create_backend(backend, wait).await.map_err(to_js_err)?;
+    let mut session = OdinConnection::open(transport)
+        .begin_session()
         .await
         .map_err(to_js_err)?;
 
@@ -288,7 +294,9 @@ impl FlashJob {
     /// Connects to a Samsung Download Mode device and executes the flash, consuming the job.
     pub async fn execute(self, backend_str: Option<String>, wait: bool) -> Result<(), JsValue> {
         let backend = parse_backend(backend_str.as_deref())?;
-        let mut session = OdinSession::connect(backend, wait)
+        let transport = create_backend(backend, wait).await.map_err(to_js_err)?;
+        let mut session = OdinConnection::open(transport)
+            .begin_session()
             .await
             .map_err(to_js_err)?;
         self.prepared.execute(&mut session).await.map_err(to_js_err)
@@ -329,7 +337,7 @@ pub async fn prepare_flash(
         pit_bytes = Some(bytes);
     }
 
-    let mut partitions_vec: Vec<(Option<String>, String, JsReader)> = Vec::new();
+    let mut partitions_vec: Vec<(PartitionTarget, String, JsReader)> = Vec::new();
     if let Some(val) = get_present(&files, PARTITIONS_KEY)? {
         if !js_sys::Array::is_array(&val) {
             return Err(JsValue::from_str("\"partitions\" must be an array"));

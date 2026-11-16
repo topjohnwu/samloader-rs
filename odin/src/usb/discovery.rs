@@ -219,7 +219,7 @@ pub async fn request_device(usb_backend: UsbBackendOption) -> Result<(), Transpo
                 .collect();
             crate::usb::request_port(&filters).await
         }
-        #[cfg(mock_backend)]
+        #[cfg(feature = "mock")]
         UsbBackendOption::Mock => Ok(()),
     }
 }

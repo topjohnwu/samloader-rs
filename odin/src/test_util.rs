@@ -51,9 +51,10 @@ pub(crate) fn find_entry<'p>(pit_data: &'p PitData, name: &str) -> &'p PitEntry 
 
 /// Begins a session on a mock device.
 pub(crate) async fn mock_session(backend: MockBackend) -> OdinSession {
-    let mut connection = OdinConnection::new(Box::new(backend));
-    connection.init().await.unwrap();
-    connection.begin_session().await.unwrap()
+    OdinConnection::open(Box::new(backend))
+        .begin_session()
+        .await
+        .unwrap()
 }
 
 /// Builds a TAR archive containing `files` as `(path, content)`.

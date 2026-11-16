@@ -20,13 +20,13 @@ cargo xtask build-web
 cargo build-web
 ```
 
-To build with debug/dev profile instead (which automatically enables the mock backend):
+To build with debug/dev profile instead:
 
 ```bash
 cargo xtask build-web --dev
 ```
 
-Release builds omit the mock backend by default; to explicitly include it in a release build:
+The mock backend is omitted by default in all builds; to explicitly include it (e.g. for UI development without physical hardware):
 
 ```bash
 cargo xtask build-web -- --features mock
@@ -42,7 +42,7 @@ python3 -m http.server -d web 8000
 
 Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Brave, Opera).
 
-> **Note:** WebUSB and Web Serial are only exposed in [Secure Contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (`http://localhost`, `http://127.0.0.1`, or `https://`), and require a Chromium-based browser. When built with `--dev` or `--features mock`, you can also select the **Mock Device (Debug)** backend in the UI to test flashing workflows in any browser without physical hardware.
+> **Note:** WebUSB and Web Serial are only exposed in [Secure Contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (`http://localhost`, `http://127.0.0.1`, or `https://`), and require a Chromium-based browser. When built with `--features mock`, you can also select the **Mock Device (Debug)** backend in the UI to test flashing workflows in any browser without physical hardware.
 
 ## Deploying
 

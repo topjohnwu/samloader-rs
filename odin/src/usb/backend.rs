@@ -41,7 +41,7 @@ macro_rules! with_backend {
                 type $b = $crate::usb::VcomBackend;
                 $body
             }
-            #[cfg(mock_backend)]
+            #[cfg(feature = "mock")]
             $crate::usb::UsbBackendOption::Mock => {
                 type $b = $crate::usb::MockBackend;
                 $body
@@ -53,6 +53,7 @@ pub(crate) use with_backend;
 
 /// Supported USB backend options.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum UsbBackendOption {
     /// libusb (rusb) backend.
     #[cfg(feature = "rusb")]
@@ -64,8 +65,12 @@ pub enum UsbBackendOption {
     /// nusb backend.
     #[cfg(feature = "nusb")]
     Nusb,
-    /// Mock backend.
-    #[cfg(mock_backend)]
+    /// Simulated device backend for downstream development without physical
+    /// hardware.
+    ///
+    /// Only available when the `mock` feature is explicitly enabled, and not
+    /// intended for end-user flashing or as a configurable test double.
+    #[cfg(feature = "mock")]
     Mock,
 }
 
@@ -80,7 +85,7 @@ impl TryFrom<&str> for UsbBackendOption {
             "vcom" => Ok(UsbBackendOption::Vcom),
             #[cfg(feature = "nusb")]
             "nusb" => Ok(UsbBackendOption::Nusb),
-            #[cfg(mock_backend)]
+            #[cfg(feature = "mock")]
             "mock" => Ok(UsbBackendOption::Mock),
             _ => Err(TransportError::UnknownBackend(s.to_string())),
         }
@@ -104,7 +109,7 @@ impl UsbBackendOption {
         UsbBackendOption::Libusb,
         #[cfg(feature = "serialport")]
         UsbBackendOption::Vcom,
-        #[cfg(mock_backend)]
+        #[cfg(feature = "mock")]
         UsbBackendOption::Mock,
     ];
 
@@ -117,7 +122,7 @@ impl UsbBackendOption {
             UsbBackendOption::Vcom => "vcom",
             #[cfg(feature = "nusb")]
             UsbBackendOption::Nusb => "nusb",
-            #[cfg(mock_backend)]
+            #[cfg(feature = "mock")]
             UsbBackendOption::Mock => "mock",
         }
     }
@@ -129,7 +134,7 @@ impl std::fmt::Display for UsbBackendOption {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(real_backend, feature = "mock")))]
 mod tests {
     use super::*;
 

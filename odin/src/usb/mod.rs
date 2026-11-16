@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(not(any(real_backend, mock_backend)))]
+#[cfg(not(any(real_backend, feature = "mock", test)))]
 compile_error!("At least one USB backend must be enabled!");
 
 #[cfg_attr(not(real_backend), allow(unused_macros))]
@@ -36,29 +36,30 @@ mod transport;
 pub use backend::UsbBackendOption;
 pub(crate) use backend::with_backend;
 pub use discovery::DeviceMode;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", any(feature = "nusb", feature = "serialport")))]
 pub(crate) use discovery::VID_SAMSUNG;
 #[cfg(target_arch = "wasm32")]
 pub use discovery::request_device;
 pub use discovery::{create_backend, detect_device};
 #[cfg(any(feature = "nusb", feature = "rusb"))]
 pub(crate) use transport::USB_CLASS_CDC_DATA;
-pub use transport::{UsbBackend, UsbTransfer};
+pub(crate) use transport::UsbBackend;
+pub use transport::UsbTransfer;
 
 #[cfg(feature = "rusb")]
-pub use rusb::RusbBackend;
+pub(crate) use rusb::RusbBackend;
 
 #[cfg(feature = "rusb")]
 mod rusb;
 
 #[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
-pub use serial::SerialBackend;
+pub(crate) use serial::SerialBackend;
 
 #[cfg(all(feature = "serialport", not(target_arch = "wasm32")))]
 mod serial;
 
 #[cfg(all(feature = "serialport", target_arch = "wasm32"))]
-pub use web_serial::WebSerialBackend;
+pub(crate) use web_serial::WebSerialBackend;
 
 #[cfg(all(feature = "serialport", target_arch = "wasm32"))]
 pub(crate) use web_serial::request_port;
@@ -75,17 +76,16 @@ pub(crate) type VcomBackend = SerialBackend;
 pub(crate) type VcomBackend = WebSerialBackend;
 
 #[cfg(feature = "nusb")]
-pub use nusb::NusbBackend;
+pub(crate) use nusb::NusbBackend;
 
 #[cfg(feature = "nusb")]
 mod nusb;
 
-#[cfg(mock_backend)]
-#[allow(unused_imports)]
-pub use mock::{DeviceProfile, DeviceProfileBuilder, MockBackend, MockEvent};
+#[cfg(any(feature = "mock", test))]
+mod mock;
+
+#[cfg(any(feature = "mock", test))]
+pub(crate) use mock::MockBackend;
 
 #[cfg(test)]
-pub(crate) use mock::yield_now;
-
-#[cfg(mock_backend)]
-mod mock;
+pub(crate) use mock::{DeviceProfile, MockEvent, yield_now};

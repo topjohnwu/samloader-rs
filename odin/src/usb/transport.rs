@@ -60,7 +60,7 @@ pub trait UsbTransfer: MaybeSend {
 /// Trait representing a backend factory and device locator for USB or serial transports.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait UsbBackend: Sized + UsbTransfer {
+pub(crate) trait UsbBackend: Sized + UsbTransfer {
     /// The associated device type identifier.
     type UsbDevice: MaybeSend;
 

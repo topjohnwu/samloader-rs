@@ -168,7 +168,7 @@ fn transfer_error(e: ::nusb::transfer::TransferError) -> TransportError {
 }
 
 /// USB communication backend using `nusb`.
-pub struct NusbBackend {
+pub(crate) struct NusbBackend {
     ep_in: ::nusb::Endpoint<::nusb::transfer::Bulk, ::nusb::transfer::In>,
     ep_out: ::nusb::Endpoint<::nusb::transfer::Bulk, ::nusb::transfer::Out>,
     product: Option<String>,

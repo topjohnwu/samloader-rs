@@ -19,7 +19,7 @@ use crate::device_info::{DeviceInfo, SessionDeviceInfo};
 use crate::error::{LokeError, OdinError, SendPartitionError, TransportError};
 use crate::progress::{self, FlashEvent};
 use crate::protocol::{CMD_PIT, Command, DataChunk, Response, STREAMING_CHUNK_ACK};
-use crate::usb::{UsbBackendOption, UsbTransfer, create_backend};
+use crate::usb::UsbTransfer;
 use futures::StreamExt;
 use futures::stream::Stream;
 use samloader_pit::PitEntry;
@@ -27,9 +27,10 @@ use std::time::Duration;
 
 /// Manages the initial connection to a Samsung device in Download Mode.
 ///
-/// At this stage, only the handshake ([`init`](Self::init)) and the DVIF query
-/// ([`query_device_info`](Self::query_device_info)) are available. Other commands
-/// require transitioning to an [`OdinSession`] via [`begin_session`](Self::begin_session).
+/// At this stage, only the DVIF query
+/// ([`query_device_info`](Self::query_device_info)) is available. Performing the
+/// Odin handshake and running other commands require transitioning to an
+/// [`OdinSession`] via [`begin_session`](Self::begin_session).
 pub struct OdinConnection {
     usb: Box<dyn UsbTransfer>,
 }
@@ -54,19 +55,54 @@ const SESSION_SETUP_DELAY: Duration = Duration::from_secs(3);
 const SESSION_SETUP_DELAY: Duration = Duration::ZERO;
 
 impl OdinConnection {
-    /// Opens a device in Download Mode with the selected backend. If `wait` is
-    /// set, waits until such a device is connected.
-    pub async fn open(usb_backend: UsbBackendOption, wait: bool) -> Result<Self, OdinError> {
-        Ok(Self::new(create_backend(usb_backend, wait).await?))
-    }
-
-    /// Creates a new `OdinConnection` instance with a given transport.
-    pub fn new(usb: Box<dyn UsbTransfer>) -> Self {
+    /// Creates an `OdinConnection` over the given transport.
+    pub fn open(usb: Box<dyn UsbTransfer>) -> Self {
         Self { usb }
     }
 
-    /// Resets the connection transport and performs the "ODIN" / "LOKE" protocol handshake.
-    pub async fn init(&mut self) -> Result<(), OdinError> {
+    /// Sends a raw string message over the transport connection.
+    async fn send_string(&mut self, s: &str, timeout: Duration) -> Result<(), TransportError> {
+        progress::println_verbose(|| format!("Sending string: {:?}", s));
+        self.usb.send(s.as_bytes(), timeout).await
+    }
+
+    /// Receives a raw string message from the transport connection.
+    async fn receive_string(&mut self, timeout: Duration) -> Result<String, TransportError> {
+        let mut buffer = [0u8; 1024];
+        let received_size = self.usb.receive(&mut buffer, timeout).await?;
+
+        let data = &buffer[..received_size];
+        progress::println_verbose(|| {
+            format!("Received string data ({} bytes): {:?}", received_size, data)
+        });
+        Ok(String::from_utf8_lossy(data).into_owned())
+    }
+
+    /// Queries the connected device for hardware and software diagnostics using the pre-handshake DVIF protocol.
+    ///
+    /// Can be called prior to [`begin_session`](Self::begin_session) to inspect the device without opening an Odin session.
+    pub async fn query_device_info(&mut self) -> Result<DeviceInfo, OdinError> {
+        progress::println_verbose(|| "Querying device info via DVIF...");
+        self.usb
+            .send(b"DVIF", HANDSHAKE_TIMEOUT)
+            .await
+            .map_err(OdinError::SendCommandFailed)?;
+
+        let mut buffer = [0u8; 1024];
+        let received_size = match self.usb.receive(&mut buffer, HANDSHAKE_TIMEOUT).await {
+            Ok(size) if size > 0 => size,
+            _ => return Err(OdinError::DeviceInfoUnavailable),
+        };
+
+        let s = String::from_utf8_lossy(&buffer[..received_size]);
+        progress::println_verbose(|| format!("DVIF response ({} bytes): {}", received_size, s));
+        DeviceInfo::parse(&s)
+    }
+
+    /// Resets the transport, performs the "ODIN" / "LOKE" protocol handshake,
+    /// and begins an active flashing session, negotiating features such as
+    /// packet size and LZ4 support.
+    pub async fn begin_session(mut self) -> Result<OdinSession, OdinError> {
         progress::on_event(FlashEvent::HandshakeStart);
 
         self.usb.reset().await;
@@ -92,105 +128,18 @@ impl OdinConnection {
             response = "LOKE".to_string();
         }
 
-        if response == "LOKE" {
-            progress::on_event(FlashEvent::HandshakeEnd);
-            Ok(())
-        } else {
-            Err(OdinError::HandshakeMismatch {
+        if response != "LOKE" {
+            return Err(OdinError::HandshakeMismatch {
                 expected: "LOKE".to_string(),
                 received: response,
-            })
+            });
         }
-    }
+        progress::on_event(FlashEvent::HandshakeEnd);
 
-    /// Sends a raw string message over the transport connection.
-    async fn send_string(&mut self, s: &str, timeout: Duration) -> Result<(), TransportError> {
-        progress::println_verbose(|| format!("Sending string: {:?}", s));
-        self.usb.send(s.as_bytes(), timeout).await
-    }
-
-    /// Receives a raw string message from the transport connection.
-    async fn receive_string(&mut self, timeout: Duration) -> Result<String, TransportError> {
-        let mut buffer = [0u8; 1024];
-        let received_size = self.usb.receive(&mut buffer, timeout).await?;
-
-        let data = &buffer[..received_size];
-        progress::println_verbose(|| {
-            format!("Received string data ({} bytes): {:?}", received_size, data)
-        });
-        Ok(String::from_utf8_lossy(data).into_owned())
-    }
-
-    /// Queries the connected device for hardware and software diagnostics using the pre-handshake DVIF protocol.
-    ///
-    /// Can be called prior to `init()` to inspect the device without opening an Odin session.
-    pub async fn query_device_info(&mut self) -> Result<DeviceInfo, OdinError> {
-        progress::println_verbose(|| "Querying device info via DVIF...");
-        self.usb
-            .send(b"DVIF", HANDSHAKE_TIMEOUT)
-            .await
-            .map_err(OdinError::SendCommandFailed)?;
-
-        let mut buffer = [0u8; 1024];
-        let received_size = match self.usb.receive(&mut buffer, HANDSHAKE_TIMEOUT).await {
-            Ok(size) if size > 0 => size,
-            _ => return Err(OdinError::DeviceInfoUnavailable),
-        };
-
-        let s = String::from_utf8_lossy(&buffer[..received_size]);
-        progress::println_verbose(|| format!("DVIF response ({} bytes): {}", received_size, s));
-        DeviceInfo::parse(&s)
-    }
-
-    /// Begins an active flashing session, negotiating features such as packet size and LZ4 support,
-    /// transitioning the connection into an [`OdinSession`].
-    pub async fn begin_session(self) -> Result<OdinSession, OdinError> {
-        OdinSession::begin(self).await
-    }
-}
-
-/// Specifies the device reboot behavior after a session ends.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum RebootMode {
-    /// Do not reboot the device; end the session and remain in download mode.
-    #[default]
-    None,
-    /// Reboot the device normally out of Download Mode.
-    Normal,
-    /// Reboot the device back into Download Mode.
-    Download,
-}
-
-/// An active flashing session coordinating Samsung Odin/Loke command transfers.
-pub struct OdinSession {
-    connection: OdinConnection,
-
-    packet_size: usize,
-    slice_timeout: Duration,
-    lz4_supported: bool,
-    bootloader_protocol_version: u32,
-}
-
-impl OdinSession {
-    /// Maximum size of a slice, which the bootloader stages in memory before
-    /// committing it (30 MiB, 0x1E00000, as in odin4). For LZ4-compressed
-    /// slices, this limits the decompressed size.
-    pub const MAX_SLICE_SIZE: usize = 30 * 1024 * 1024;
-
-    /// Opens a device in Download Mode with the selected backend, performs the
-    /// handshake and begins a session. If `wait` is set, waits until such a
-    /// device is connected.
-    pub async fn connect(usb_backend: UsbBackendOption, wait: bool) -> Result<Self, OdinError> {
-        let mut connection = OdinConnection::open(usb_backend, wait).await?;
-        connection.init().await?;
-        connection.begin_session().await
-    }
-
-    async fn begin(connection: OdinConnection) -> Result<Self, OdinError> {
         progress::on_event(FlashEvent::SessionStart);
 
-        let mut session = Self {
-            connection,
+        let mut session = OdinSession {
+            connection: self,
             packet_size: PACKET_SIZE_DEFAULT,
             slice_timeout: SLICE_TIMEOUT_DEFAULT,
             lz4_supported: false,
@@ -221,6 +170,35 @@ impl OdinSession {
         progress::on_event(FlashEvent::SessionReady);
         Ok(session)
     }
+}
+
+/// Specifies the device reboot behavior after a session ends.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum RebootMode {
+    /// Do not reboot the device; end the session and remain in download mode.
+    #[default]
+    None,
+    /// Reboot the device normally out of Download Mode.
+    Normal,
+    /// Reboot the device back into Download Mode.
+    Download,
+}
+
+/// An active flashing session coordinating Samsung Odin/Loke command transfers.
+pub struct OdinSession {
+    connection: OdinConnection,
+
+    packet_size: usize,
+    slice_timeout: Duration,
+    lz4_supported: bool,
+    bootloader_protocol_version: u32,
+}
+
+impl OdinSession {
+    /// Maximum size of a slice, which the bootloader stages in memory before
+    /// committing it (30 MiB, 0x1E00000, as in odin4). For LZ4-compressed
+    /// slices, this limits the decompressed size.
+    pub const MAX_SLICE_SIZE: usize = 30 * 1024 * 1024;
 
     /// Ends the active flashing session on the device.
     pub async fn end_session(&mut self) -> Result<(), OdinError> {
@@ -993,7 +971,7 @@ mod tests {
                 });
 
                 let mut session = OdinSession {
-                    connection: OdinConnection::new(spy),
+                    connection: OdinConnection::open(spy),
                     packet_size: 0x20000,
                     slice_timeout: COMMAND_TIMEOUT,
                     lz4_supported: false,
@@ -1056,7 +1034,7 @@ mod tests {
                 product: None,
             });
 
-            let conn = OdinConnection::new(spy);
+            let conn = OdinConnection::open(spy);
             let mut session = OdinSession {
                 connection: conn,
                 packet_size: 0x20000,
@@ -1074,26 +1052,36 @@ mod tests {
         });
     }
 
-    /// Runs the handshake against a transport that returns `reads` in order.
-    fn handshake_with_reads(reads: &[&[u8]]) -> Result<(), OdinError> {
+    /// Runs `begin_session` against a transport that returns `reads` in order
+    /// during the handshake, optionally followed by a session-begin ACK.
+    fn begin_session_with_reads(
+        handshake_reads: &[&[u8]],
+        include_session_init: bool,
+    ) -> Result<OdinSession, OdinError> {
         futures::executor::block_on(async {
             let spy_inner = std::sync::Arc::new(std::sync::Mutex::new(SpyTransferInner::default()));
-            spy_inner
-                .lock()
-                .unwrap()
-                .read_queue
-                .extend(reads.iter().map(|r| r.to_vec()));
+            {
+                let mut inner = spy_inner.lock().unwrap();
+                inner
+                    .read_queue
+                    .extend(handshake_reads.iter().map(|r| r.to_vec()));
+                if include_session_init {
+                    let mut session_ack = Vec::with_capacity(8);
+                    session_ack.extend_from_slice(&CMD_SESSION_INIT.to_le_bytes());
+                    session_ack.extend_from_slice(&0u32.to_le_bytes());
+                    inner.read_queue.push_back(session_ack);
+                }
+            }
 
-            let spy = Box::new(SpyTransfer {
+            let conn = OdinConnection::open(Box::new(SpyTransfer {
                 inner: spy_inner.clone(),
                 product: None,
-            });
-
-            let mut conn = OdinConnection::new(spy);
-            let result = conn.init().await;
+            }));
+            let result = conn.begin_session().await;
 
             let inner = spy_inner.lock().unwrap();
-            assert_eq!(inner.sent_data.len(), 1);
+            let expected_sends = if result.is_ok() { 2 } else { 1 };
+            assert_eq!(inner.sent_data.len(), expected_sends);
             assert_eq!(inner.sent_data[0], b"ODIN");
             result
         })
@@ -1101,18 +1089,18 @@ mod tests {
 
     #[test]
     fn test_handshake_recovers_from_queued_fail_response() {
-        assert!(handshake_with_reads(&[b"FAILunknown command", b"LOKE"]).is_ok());
+        assert!(begin_session_with_reads(&[b"FAILunknown command", b"LOKE"], true).is_ok());
     }
 
     #[test]
     fn test_handshake_recovers_from_merged_fail_response() {
-        assert!(handshake_with_reads(&[b"FAILunknown commandLOKE"]).is_ok());
+        assert!(begin_session_with_reads(&[b"FAILunknown commandLOKE"], true).is_ok());
     }
 
     #[test]
     fn test_handshake_rejects_fail_without_loke() {
         assert!(matches!(
-            handshake_with_reads(&[b"FAILunknown command"]),
+            begin_session_with_reads(&[b"FAILunknown command"], false),
             Err(OdinError::HandshakeMismatch { .. })
         ));
     }

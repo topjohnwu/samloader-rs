@@ -131,18 +131,7 @@ pub enum TransportError {
     NormalModeDeviceNotFound,
 
     /// Failed to access the USB device.
-    #[cfg(target_os = "linux")]
-    #[error(
-        "Failed to access device. Error: {0}\n\n\
-             On Linux, this is usually because your user lacks write permission to the USB device node.\n\
-             To automatically fix this, please run the builtin fix command as root:\n\n\
-             \tsudo samloader fix-usb"
-    )]
-    DeviceAccess(Box<dyn std::error::Error + Send + Sync>),
-
-    /// Failed to access the USB device.
-    #[cfg(not(target_os = "linux"))]
-    #[error("Failed to access device. Error: {0}")]
+    #[error("Failed to access device: {0}")]
     DeviceAccess(Box<dyn std::error::Error + Send + Sync>),
 
     /// Failed to retrieve the configuration descriptor from the USB device.
@@ -189,6 +178,7 @@ pub enum TransportError {
 
 impl TransportError {
     /// Wraps an error from the backend library.
+    #[cfg(real_backend)]
     pub(crate) fn backend(e: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(e))
     }
@@ -316,7 +306,7 @@ pub enum FlashError {
     VbmetaRewriteFailed(String, #[source] std::io::Error),
 
     /// The file payload is larger than the partition size defined in PIT.
-    #[error("{0} partition is too small for given file. Use --skip-size-check to flash anyways.")]
+    #[error("Partition \"{0}\" is too small for the given image")]
     PartitionTooSmall(String),
 
     /// Dynamic partition pre-flight check failed due to insufficient space in Super partition or corrupt metadata.

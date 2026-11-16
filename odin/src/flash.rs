@@ -27,6 +27,18 @@ use samloader_pit::{PitData, PitEntry};
 use std::collections::HashSet;
 use std::io::SeekFrom;
 
+/// Identifies which partition on the device a standalone image should be flashed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionTarget {
+    /// Match the PIT entry by the image's normalized filename (without directory
+    /// or `.lz4` suffix).
+    Auto,
+    /// Match the PIT entry with this partition name (case-insensitive).
+    Name(String),
+    /// Match the PIT entry with this numeric partition ID.
+    Id(u32),
+}
+
 /// Options carried from a [`FlashRequest`] into execution.
 #[derive(Default)]
 struct FlashOptions {
@@ -70,14 +82,16 @@ impl FlashOptions {
     /// Warns about options that only apply when partitions are flashed.
     fn warn_unused(&self) {
         if !self.skip.is_empty() {
-            progress::println("Warning: --skip ignored when no partitions are flashed");
+            progress::println("Warning: skip targets ignored when no partitions are flashed");
         }
         if self.vbmeta_flags & avb::AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED != 0 {
-            progress::println("Warning: --disable-verity ignored when no partitions are flashed");
+            progress::println(
+                "Warning: disable-verity option ignored when no partitions are flashed",
+            );
         }
         if self.vbmeta_flags & avb::AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED != 0 {
             progress::println(
-                "Warning: --disable-verification ignored when no partitions are flashed",
+                "Warning: disable-verification option ignored when no partitions are flashed",
             );
         }
     }
@@ -161,10 +175,10 @@ impl<P, I> FlashRequest<P, I> {
         }
     }
 
-    /// Sets the list of individual partition inputs `(target_partition, filename, reader)` to flash.
+    /// Sets the list of individual partition inputs `(target, filename, reader)` to flash.
     pub fn partitions<S: Into<String>, R>(
         self,
-        partitions: impl IntoIterator<Item = (Option<String>, S, R)>,
+        partitions: impl IntoIterator<Item = (PartitionTarget, S, R)>,
     ) -> FlashRequest<P, R> {
         FlashRequest {
             options: self.options,
@@ -173,7 +187,7 @@ impl<P, I> FlashRequest<P, I> {
                 packages: self.readers.packages,
                 partitions: partitions
                     .into_iter()
-                    .map(|(part, name, reader)| (part, name.into(), reader))
+                    .map(|(target, name, reader)| (target, name.into(), reader))
                     .collect(),
             },
         }
@@ -276,14 +290,12 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
         }
 
         for index in 0..readers.partitions.len() {
-            let (part_name, filename, reader) = &mut readers.partitions[index];
+            let (part_target, filename, reader) = &mut readers.partitions[index];
             let (normalized_name, is_lz4) = normalize_basename(filename);
-            let target = match part_name {
-                None => Target::File(normalized_name),
-                Some(name) => match name.parse::<u32>() {
-                    Ok(id) => Target::PartitionId(id),
-                    Err(_) => Target::Partition(name.clone()),
-                },
+            let target = match part_target {
+                PartitionTarget::Auto => Target::File(normalized_name),
+                PartitionTarget::Name(name) => Target::Partition(name.clone()),
+                PartitionTarget::Id(id) => Target::PartitionId(*id),
             };
             let display_name = filename.clone();
             let size = reader
@@ -324,9 +336,9 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> FlashRe
 enum Target {
     /// Flash file name in the PIT, with any directory and `.lz4` suffix stripped.
     File(String),
-    /// Explicit partition name, e.g. `-p BOOT boot.img`.
+    /// Explicit partition name.
     Partition(String),
-    /// Explicit partition ID, e.g. `-p 12 boot.img`.
+    /// Explicit partition ID.
     PartitionId(u32),
 }
 
@@ -568,7 +580,7 @@ impl<P: AsyncRead + AsyncSeek + Unpin, I: AsyncRead + AsyncSeek + Unpin> Prepare
             if skipped_ids.contains(&pit_entry.partition_id) {
                 if report {
                     progress::println(&format!(
-                        "Skipping {} (excluded with --skip)",
+                        "Skipping {} (excluded by skip filter)",
                         pit_entry.partition_name.to_string_lossy()
                     ));
                 }

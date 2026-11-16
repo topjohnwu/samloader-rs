@@ -103,15 +103,6 @@ impl DeviceInfo {
         Ok(info)
     }
 
-    /// Formats the device information as a JSON string compatible with `odin4 -i`.
-    pub fn to_json(&self) -> String {
-        format!(
-            "{{\"modelName\":\"{}\",\"serialNumber\":\"{}\"}}",
-            self.model.as_deref().unwrap_or(""),
-            self.serial_number.as_deref().unwrap_or("")
-        )
-    }
-
     /// Returns the device information as display labels and values, in display
     /// order. Storage details are combined into a single "Storage" value.
     pub fn fields(&self) -> Vec<(&'static str, String)> {
@@ -259,10 +250,6 @@ mod tests {
         assert_eq!(info.sales_code.as_deref(), Some("TUR"));
         assert_eq!(info.bootloader_version.as_deref(), Some("F968BXXS7BZH3"));
         assert_eq!(info.temperature, Some(32));
-        assert_eq!(
-            info.to_json(),
-            "{\"modelName\":\"SM-F968B\",\"serialNumber\":\"C1A2B3C4\"}"
-        );
     }
 
     #[test]

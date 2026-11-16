@@ -18,7 +18,7 @@
 //! a device into Download Mode.
 
 use crate::error::TransportError;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", any(feature = "nusb", feature = "serialport")))]
 use crate::usb::VID_SAMSUNG;
 use crate::usb::{DeviceMode, UsbBackendOption};
 use std::time::Duration;
@@ -50,7 +50,7 @@ pub async fn request_reboot_device(usb_backend: UsbBackendOption) -> Result<(), 
         // skipped when opening a device in normal mode.
         #[cfg(feature = "serialport")]
         UsbBackendOption::Vcom => crate::usb::request_port(&[(VID_SAMSUNG, None)]).await,
-        #[cfg(mock_backend)]
+        #[cfg(feature = "mock")]
         UsbBackendOption::Mock => Ok(()),
     }
 }

@@ -34,6 +34,21 @@ macro_rules! print_error {
     };
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn has_device_access_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if matches!(
+            e.downcast_ref::<samloader_odin::TransportError>(),
+            Some(samloader_odin::TransportError::DeviceAccess(_))
+        ) {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
 fn main() {
     let Cli {
         verbose,
@@ -57,7 +72,41 @@ fn main() {
     if let Err(e) = result {
         if !e.is::<AlreadyReported>() {
             print_error!("{}", e);
+            #[cfg(target_os = "linux")]
+            if has_device_access_error(&*e) {
+                eprintln!(
+                    "\nOn Linux, this is usually because your user lacks write permission to the USB device node.\n\
+                     To automatically fix this, please run the builtin fix command as root:\n\n\
+                     \tsudo samloader fix-usb"
+                );
+            }
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use samloader_odin::{FlashError, OdinError, TransportError};
+    use std::error::Error;
+    use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn test_has_device_access_error_in_chain() {
+        let access =
+            || TransportError::DeviceAccess(Box::new(IoError::from(ErrorKind::PermissionDenied)));
+
+        let direct: Box<dyn Error> = Box::new(access());
+        assert!(has_device_access_error(&*direct));
+
+        let wrapped_odin: Box<dyn Error> = Box::new(OdinError::from(access()));
+        assert!(has_device_access_error(&*wrapped_odin));
+
+        let wrapped_flash: Box<dyn Error> = Box::new(FlashError::from(OdinError::from(access())));
+        assert!(has_device_access_error(&*wrapped_flash));
+
+        let timeout: Box<dyn Error> = Box::new(OdinError::from(TransportError::Timeout));
+        assert!(!has_device_access_error(&*timeout));
     }
 }

@@ -169,7 +169,7 @@ pub(crate) enum SliceCommit {
 }
 
 impl SliceCommit {
-    #[cfg(mock_backend)]
+    #[cfg(test)]
     pub(crate) fn partition_id(&self) -> u32 {
         match self {
             Self::Unified { partition_id, .. } => *partition_id,
@@ -177,7 +177,7 @@ impl SliceCommit {
         }
     }
 
-    #[cfg(mock_backend)]
+    #[cfg(test)]
     pub(crate) fn slice_size(&self) -> u32 {
         match self {
             Self::Unified { slice_size, .. } => *slice_size,
@@ -185,7 +185,7 @@ impl SliceCommit {
         }
     }
 
-    #[cfg(mock_backend)]
+    #[cfg(test)]
     pub(crate) fn is_end_of_file(&self) -> bool {
         match self {
             Self::Unified { is_end_of_file, .. } => *is_end_of_file != 0,

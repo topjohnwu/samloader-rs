@@ -24,12 +24,13 @@ use crate::protocol::{
 };
 use crate::usb::{UsbBackend, UsbTransfer};
 use binrw::BinRead;
-use samloader_pit::PitData;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -65,8 +66,9 @@ enum State {
 }
 
 /// A device-visible operation recorded by [`MockBackend`].
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MockEvent {
+pub(crate) enum MockEvent {
     /// USERDATA NAND erase.
     NandErase,
     /// PIT uploaded to the device.
@@ -96,62 +98,50 @@ pub enum MockEvent {
 
 /// Target hardware, partition table, and protocol characteristics of a simulated Samsung device.
 #[derive(Debug)]
-pub struct DeviceProfile {
+pub(crate) struct DeviceProfile {
     /// Device model string (e.g. `"SM-F968B"` or `"GT-I9305"`).
-    pub model: String,
-    /// Target CPU / platform identifier declared in the PIT header (e.g. `"SM8750"` or `"Mx-MDM"`).
-    pub cpu_bl_id: String,
+    pub(crate) model: String,
     /// Bootloader / PDA firmware build version string (e.g. `"F968BXXS7BZH3"` or `"I9305XXUEML8"`).
-    pub build_version: String,
+    pub(crate) build_version: String,
     /// Unique hardware serial number / UN string.
-    pub serial_number: String,
+    pub(crate) serial_number: String,
     /// Storage Card Identification (CID) register hex string.
-    pub storage_cid: String,
+    pub(crate) storage_cid: String,
     /// Storage medium declared capacity in gigabytes.
-    pub storage_capacity_gb: u32,
+    pub(crate) storage_capacity_gb: u32,
     /// Storage manufacturer / vendor name.
-    pub storage_vendor: String,
+    pub(crate) storage_vendor: String,
     /// Storage firmware revision.
-    pub storage_firmware_version: String,
+    pub(crate) storage_firmware_version: String,
     /// Storage hardware product name.
-    pub storage_product_name: String,
+    pub(crate) storage_product_name: String,
     /// Security provisioning status flag string.
-    pub provisioning_status: String,
+    pub(crate) provisioning_status: String,
     /// Default factory CSC / sales code.
-    pub default_sales_code: String,
+    pub(crate) default_sales_code: String,
     /// Thermal sensor reading in Celsius.
-    pub temperature_c: i32,
+    pub(crate) temperature_c: i32,
     /// USB device product string descriptor.
-    pub usb_product_name: Option<String>,
+    pub(crate) usb_product_name: Option<String>,
     /// Maximum supported Odin protocol version (2 for legacy, 3 for modern).
-    pub protocol_version: u32,
+    pub(crate) protocol_version: u32,
     /// Whether LZ4 compressed streaming is supported.
-    pub lz4_supported: bool,
+    pub(crate) lz4_supported: bool,
     /// Default packet transfer chunk size in bytes.
-    pub default_packet_size: usize,
-    /// Maximum allowed packet transfer chunk size in bytes.
-    pub max_packet_size: usize,
+    pub(crate) default_packet_size: usize,
     /// Available capacity on the dynamic `super` partition in bytes.
-    pub super_partition_free_space: u64,
+    pub(crate) super_partition_free_space: u64,
     /// Whether the pre-handshake `DVIF` diagnostic query is recognized.
-    pub supports_dvif: bool,
+    pub(crate) supports_dvif: bool,
     /// Whether in-session binary `DeviceInfo` (Opcode 0x69) is supported.
-    pub supports_device_info: bool,
+    pub(crate) supports_device_info: bool,
     /// Whether pre-flight dynamic partition sizing (Opcode 0x6a) is supported.
-    pub supports_dynamic_partition: bool,
+    pub(crate) supports_dynamic_partition: bool,
     /// Embedded default Partition Information Table (PIT) image.
-    pub default_pit: Vec<u8>,
+    pub(crate) default_pit: Vec<u8>,
 }
 
-#[allow(dead_code)]
 impl DeviceProfile {
-    /// Starts a builder initialized with the modern Galaxy Z TriFold (`SM-F968B`) profile.
-    pub fn builder() -> DeviceProfileBuilder {
-        DeviceProfileBuilder {
-            profile: Self::sm_f968b(),
-        }
-    }
-
     /// Profile for modern Samsung flagship devices based on Galaxy Z TriFold (`SM-F968B`).
     ///
     /// Extracted directly from `BL_F968BXXS7BZH3` (`abl_odin.efi`) and `Q7MQ_EUR_OPENX.pit`:
@@ -160,10 +150,9 @@ impl DeviceProfile {
     /// - Protocol: Version 3 with LZ4 compression and 1 MB chunks
     /// - Features: DVIF ASCII diagnostics, binary TLV DeviceInfo (0x69), Super size check (0x6a)
     /// - USB: Skips ZLP empty packets
-    pub fn sm_f968b() -> Self {
+    pub(crate) fn sm_f968b() -> Self {
         Self {
             model: "SM-F968B".to_string(),
-            cpu_bl_id: "SM8750".to_string(),
             build_version: "F968BXXS7BZH3".to_string(),
             serial_number: "C1A2B3C4".to_string(),
             storage_cid: "1501004b333230340000000000000000".to_string(),
@@ -178,7 +167,6 @@ impl DeviceProfile {
             protocol_version: 3,
             lz4_supported: true,
             default_packet_size: 0x20000,
-            max_packet_size: 0x100000,
             super_partition_free_space: 0x2_0000_0000, // 8 GB free in super
             supports_dvif: true,
             supports_device_info: true,
@@ -199,10 +187,10 @@ impl DeviceProfile {
     /// - Protocol: Version 2, uncompressed raw chunks only, 128 KB packets
     /// - Features: No DVIF, no Opcode 0x69, no Opcode 0x6a, requires `LegacyModem` layout for CP
     /// - USB: Reports `"Gadget Serial"` product descriptor (triggers ZLP empty sends)
-    pub fn gt_i9305() -> Self {
+    #[cfg(test)]
+    pub(crate) fn gt_i9305() -> Self {
         Self {
             model: "GT-I9305".to_string(),
-            cpu_bl_id: "Mx-MDM".to_string(),
             build_version: "I9305XXUEML8".to_string(),
             serial_number: "41290bc0".to_string(),
             storage_cid: "1501004d300000000000000000000000".to_string(),
@@ -217,7 +205,6 @@ impl DeviceProfile {
             protocol_version: 2,
             lz4_supported: false,
             default_packet_size: 0x20000,
-            max_packet_size: 0x20000,
             super_partition_free_space: 0,
             supports_dvif: false,
             supports_device_info: false,
@@ -231,7 +218,7 @@ impl DeviceProfile {
     }
 
     /// Formats the simulated pre-handshake DVIF diagnostic response string.
-    pub fn dvif_string(&self) -> String {
+    fn dvif_string(&self) -> String {
         format!(
             "@#MODEL={};UN={};CAPA={};VENDOR={};FWVER={};PRODUCT={};PROV={};SALES={};VER={};TMU_TEMP={};",
             self.model,
@@ -248,7 +235,7 @@ impl DeviceProfile {
     }
 
     /// Generates binary TLV device information encoded according to Opcode 0x69 specifications.
-    pub fn binary_device_info(&self) -> Vec<u8> {
+    fn binary_device_info(&self) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&0x12345678u32.to_le_bytes()); // magic
         data.extend_from_slice(&3u32.to_le_bytes()); // 3 entries
@@ -287,122 +274,12 @@ impl DeviceProfile {
     }
 }
 
-/// Fluent builder for constructing custom `DeviceProfile` instances.
-#[derive(Debug)]
-pub struct DeviceProfileBuilder {
-    profile: DeviceProfile,
-}
-
-#[allow(dead_code)]
-impl DeviceProfileBuilder {
-    /// Sets the device model string.
-    pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.profile.model = model.into();
-        self
-    }
-
-    /// Sets the target platform / CPU identifier.
-    pub fn cpu_bl_id(mut self, id: impl Into<String>) -> Self {
-        self.profile.cpu_bl_id = id.into();
-        self
-    }
-
-    /// Sets the firmware build version.
-    pub fn build_version(mut self, ver: impl Into<String>) -> Self {
-        self.profile.build_version = ver.into();
-        self
-    }
-
-    /// Sets the hardware serial number.
-    pub fn serial_number(mut self, sn: impl Into<String>) -> Self {
-        self.profile.serial_number = sn.into();
-        self
-    }
-
-    /// Sets the storage CID string.
-    pub fn storage_cid(mut self, cid: impl Into<String>) -> Self {
-        self.profile.storage_cid = cid.into();
-        self
-    }
-
-    /// Sets the declared storage capacity in gigabytes.
-    pub fn storage_capacity_gb(mut self, cap: u32) -> Self {
-        self.profile.storage_capacity_gb = cap;
-        self
-    }
-
-    /// Sets the default sales code.
-    pub fn default_sales_code(mut self, code: impl Into<String>) -> Self {
-        self.profile.default_sales_code = code.into();
-        self
-    }
-
-    /// Sets the USB product name descriptor.
-    pub fn usb_product_name(mut self, name: Option<String>) -> Self {
-        self.profile.usb_product_name = name;
-        self
-    }
-
-    /// Sets the maximum supported protocol version.
-    pub fn protocol_version(mut self, ver: u32) -> Self {
-        self.profile.protocol_version = ver;
-        self
-    }
-
-    /// Sets whether LZ4 compression is supported.
-    pub fn lz4_supported(mut self, supported: bool) -> Self {
-        self.profile.lz4_supported = supported;
-        self
-    }
-
-    /// Sets the maximum chunk packet size.
-    pub fn max_packet_size(mut self, size: usize) -> Self {
-        self.profile.max_packet_size = size;
-        self
-    }
-
-    /// Sets the available free space on the dynamic super partition.
-    pub fn super_partition_free_space(mut self, space: u64) -> Self {
-        self.profile.super_partition_free_space = space;
-        self
-    }
-
-    /// Sets whether pre-handshake DVIF is supported.
-    pub fn supports_dvif(mut self, supported: bool) -> Self {
-        self.profile.supports_dvif = supported;
-        self
-    }
-
-    /// Sets whether in-session DeviceInfo (0x69) is supported.
-    pub fn supports_device_info(mut self, supported: bool) -> Self {
-        self.profile.supports_device_info = supported;
-        self
-    }
-
-    /// Sets whether dynamic partition verification (0x6a) is supported.
-    pub fn supports_dynamic_partition(mut self, supported: bool) -> Self {
-        self.profile.supports_dynamic_partition = supported;
-        self
-    }
-
-    /// Sets the raw default PIT binary data.
-    pub fn default_pit(mut self, pit: Vec<u8>) -> Self {
-        self.profile.default_pit = pit;
-        self
-    }
-
-    /// Finalizes and returns the `DeviceProfile`.
-    pub fn build(self) -> DeviceProfile {
-        self.profile
-    }
-}
-
 /// A mock USB/serial transport backend that implements the Loke-Odin protocol,
 /// capable of accurately simulating different Samsung device generations.
 ///
 /// Like real USB transfers, every send and receive returns `Pending` once
 /// before completing.
-pub struct MockBackend {
+pub(crate) struct MockBackend {
     profile: DeviceProfile,
     state: State,
     incoming_buffer: Vec<u8>,
@@ -410,21 +287,21 @@ pub struct MockBackend {
     current_chunk_index: u32,
     packet_size: usize,
     active_pit_data: Vec<u8>,
-    parsed_pit: Option<PitData>,
     current_partition_bytes: usize,
-    fail_begin_session: Option<i32>,
-    fail_commit: Option<i32>,
-    fail_chunk: Option<i32>,
+    #[cfg(test)]
     fail_end_session: Option<i32>,
+    #[cfg(test)]
     fail_check_super_size: Option<i32>,
-    fail_nand_erase: Option<i32>,
-    nand_erase_sectors: u32,
     protocol_version: u32,
+    #[cfg(test)]
     product_override: Option<String>,
-    empty_send_count: usize,
+    #[cfg(test)]
     event_log: Arc<Mutex<Vec<MockEvent>>>,
+    #[cfg(test)]
     received_chunks: Arc<AtomicUsize>,
+    #[cfg(test)]
     current_slice_announced_size: Option<usize>,
+    #[cfg(test)]
     current_slice_data: Vec<u8>,
 }
 
@@ -434,21 +311,19 @@ impl Default for MockBackend {
     }
 }
 
-#[allow(dead_code)]
 impl MockBackend {
     /// Instantiates a new `MockBackend` configured with default `SM-F968B` characteristics.
     ///
     /// For 100% backward compatibility with existing tests, `protocol_version` defaults to 2.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut backend = Self::with_profile(DeviceProfile::sm_f968b());
         backend.protocol_version = 2;
         backend
     }
 
     /// Instantiates a new `MockBackend` configured with a specific `DeviceProfile`.
-    pub fn with_profile(profile: DeviceProfile) -> Self {
+    pub(crate) fn with_profile(profile: DeviceProfile) -> Self {
         let active_pit = profile.default_pit.clone();
-        let parsed_pit = PitData::new(&active_pit).ok();
         let default_packet = profile.default_packet_size;
         let p_ver = profile.protocol_version;
 
@@ -460,109 +335,72 @@ impl MockBackend {
             current_chunk_index: 0,
             packet_size: default_packet,
             active_pit_data: active_pit,
-            parsed_pit,
             current_partition_bytes: 0,
-            fail_begin_session: None,
-            fail_commit: None,
-            fail_chunk: None,
+            #[cfg(test)]
             fail_end_session: None,
+            #[cfg(test)]
             fail_check_super_size: None,
-            fail_nand_erase: None,
-            nand_erase_sectors: 524_288,
             protocol_version: p_ver,
+            #[cfg(test)]
             product_override: None,
-            empty_send_count: 0,
+            #[cfg(test)]
             event_log: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
             received_chunks: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
             current_slice_announced_size: None,
+            #[cfg(test)]
             current_slice_data: Vec::new(),
         }
     }
 
     /// Returns a handle to the log of device-visible events, shared with clones of the handle.
-    pub fn event_log(&self) -> Arc<Mutex<Vec<MockEvent>>> {
+    #[cfg(test)]
+    pub(crate) fn event_log(&self) -> Arc<Mutex<Vec<MockEvent>>> {
         Arc::clone(&self.event_log)
     }
 
     /// Returns a handle to the number of slice data chunks acknowledged so far,
     /// shared with clones of the handle.
-    pub fn received_chunks(&self) -> Arc<AtomicUsize> {
+    #[cfg(test)]
+    pub(crate) fn received_chunks(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.received_chunks)
     }
 
-    /// Returns a reference to the active `DeviceProfile`.
-    pub fn profile(&self) -> &DeviceProfile {
-        &self.profile
-    }
-
     /// Sets an override for the simulated USB product name descriptor.
-    pub fn with_product_name(mut self, product: &str) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_product_name(mut self, product: &str) -> Self {
         self.product_override = Some(product.to_string());
         self
     }
 
-    /// Returns the number of 0-length bulk packets sent to this backend.
-    pub fn empty_send_count(&self) -> usize {
-        self.empty_send_count
-    }
-
-    /// Returns the active in-memory PIT representation, if successfully parsed.
-    pub fn active_pit(&self) -> Option<&PitData> {
-        self.parsed_pit.as_ref()
-    }
-
     /// Sets the bootloader protocol version reported by the mock device.
-    pub fn with_protocol_version(mut self, version: u32) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_protocol_version(mut self, version: u32) -> Self {
         self.protocol_version = version;
         self
     }
 
-    /// Injects an error status on begin session handshake.
-    pub fn with_fail_begin_session(mut self, status: i32) -> Self {
-        self.fail_begin_session = Some(status);
-        self
-    }
-
-    /// Injects an error status on slice commit (end sequence packet).
-    pub fn with_fail_commit(mut self, status: i32) -> Self {
-        self.fail_commit = Some(status);
-        self
-    }
-
-    /// Injects an error status on chunk receipt.
-    pub fn with_fail_chunk(mut self, status: i32) -> Self {
-        self.fail_chunk = Some(status);
-        self
-    }
-
     /// Injects an error status on end session.
-    pub fn with_fail_end_session(mut self, status: i32) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_fail_end_session(mut self, status: i32) -> Self {
         self.fail_end_session = Some(status);
         self
     }
 
     /// Injects an error status on dynamic partition pre-flight check.
-    pub fn with_fail_check_super_size(mut self, status: i32) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_fail_check_super_size(mut self, status: i32) -> Self {
         self.fail_check_super_size = Some(status);
         self
     }
 
-    /// Injects an error status on NAND storage erase request.
-    pub fn with_fail_nand_erase(mut self, status: i32) -> Self {
-        self.fail_nand_erase = Some(status);
-        self
-    }
-
-    /// Configures the simulated number of erased sectors returned on NAND erase.
-    pub fn with_nand_erase(mut self, sectors: u32) -> Self {
-        self.nand_erase_sectors = sectors;
-        self
-    }
-
+    #[cfg(test)]
     fn has_event_listener(&self) -> bool {
         Arc::strong_count(&self.event_log) > 1
     }
 
+    #[cfg(test)]
     fn record_event(&self, event: MockEvent) {
         if self.has_event_listener() {
             self.event_log.lock().unwrap().push(event);
@@ -609,14 +447,16 @@ impl UsbTransfer for MockBackend {
         self.outgoing_queue.clear();
         self.current_chunk_index = 0;
         self.packet_size = self.profile.default_packet_size;
-        self.current_slice_announced_size = None;
-        self.current_slice_data.clear();
+        #[cfg(test)]
+        {
+            self.current_slice_announced_size = None;
+            self.current_slice_data.clear();
+        }
     }
 
     async fn send(&mut self, data: &[u8], _timeout: Duration) -> Result<(), TransportError> {
         yield_now().await;
         if data.is_empty() {
-            self.empty_send_count += 1;
             return Ok(());
         }
 
@@ -658,18 +498,17 @@ impl UsbTransfer for MockBackend {
                         chunk_size,
                         self.current_chunk_index
                     );
-                    if let Some(err) = self.fail_chunk {
-                        self.push_response(STATUS_FAIL, err as u32);
-                    } else {
-                        self.current_partition_bytes += chunk_size;
+                    self.current_partition_bytes += chunk_size;
+                    #[cfg(test)]
+                    {
                         if self.has_event_listener() {
                             self.current_slice_data
                                 .extend_from_slice(&self.incoming_buffer[..chunk_size]);
                         }
-                        self.push_response(STREAMING_CHUNK_ACK, self.current_chunk_index);
-                        self.current_chunk_index += 1;
                         self.received_chunks.fetch_add(1, Ordering::Relaxed);
                     }
+                    self.push_response(STREAMING_CHUNK_ACK, self.current_chunk_index);
+                    self.current_chunk_index += 1;
                     self.incoming_buffer.drain(..chunk_size);
                     return Ok(());
                 }
@@ -687,9 +526,6 @@ impl UsbTransfer for MockBackend {
                                     return Ok(());
                                 }
                                 Command::Pit(PitCommand::End { .. }) => {
-                                    if !self.active_pit_data.is_empty() {
-                                        self.parsed_pit = PitData::new(&self.active_pit_data).ok();
-                                    }
                                     self.state = State::SessionBegun;
                                     self.push_response(CMD_PIT, 0);
                                     self.incoming_buffer.drain(..1024);
@@ -715,40 +551,36 @@ impl UsbTransfer for MockBackend {
                         match cmd {
                             Command::Session(session_cmd) => match session_cmd {
                                 SessionCommand::Begin { protocol_version } => {
-                                    if let Some(err) = self.fail_begin_session {
-                                        self.push_response(STATUS_FAIL, err as u32);
+                                    self.state = State::SessionBegun;
+                                    let negotiated = self.protocol_version.min(protocol_version);
+                                    let lz4_bit = if self.profile.lz4_supported {
+                                        0x8000
                                     } else {
-                                        self.state = State::SessionBegun;
-                                        let negotiated =
-                                            self.protocol_version.min(protocol_version);
-                                        let lz4_bit = if self.profile.lz4_supported {
-                                            0x8000
-                                        } else {
-                                            0
-                                        };
-                                        let response_val = (negotiated << 16) | lz4_bit;
-                                        self.push_response(CMD_SESSION_INIT, response_val);
-                                    }
+                                        0
+                                    };
+                                    let response_val = (negotiated << 16) | lz4_bit;
+                                    self.push_response(CMD_SESSION_INIT, response_val);
                                 }
                                 SessionCommand::PacketSize { size } => {
                                     self.packet_size = size as usize;
                                     self.push_response(CMD_SESSION_INIT, 0);
                                 }
                                 SessionCommand::SalesCode { c0, c1, c2 } => {
-                                    let code = [c0, c1, c2].map(|c| char::from(c as u8));
-                                    self.record_event(MockEvent::SalesCode(code.iter().collect()));
+                                    #[cfg(test)]
+                                    {
+                                        let code = [c0, c1, c2].map(|c| char::from(c as u8));
+                                        self.record_event(MockEvent::SalesCode(
+                                            code.iter().collect(),
+                                        ));
+                                    }
+                                    #[cfg(not(test))]
+                                    let _ = (c0, c1, c2);
                                     self.push_response(CMD_SESSION_INIT, 0);
                                 }
                                 SessionCommand::NandErase => {
-                                    if let Some(err) = self.fail_nand_erase {
-                                        self.push_response(STATUS_FAIL, err as u32);
-                                    } else {
-                                        self.record_event(MockEvent::NandErase);
-                                        self.push_response(
-                                            CMD_SESSION_INIT,
-                                            self.nand_erase_sectors,
-                                        );
-                                    }
+                                    #[cfg(test)]
+                                    self.record_event(MockEvent::NandErase);
+                                    self.push_response(CMD_SESSION_INIT, 524_288);
                                 }
                                 _ => {
                                     self.push_response(CMD_SESSION_INIT, 0);
@@ -758,10 +590,12 @@ impl UsbTransfer for MockBackend {
                                 PitCommand::Flash => {
                                     self.state = State::PitFlash;
                                     self.active_pit_data.clear();
+                                    #[cfg(test)]
                                     self.record_event(MockEvent::PitFlash);
                                     self.push_response(CMD_PIT, 0);
                                 }
                                 PitCommand::Dump => {
+                                    #[cfg(test)]
                                     self.record_event(MockEvent::PitDump);
                                     self.push_response(CMD_PIT, self.active_pit_data.len() as u32);
                                 }
@@ -786,8 +620,11 @@ impl UsbTransfer for MockBackend {
                                 TransmitCommand::Slice { .. } => {
                                     self.state = State::TransmitSlice;
                                     self.current_chunk_index = 0;
-                                    self.current_slice_announced_size = None;
-                                    self.current_slice_data.clear();
+                                    #[cfg(test)]
+                                    {
+                                        self.current_slice_announced_size = None;
+                                        self.current_slice_data.clear();
+                                    }
                                     self.push_response(CMD_TRANSMIT, 0);
                                 }
                                 TransmitCommand::Lz4Slice {
@@ -795,63 +632,70 @@ impl UsbTransfer for MockBackend {
                                 } => {
                                     self.state = State::TransmitSlice;
                                     self.current_chunk_index = 0;
-                                    self.current_slice_announced_size =
-                                        Some(compressed_size as usize);
-                                    self.current_slice_data.clear();
+                                    #[cfg(test)]
+                                    {
+                                        self.current_slice_announced_size =
+                                            Some(compressed_size as usize);
+                                        self.current_slice_data.clear();
+                                    }
+                                    #[cfg(not(test))]
+                                    let _ = compressed_size;
                                     self.push_response(CMD_TRANSMIT, 0);
                                 }
+                                #[cfg_attr(not(test), allow(unused_variables))]
                                 TransmitCommand::End(ref commit)
                                 | TransmitCommand::Lz4End(ref commit) => {
-                                    if let Some(err) = self.fail_commit {
-                                        self.push_response(STATUS_FAIL, err as u32);
-                                    } else {
-                                        if self.has_event_listener() {
-                                            let partition_id = commit.partition_id();
-                                            let lz4 =
-                                                matches!(&transmit_cmd, TransmitCommand::Lz4End(_));
-                                            // The raw slice size announced at the start is rounded
-                                            // up to 128 KB, so use the exact size from the commit.
-                                            // LZ4 commits carry the decompressed size instead, so
-                                            // use the announced compressed size for those.
-                                            let payload_size = if lz4 {
-                                                self.current_slice_announced_size
-                                                    .unwrap_or(self.current_slice_data.len())
-                                            } else {
-                                                commit.slice_size() as usize
-                                            };
-                                            let mut data =
-                                                std::mem::take(&mut self.current_slice_data);
-                                            data.truncate(payload_size);
-                                            self.record_event(MockEvent::Slice {
-                                                partition_id,
-                                                lz4,
-                                                last: commit.is_end_of_file(),
-                                                data,
-                                            });
-                                        }
-
-                                        self.current_partition_bytes = 0;
-                                        self.state = State::SessionBegun;
-                                        self.push_response(CMD_TRANSMIT, 0);
+                                    #[cfg(test)]
+                                    if self.has_event_listener() {
+                                        let partition_id = commit.partition_id();
+                                        let lz4 =
+                                            matches!(&transmit_cmd, TransmitCommand::Lz4End(_));
+                                        // The raw slice size announced at the start is rounded
+                                        // up to 128 KB, so use the exact size from the commit.
+                                        // LZ4 commits carry the decompressed size instead, so
+                                        // use the announced compressed size for those.
+                                        let payload_size = if lz4 {
+                                            self.current_slice_announced_size
+                                                .unwrap_or(self.current_slice_data.len())
+                                        } else {
+                                            commit.slice_size() as usize
+                                        };
+                                        let mut data = std::mem::take(&mut self.current_slice_data);
+                                        data.truncate(payload_size);
+                                        self.record_event(MockEvent::Slice {
+                                            partition_id,
+                                            lz4,
+                                            last: commit.is_end_of_file(),
+                                            data,
+                                        });
                                     }
+
+                                    self.current_partition_bytes = 0;
+                                    self.state = State::SessionBegun;
+                                    self.push_response(CMD_TRANSMIT, 0);
                                 }
                             },
                             Command::CloseConnection(close_cmd) => match close_cmd {
                                 CloseConnectionCommand::Close => {
+                                    #[cfg(test)]
                                     if let Some(err) = self.fail_end_session {
                                         self.push_response(STATUS_FAIL, err as u32);
-                                    } else {
-                                        self.state = State::HandshakeComplete;
-                                        self.record_event(MockEvent::EndSession);
-                                        self.push_response(CMD_CLOSE_CONNECTION, 0);
+                                        self.incoming_buffer.drain(..1024);
+                                        return Ok(());
                                     }
+                                    self.state = State::HandshakeComplete;
+                                    #[cfg(test)]
+                                    self.record_event(MockEvent::EndSession);
+                                    self.push_response(CMD_CLOSE_CONNECTION, 0);
                                 }
                                 CloseConnectionCommand::RebootDevice => {
                                     self.state = State::Uninitialized;
+                                    #[cfg(test)]
                                     self.record_event(MockEvent::Reboot);
                                 }
                                 CloseConnectionCommand::RebootDownload => {
                                     self.state = State::Uninitialized;
+                                    #[cfg(test)]
                                     self.record_event(MockEvent::RebootToDownload);
                                 }
                             },
@@ -864,9 +708,13 @@ impl UsbTransfer for MockBackend {
                                         DynamicPartitionCommand::CheckSuperSize {
                                             super_used_size,
                                         } => {
+                                            #[cfg(test)]
                                             if let Some(err) = self.fail_check_super_size {
                                                 self.push_response(STATUS_FAIL, err as u32);
-                                            } else if super_used_size as u64
+                                                self.incoming_buffer.drain(..1024);
+                                                return Ok(());
+                                            }
+                                            if super_used_size as u64
                                                 > self.profile.super_partition_free_space
                                             {
                                                 self.push_response(STATUS_FAIL, 0xffff_ffff);
@@ -924,9 +772,11 @@ impl UsbTransfer for MockBackend {
     }
 
     fn product_name(&self) -> Option<&str> {
-        self.product_override
-            .as_deref()
-            .or(self.profile.usb_product_name.as_deref())
+        #[cfg(test)]
+        if let Some(product) = &self.product_override {
+            return Some(product);
+        }
+        self.profile.usb_product_name.as_deref()
     }
 }
 
@@ -935,16 +785,15 @@ mod tests {
     use super::*;
     use crate::error::OdinError;
     use crate::session::OdinConnection;
-    use samloader_pit::BinaryType;
+    use samloader_pit::{BinaryType, PitData};
 
     #[test]
     fn test_sm_f968b_modern_profile_lifecycle() {
         futures::executor::block_on(async {
             let profile = DeviceProfile::sm_f968b();
-            let backend = Box::new(MockBackend::with_profile(profile));
-            let mut connection = OdinConnection::new(backend);
+            let mut connection = OdinConnection::open(Box::new(MockBackend::with_profile(profile)));
 
-            // 1. DVIF diagnostics prior to init
+            // 1. DVIF diagnostics prior to begin_session
             let info = connection.query_device_info().await.unwrap();
             assert_eq!(info.model.as_deref(), Some("SM-F968B"));
             assert_eq!(info.storage_capacity_gb, Some(512));
@@ -952,29 +801,26 @@ mod tests {
             assert_eq!(info.storage_product_name.as_deref(), Some("KLUEG8UHDB"));
             assert_eq!(info.sales_code.as_deref(), Some("TUR"));
 
-            // 2. Handshake
-            assert!(connection.init().await.is_ok());
-
-            // 3. Begin Session (protocol v3, LZ4 supported)
+            // 2. Handshake & Begin Session (protocol v3, LZ4 supported)
             let mut session = connection.begin_session().await.unwrap();
             assert_eq!(session.bootloader_protocol_version(), 3);
             assert!(session.is_lz4_supported());
 
-            // 4. Download PIT (Q7MQ_EUR_OPENX.pit is 18492 bytes)
+            // 3. Download PIT (Q7MQ_EUR_OPENX.pit is 18492 bytes)
             let pit_bytes = session.receive_pit_info().await.unwrap();
             assert_eq!(pit_bytes.len(), 18492);
             let pit = PitData::new(&pit_bytes).unwrap();
             assert_eq!(pit.cpu_bl_id.to_string_lossy(), "SM8750");
 
-            // 5. Opcode 0x69 in-session DeviceInfo
+            // 4. Opcode 0x69 in-session DeviceInfo
             let session_info = session.dump_device_info().await.unwrap();
             assert_eq!(session_info.model.as_deref(), Some("SM-F968B"));
             assert_eq!(session_info.sales_code.as_deref(), Some("TUR"));
 
-            // 6. Dynamic partition check
+            // 5. Dynamic partition check
             assert!(session.check_super_size(1024 * 1024 * 100).await.is_ok());
 
-            // 7. Session close
+            // 6. Session close
             let _ = session.close().await.unwrap();
         });
     }
@@ -983,22 +829,18 @@ mod tests {
     fn test_gt_i9305_legacy_profile_lifecycle() {
         futures::executor::block_on(async {
             let profile = DeviceProfile::gt_i9305();
-            let backend = Box::new(MockBackend::with_profile(profile));
-            let mut connection = OdinConnection::new(backend);
+            let mut connection = OdinConnection::open(Box::new(MockBackend::with_profile(profile)));
 
             // 1. DVIF is NOT supported on legacy S-Boot -> query_device_info returns DeviceInfoUnavailable
             let err = connection.query_device_info().await.unwrap_err();
             assert!(matches!(err, OdinError::DeviceInfoUnavailable));
 
-            // 2. Handshake works with standard ODIN -> LOKE
-            assert!(connection.init().await.is_ok());
-
-            // 3. Begin session -> negotiates protocol v2, LZ4 disabled
+            // 2. Handshake & Begin session -> negotiates protocol v2, LZ4 disabled
             let mut session = connection.begin_session().await.unwrap();
             assert_eq!(session.bootloader_protocol_version(), 2);
             assert!(!session.is_lz4_supported());
 
-            // 4. Download PIT (M3_EUR_OPEN_4G.pit is 2924 bytes, 20 entries)
+            // 3. Download PIT (M3_EUR_OPEN_4G.pit is 2924 bytes, 20 entries)
             let pit_bytes = session.receive_pit_info().await.unwrap();
             assert_eq!(pit_bytes.len(), 2924);
             let pit = PitData::new(&pit_bytes).unwrap();
@@ -1010,13 +852,13 @@ mod tests {
             assert_eq!(modem_entry.partition_id, 10);
             assert_eq!(modem_entry.binary_type, BinaryType::ApplicationProcessor);
 
-            // 5. In-session DeviceInfo (0x69) is rejected on legacy bootloader
+            // 4. In-session DeviceInfo (0x69) is rejected on legacy bootloader
             assert!(session.dump_device_info().await.is_err());
 
-            // 6. Dynamic partition check (0x6a) is rejected on legacy bootloader
+            // 5. Dynamic partition check (0x6a) is rejected on legacy bootloader
             assert!(session.check_super_size(1024).await.is_err());
 
-            // 7. Close session
+            // 6. Close session
             let _ = session.close().await.unwrap();
         });
     }

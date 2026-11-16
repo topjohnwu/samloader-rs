@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncSeek, Cursor};
+use samloader_odin::PartitionTarget;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -249,17 +250,27 @@ pub(crate) fn extract_explicit_name_from_js(val: &JsValue) -> Option<String> {
     None
 }
 
-pub(crate) fn extract_explicit_partition_from_js(val: &JsValue) -> Option<String> {
+pub(crate) fn extract_explicit_partition_from_js(val: &JsValue) -> PartitionTarget {
     if val.is_object() {
         let obj: &js_sys::Object = val.unchecked_ref();
-        if let Some(s) = js_sys::Reflect::get(obj, &JsValue::from_str("partition"))
-            .ok()
-            .and_then(|v| v.as_string())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            return Some(s);
+        if let Ok(prop) = js_sys::Reflect::get(obj, &JsValue::from_str("partition")) {
+            if let Some(id) = prop
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= u32::MAX as f64)
+            {
+                return PartitionTarget::Id(id as u32);
+            }
+            if let Some(s) = prop
+                .as_string()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                return match s.parse::<u32>() {
+                    Ok(id) => PartitionTarget::Id(id),
+                    Err(_) => PartitionTarget::Name(s),
+                };
+            }
         }
     }
-    None
+    PartitionTarget::Auto
 }

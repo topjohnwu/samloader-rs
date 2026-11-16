@@ -29,7 +29,7 @@ fn transfer_error(e: ::rusb::Error) -> TransportError {
 }
 
 /// USB communication backend using `libusb` / `rusb`.
-pub struct RusbBackend {
+pub(crate) struct RusbBackend {
     handle: DeviceHandle<Context>,
     product: Option<String>,
 

@@ -18,7 +18,8 @@ use crate::cli::FlashArgs;
 use crate::progress;
 use crate::readahead::ReadaheadFile;
 use samloader_odin::{
-    FlashRequest, OdinSession, UsbBackendOption, futures::executor::block_on, verify_md5_footer,
+    FlashError, FlashRequest, OdinConnection, UsbBackendOption, create_backend,
+    futures::executor::block_on, verify_md5_footer,
 };
 use std::error::Error;
 use std::fs::File;
@@ -133,8 +134,16 @@ pub(crate) fn run(
     }
 
     block_on(async {
-        let mut session = OdinSession::connect(usb_backend, args.odin.wait).await?;
-        prepared.execute(&mut session).await?;
+        let transport = create_backend(usb_backend, args.odin.wait).await?;
+        let mut session = OdinConnection::open(transport).begin_session().await?;
+        if let Err(err) = prepared.execute(&mut session).await {
+            return match err {
+                FlashError::PartitionTooSmall(_) => {
+                    Err(format!("{err}. Use --skip-size-check to flash anyways.").into())
+                }
+                other => Err(other.into()),
+            };
+        }
         Ok(())
     })
 }

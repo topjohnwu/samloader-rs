@@ -24,6 +24,9 @@ use modular_bitfield::prelude::*;
 use std::borrow::Cow;
 use std::ffi::CStr;
 
+pub use ::binrw;
+pub use ::modular_bitfield;
+
 const FILE_IDENTIFIER: u32 = 0x12349876;
 const HEADER_DATA_SIZE: u32 = 28;
 
@@ -216,11 +219,11 @@ pub struct PitData {
     /// Magic identifier for verification (always 0x12349876).
     #[br(temp, assert(magic == FILE_IDENTIFIER))]
     #[bw(calc = FILE_IDENTIFIER)]
-    pub magic: u32,
+    magic: u32,
     /// Number of partition entries contained in the PIT.
     #[br(temp)]
     #[bw(calc = entries.len() as u32)]
-    pub entry_count: u32,
+    entry_count: u32,
     /// Device project name / tag (validated by bootloader as "Invalid PIT Project Name").
     pub project_name: FixedString<8>,
     /// CPU or bootloader target hardware tag.
