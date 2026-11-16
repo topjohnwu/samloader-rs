@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::Error;
 use fast_md5::Md5;
 use roxmltree::{Document, Node};
 use std::collections::HashMap;
@@ -166,24 +167,25 @@ pub(crate) fn history_req_xml(model: &str, region: &str) -> String {
     )
 }
 
-fn parse_xml_data(xml: &str) -> Option<HashMap<String, String>> {
-    let doc = Document::parse(xml).ok()?;
+fn parse_xml_data(xml: &str) -> crate::Result<HashMap<String, String>> {
+    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
 
     let status_str = doc
         .root_element()
         .children()
-        .find(|n| n.has_tag_name("FUSBody"))?
-        .children()
-        .find(|n| n.has_tag_name("Results"))?
-        .children()
-        .find(|n| n.has_tag_name("Status"))?
-        .text()?;
+        .find(|n| n.has_tag_name("FUSBody"))
+        .and_then(|n| n.children().find(|n| n.has_tag_name("Results")))
+        .and_then(|n| n.children().find(|n| n.has_tag_name("Status")))
+        .and_then(|n| n.text())
+        .ok_or_else(|| Error::InvalidResponse("missing FUSBody/Results/Status".into()))?;
 
     if status_str != "200" && status_str != "S00" {
-        return None;
+        return Err(Error::ServerStatus {
+            status: status_str.to_string(),
+        });
     }
 
-    Some(get_xml_node_data(doc.root()))
+    Ok(get_xml_node_data(doc.root()))
 }
 
 fn get_xml_node_data(node: Node) -> HashMap<String, String> {
@@ -236,38 +238,57 @@ impl BinaryInform {
         hasher.finalize()
     }
 
-    pub(crate) fn parse(xml: &str) -> Option<BinaryInform> {
+    pub(crate) fn parse(xml: &str) -> crate::Result<BinaryInform> {
+        let missing = |field: &str| Error::InvalidResponse(format!("missing {field}"));
         let mut kv = parse_xml_data(xml)?;
         let fw_ver = kv
             .remove("BINARY_SW_VERSION")
-            .or_else(|| kv.remove("LATEST_FW_VERSION"))?;
-        let filename = kv.remove("BINARY_NAME")?;
+            .or_else(|| kv.remove("LATEST_FW_VERSION"))
+            .ok_or_else(|| missing("BINARY_SW_VERSION"))?;
+        let filename = kv
+            .remove("BINARY_NAME")
+            .ok_or_else(|| missing("BINARY_NAME"))?;
         let region = kv
             .remove("BINARY_LOCAL_CODE")
-            .or_else(|| kv.remove("DEVICE_LOCAL_CODE"))?;
+            .or_else(|| kv.remove("DEVICE_LOCAL_CODE"))
+            .ok_or_else(|| missing("BINARY_LOCAL_CODE"))?;
 
         let key = if filename.ends_with(".enc2") {
             let model = kv
                 .remove("BINARY_MODEL_NAME")
                 .or_else(|| kv.remove("DEVICE_MODEL_NAME"))
-                .or_else(|| filename.split('_').next().map(str::to_string))?;
+                .or_else(|| filename.split('_').next().map(str::to_string))
+                .ok_or_else(|| missing("BINARY_MODEL_NAME"))?;
             let dec_str = format!("{region}:{model}:{fw_ver}");
             fast_md5::digest(dec_str.as_bytes()).to_vec()
         } else {
             let logic_val = kv
                 .remove("LOGIC_VALUE_FACTORY")
-                .or_else(|| kv.remove("LOGIC_VALUE_HOME"))?;
+                .or_else(|| kv.remove("LOGIC_VALUE_HOME"))
+                .ok_or_else(|| missing("LOGIC_VALUE"))?;
             let key = get_logic_check(&fw_ver, &logic_val);
             fast_md5::digest(key.as_bytes()).to_vec()
         };
 
-        Some(Self {
+        let path = kv
+            .remove("MODEL_PATH")
+            .ok_or_else(|| missing("MODEL_PATH"))?;
+        let size = kv
+            .remove("BINARY_BYTE_SIZE")
+            .ok_or_else(|| missing("BINARY_BYTE_SIZE"))?
+            .parse()
+            .map_err(|_| Error::InvalidResponse("invalid BINARY_BYTE_SIZE".into()))?;
+        let model_type = kv
+            .remove("DEVICE_MODEL_TYPE")
+            .ok_or_else(|| missing("DEVICE_MODEL_TYPE"))?;
+
+        Ok(Self {
             version: fw_ver,
             filename,
-            path: kv.remove("MODEL_PATH")?,
-            size: kv.remove("BINARY_BYTE_SIZE")?.parse().ok()?,
+            path,
+            size,
             key,
-            model_type: kv.remove("DEVICE_MODEL_TYPE")?,
+            model_type,
             region,
         })
     }
@@ -483,5 +504,22 @@ mod tests {
         assert_eq!(info.size, 5000000000);
         assert_eq!(info.region, "XAA");
         assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U").to_vec());
+    }
+
+    #[test]
+    fn test_parse_binary_inform_errors() {
+        let status_xml =
+            r#"<FUSMsg><FUSBody><Results><Status>S01</Status></Results></FUSBody></FUSMsg>"#;
+        assert!(matches!(
+            BinaryInform::parse(status_xml),
+            Err(Error::ServerStatus { status }) if status == "S01"
+        ));
+
+        let missing_xml =
+            r#"<FUSMsg><FUSBody><Results><Status>S00</Status></Results></FUSBody></FUSMsg>"#;
+        assert!(matches!(
+            BinaryInform::parse(missing_xml),
+            Err(Error::InvalidResponse(_))
+        ));
     }
 }

@@ -14,8 +14,8 @@
 
 //! Multi-threaded firmware download mechanism with embedded resumable state.
 
-use crate::FusClient;
 use crate::error::Result;
+use crate::{BinaryInform, DownloadSession};
 use memmap2::MmapMut;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -105,8 +105,8 @@ struct FooterLayout {
 }
 
 impl FooterLayout {
-    fn new(client: &FusClient) -> Self {
-        let num_blocks = client.info.size.div_ceil(BLOCK_SIZE as u64) as usize;
+    fn new(info: &BinaryInform) -> Self {
+        let num_blocks = info.size.div_ceil(BLOCK_SIZE as u64) as usize;
         let bitfield_len = num_blocks.div_ceil(8);
         let footer_len = HEADER_LEN + bitfield_len + TRAILER_LEN;
 
@@ -117,13 +117,13 @@ impl FooterLayout {
         }
     }
 
-    fn serialize_initial(&self, client: &FusClient, out: &mut [u8]) {
+    fn serialize_initial(&self, info: &BinaryInform, out: &mut [u8]) {
         assert_eq!(out.len(), self.footer_len);
         let mut cursor = 0;
 
         out[cursor..cursor + 4].copy_from_slice(&FOOTER_VERSION.to_le_bytes());
         cursor += 4;
-        out[cursor..cursor + 16].copy_from_slice(&client.info.checksum());
+        out[cursor..cursor + 16].copy_from_slice(&info.checksum());
         cursor += 16;
         out[cursor..cursor + 4].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         cursor += 4;
@@ -151,7 +151,7 @@ struct ParsedFooter {
 }
 
 impl ParsedFooter {
-    fn read_and_validate<R: Read + Seek>(reader: &mut R, client: &FusClient) -> Option<Self> {
+    fn read_and_validate<R: Read + Seek>(reader: &mut R, info: &BinaryInform) -> Option<Self> {
         let file_len = reader.seek(SeekFrom::End(0)).ok()?;
         if file_len < (HEADER_LEN + TRAILER_LEN) as u64 {
             return None;
@@ -170,7 +170,7 @@ impl ParsedFooter {
             return None;
         }
 
-        if file_len != client.info.size + footer_len as u64 {
+        if file_len != info.size + footer_len as u64 {
             return None;
         }
 
@@ -191,7 +191,7 @@ impl ParsedFooter {
 
         let info_checksum = footer_bytes.get(cursor..cursor + 16)?;
         cursor += 16;
-        if info_checksum != client.info.checksum() {
+        if info_checksum != info.checksum() {
             return None;
         }
 
@@ -203,7 +203,7 @@ impl ParsedFooter {
 
         let num_blocks = u32::from_le_bytes(footer_bytes.get(cursor..cursor + 4)?.try_into().ok()?);
         cursor += 4;
-        let expected_num_blocks = client.info.size.div_ceil(BLOCK_SIZE as u64) as u32;
+        let expected_num_blocks = info.size.div_ceil(BLOCK_SIZE as u64) as u32;
         if num_blocks != expected_num_blocks {
             return None;
         }
@@ -338,7 +338,7 @@ impl<'a> StateTracker<'a> {
 /// Downloads the firmware binary in parallel across multiple threads, decrypting it in place,
 /// supporting interruption and resumption via an embedded `.part` footer.
 pub fn download_firmware<P, PathRef>(
-    client: &FusClient,
+    session: &DownloadSession,
     path: PathRef,
     options: DownloadOptions,
     progress: &P,
@@ -347,6 +347,7 @@ where
     P: DownloadProgress,
     PathRef: AsRef<Path>,
 {
+    let info = session.info();
     let final_path = path.as_ref();
     if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -363,7 +364,7 @@ where
         let _ = std::fs::remove_file(&part_path);
     } else if let Ok(meta) = final_path.metadata() {
         let len = meta.len();
-        if (client.info.size.saturating_sub(16)..=client.info.size).contains(&len) {
+        if (info.size.saturating_sub(16)..=info.size).contains(&len) {
             progress.println(&format!(
                 "File already exists and is complete: {}",
                 final_path.display()
@@ -372,14 +373,14 @@ where
         }
     }
 
-    let layout = FooterLayout::new(client);
-    let total_file_len = client.info.size + layout.footer_len as u64;
+    let layout = FooterLayout::new(info);
+    let total_file_len = info.size + layout.footer_len as u64;
 
     // Check if a valid partial download already exists
     let had_existing_part = part_path.exists();
     let existing_footer = if had_existing_part && !options.force {
         if let Ok(mut f) = OpenOptions::new().read(true).open(&part_path) {
-            ParsedFooter::read_and_validate(&mut f, client)
+            ParsedFooter::read_and_validate(&mut f, info)
         } else {
             None
         }
@@ -395,17 +396,16 @@ where
         .open(&part_path)?;
 
     let uncompleted = if let Some(ref pf) = existing_footer {
-        let completed_bytes =
-            calculate_completed_bytes(&pf.bitfield, pf.num_blocks, client.info.size);
+        let completed_bytes = calculate_completed_bytes(&pf.bitfield, pf.num_blocks, info.size);
         progress.println(&format!(
             "Resuming download: {:.2} GiB / {:.2} GiB ({:.1}%) already downloaded",
             completed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-            client.info.size as f64 / (1024.0 * 1024.0 * 1024.0),
-            (completed_bytes as f64 / client.info.size as f64) * 100.0
+            info.size as f64 / (1024.0 * 1024.0 * 1024.0),
+            (completed_bytes as f64 / info.size as f64) * 100.0
         ));
-        progress.set_length(client.info.size);
+        progress.set_length(info.size);
         progress.set_position(completed_bytes);
-        extract_uncompleted_ranges(&pf.bitfield, pf.num_blocks, client.info.size)
+        extract_uncompleted_ranges(&pf.bitfield, pf.num_blocks, info.size)
     } else {
         if had_existing_part && !options.force {
             progress.println(
@@ -414,16 +414,16 @@ where
         }
         file.set_len(total_file_len)?;
         let mut initial_footer = vec![0u8; layout.footer_len];
-        layout.serialize_initial(client, &mut initial_footer);
-        file.seek(SeekFrom::Start(client.info.size))?;
+        layout.serialize_initial(info, &mut initial_footer);
+        file.seek(SeekFrom::Start(info.size))?;
         file.write_all(&initial_footer)?;
         file.sync_data()?;
 
-        progress.set_length(client.info.size);
+        progress.set_length(info.size);
         progress.set_position(0);
         vec![ByteRange {
             start: 0,
-            end: client.info.size,
+            end: info.size,
         }]
     };
 
@@ -432,14 +432,12 @@ where
     let download_chunks = partition_ranges_for_threads(&uncompleted, options.threads);
 
     if !download_chunks.is_empty() {
-        client.init_download()?;
-
-        let (payload_map, footer_map) = map.split_at_mut(client.info.size as usize);
+        let (payload_map, footer_map) = map.split_at_mut(info.size as usize);
 
         let tracker = Mutex::new(StateTracker::new(
             &mut footer_map[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
             layout.num_blocks,
-            client.info.size,
+            info.size,
         ));
 
         let mut queue = VecDeque::new();
@@ -458,7 +456,7 @@ where
                 queue.push_back(Chunk {
                     buf,
                     start: range.start,
-                    end: if range.end == client.info.size {
+                    end: if range.end == info.size {
                         None
                     } else {
                         Some(range.end - 1)
@@ -482,7 +480,7 @@ where
             let pool = &pool;
             let tracker = &tracker;
             for _ in 0..n_workers {
-                s.spawn(move || run_worker(pool, client, progress, tracker));
+                s.spawn(move || run_worker(pool, session, progress, tracker));
                 thread::sleep(Duration::from_millis(100));
             }
         });
@@ -497,7 +495,7 @@ where
     }
 
     // All blocks complete: read last byte to check PKCS#7 padding
-    let last_byte = map[client.info.size as usize - 1];
+    let last_byte = map[info.size as usize - 1];
     map.flush()?;
     drop(map);
 
@@ -506,7 +504,7 @@ where
     } else {
         0
     };
-    let final_len = client.info.size - padding;
+    let final_len = info.size - padding;
     file.set_len(final_len)?;
     drop(file);
 
@@ -546,7 +544,7 @@ const MAX_DEAD_STALLS: u32 = 4;
 
 fn run_worker(
     pool: &Pool<'_>,
-    client: &FusClient,
+    session: &DownloadSession,
     progress: &impl DownloadProgress,
     tracker: &Mutex<StateTracker<'_>>,
 ) {
@@ -576,7 +574,7 @@ fn run_worker(
         };
 
         let outcome = download_chunk(
-            client,
+            session,
             &mut chunk.buf[..],
             chunk.start,
             chunk.end,
@@ -648,7 +646,7 @@ fn run_worker(
 }
 
 fn download_chunk(
-    client: &FusClient,
+    session: &DownloadSession,
     chunk: &mut [u8],
     start: u64,
     end: Option<u64>,
@@ -659,7 +657,7 @@ fn download_chunk(
     let mut retries = 0_u32;
 
     loop {
-        let mut reader = match client.download_file(Some(start + dec_pos as u64), end) {
+        let mut reader = match session.fetch_range(Some(start + dec_pos as u64), end) {
             Ok(reader) => reader,
             Err(e) => {
                 retries += 1;
@@ -724,37 +722,49 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn mock_info(size: u64) -> BinaryInform {
+        BinaryInform {
+            version: "S931U1UES1AXB2/S931U1OYM1AXB2/S931U1UES1AXB2/S931U1UES1AXB2".to_string(),
+            filename: "SM-S931U1_1_20240215120000_abcdefghij_fac.zip.enc4".to_string(),
+            path: "T1/SM-S931U1/XAA/".to_string(),
+            size,
+            key: vec![0x42; 16],
+            model_type: "SM-S931U1".to_string(),
+            region: "XAA".to_string(),
+        }
+    }
+
     #[test]
     fn test_footer_validation_failures() {
         let size = 5 * 1024 * 1024; // 3 blocks (2 + 2 + 1)
-        let client = FusClient::new_mock(size);
-        let layout = FooterLayout::new(&client);
+        let info = mock_info(size);
+        let layout = FooterLayout::new(&info);
         assert_eq!(layout.num_blocks, 3);
         let mut buf = vec![0u8; layout.footer_len];
-        layout.serialize_initial(&client, &mut buf);
+        layout.serialize_initial(&info, &mut buf);
 
         // Appends `footer` to the downloaded data and validates it
-        let validate = |footer: &[u8], client: &FusClient| {
+        let validate = |footer: &[u8], info: &BinaryInform| {
             let mut cursor = Cursor::new(vec![0u8; size as usize]);
             cursor.seek(SeekFrom::End(0)).unwrap();
             cursor.write_all(footer).unwrap();
-            ParsedFooter::read_and_validate(&mut cursor, client).is_some()
+            ParsedFooter::read_and_validate(&mut cursor, info).is_some()
         };
 
         // The untampered footer is valid, so each failure below is caused by its change
-        assert!(validate(&buf, &client));
+        assert!(validate(&buf, &info));
 
         // Tamper with header/trailer fields: version, info_checksum, block_size, num_blocks, footer_len, magic
         let len = buf.len();
         for offset in [0, 4, 20, 24, len - 9, len - 1] {
             let mut tampered = buf.clone();
             tampered[offset] ^= 0xFF;
-            assert!(!validate(&tampered, &client), "offset={offset}");
+            assert!(!validate(&tampered, &info), "offset={offset}");
         }
 
-        // Mismatched client info: different size, or any mutated BinaryInform field
-        assert!(!validate(&buf, &FusClient::new_mock(2 * size)));
-        let mutations: Vec<fn(&mut crate::BinaryInform)> = vec![
+        // Mismatched binary info: different size, or any mutated BinaryInform field
+        assert!(!validate(&buf, &mock_info(2 * size)));
+        let mutations: Vec<fn(&mut BinaryInform)> = vec![
             |i| i.version.push('X'),
             |i| i.filename.push('X'),
             |i| i.path.push('X'),
@@ -763,9 +773,9 @@ mod tests {
             |i| i.region.push('X'),
         ];
         for mutate in mutations {
-            let mut other_client = FusClient::new_mock(size);
-            mutate(&mut other_client.info);
-            assert!(!validate(&buf, &other_client));
+            let mut other_info = mock_info(size);
+            mutate(&mut other_info);
+            assert!(!validate(&buf, &other_info));
         }
     }
 
@@ -799,17 +809,17 @@ mod tests {
     #[test]
     fn test_state_tracker_interruption_and_resume() {
         let size = 10 * 1024 * 1024; // 5 blocks
-        let client = FusClient::new_mock(size);
-        let layout = FooterLayout::new(&client);
+        let info = mock_info(size);
+        let layout = FooterLayout::new(&info);
         let mut footer = vec![0u8; layout.footer_len];
-        layout.serialize_initial(&client, &mut footer);
+        layout.serialize_initial(&info, &mut footer);
 
         // The footer must be valid at any time, as downloads can stop abruptly
         let validate = |footer: &[u8]| {
             let mut cursor = Cursor::new(vec![0u8; size as usize]);
             cursor.seek(SeekFrom::End(0)).unwrap();
             cursor.write_all(footer).unwrap();
-            let parsed = ParsedFooter::read_and_validate(&mut cursor, &client)
+            let parsed = ParsedFooter::read_and_validate(&mut cursor, &info)
                 .expect("Footer must validate immediately after block completion");
             let uncompleted = extract_uncompleted_ranges(&parsed.bitfield, parsed.num_blocks, size);
             (parsed.bitfield, uncompleted)
@@ -820,7 +830,7 @@ mod tests {
             let mut tracker = StateTracker::new(
                 &mut footer[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
                 layout.num_blocks,
-                client.info.size,
+                info.size,
             );
 
             // Decrypt first 1 MiB (not complete block yet)
@@ -847,7 +857,7 @@ mod tests {
             let mut tracker = StateTracker::new(
                 &mut footer[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
                 layout.num_blocks,
-                client.info.size,
+                info.size,
             );
             tracker.on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE);
         }

@@ -22,10 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version_info = fetch_history("SM-S931U1", "XAA")?;
     println!("Latest firmware version: {}", version_info.latest);
 
-    // 2. Initialize the FUS Client
-    let mut client = FusClient::new()?;
-    client.fetch_binary_info("SM-S931U1", "XAA", &version_info.latest);
-    println!("File name: {}, size: {}", client.info.filename, client.info.size);
+    // 2. Initialize the FUS Client and download session
+    let client = FusClient::new()?;
+    let info = client.fetch_binary_info("SM-S931U1", "XAA", &version_info.latest)?;
+    println!("File name: {}, size: {}", info.filename, info.size);
+    let session = client.init_download(info)?;
 
     // 3. Download the firmware in parallel (resumable)
     // Implement `DownloadProgress` or pass `&()` for a silent download.
@@ -33,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         threads: 8,
         force: false,
     };
-    download_firmware(&client, "firmware.zip", options, &())?;
+    download_firmware(&session, "firmware.zip", options, &())?;
     println!("Download complete!");
 
     Ok(())

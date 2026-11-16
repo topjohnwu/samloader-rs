@@ -27,6 +27,17 @@ pub enum Error {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
+    /// The FUS server returned a non-success status code in its XML response.
+    #[error("FUS server error status: {status}")]
+    ServerStatus {
+        /// The status string returned in `<Results><Status>`.
+        status: String,
+    },
+
+    /// The server returned malformed XML or was missing expected metadata.
+    #[error("Invalid server response: {0}")]
+    InvalidResponse(String),
+
     /// The download stalled completely because the server stopped responding.
     #[error("Download stalled at offset {offset}: server stopped responding")]
     Stalled {

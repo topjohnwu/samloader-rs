@@ -25,7 +25,7 @@ mod xml;
 
 pub use download::{DownloadOptions, DownloadProgress, download_firmware};
 pub use error::{Error, Result};
-pub use fusclient::FusClient;
+pub use fusclient::{DownloadSession, FusClient};
 pub use xml::{BinaryInform, VersionInfo};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.

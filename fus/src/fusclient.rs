@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::Result;
 use crate::{auth, xml};
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockModeDecrypt, KeyInit};
@@ -27,7 +28,8 @@ type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 /// Authentication token state. The download GET signs every request with
 /// `encnonce`/`auth`; these expire, so they live behind a lock and are shared
 /// by reference across all download threads (which only read them) and the
-/// occasional reauthentication (which rewrites them). See [`FusClient`].
+/// occasional reauthentication (which rewrites them). See [`FusClient`] and
+/// [`DownloadSession`].
 #[derive(Default)]
 struct AuthState {
     auth: String,
@@ -35,22 +37,16 @@ struct AuthState {
     encnonce: String,
 }
 
-/// Client coordinating API communication, security authentication, and file downloading
+/// Client coordinating API communication and security authentication
 /// with the Samsung Firmware Update Server (FUS).
 pub struct FusClient {
     client: Client,
     auth_state: Mutex<AuthState>,
-    /// Reauthentication generation counter. It also serves as the lock that
-    /// serializes reauth: a token expiry observed by many download threads at
-    /// once triggers a single refresh, and the rest reuse its result.
-    reauth_gen: Mutex<u64>,
-    /// The parsed and resolved binary download metadata for the active firmware session.
-    pub info: BinaryInform,
 }
 
 impl FusClient {
     /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
-    pub fn new() -> reqwest::Result<Self> {
+    pub fn new() -> Result<Self> {
         let client = Client::builder()
             .cookie_store(true)
             // For the blocking client, `timeout` is applied per I/O operation with
@@ -65,18 +61,21 @@ impl FusClient {
         let fus = FusClient {
             client,
             auth_state: Mutex::new(AuthState::default()),
-            reauth_gen: Mutex::new(0),
-            info: Default::default(),
         };
 
         // Initialize nonce
-        fus.make_req("NF_SmartDownloadGenerateNonce.do", "")?;
+        fus.generate_nonce()?;
 
         Ok(fus)
     }
 
     /// Queries the server for firmware binary metadata matching the requested model, region, and version.
-    pub fn fetch_binary_info(&mut self, model: &str, region: &str, version: &str) {
+    pub fn fetch_binary_info(
+        &self,
+        model: &str,
+        region: &str,
+        version: &str,
+    ) -> Result<BinaryInform> {
         let mut parts: Vec<&str> = version.split('/').collect();
         if parts.len() == 3 {
             parts.push(parts[0]);
@@ -86,11 +85,10 @@ impl FusClient {
         let req_xml = xml::binary_inform_req_xml(model, region, &fw, &nonce);
 
         let xml = self
-            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
-            .and_then(Response::text)
-            .expect("Info request failed");
+            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)?
+            .text()?;
 
-        self.info = BinaryInform::parse(&xml).expect("Info request invalid");
+        BinaryInform::parse(&xml)
     }
 
     fn make_headers(&self) -> HeaderMap {
@@ -139,18 +137,51 @@ impl FusClient {
         Ok(resp)
     }
 
-    /// Requests a download authorization ticket from FUS for the currently selected firmware file.
-    pub fn init_download(&self) -> reqwest::Result<()> {
+    fn generate_nonce(&self) -> reqwest::Result<()> {
+        self.make_req("NF_SmartDownloadGenerateNonce.do", "")?;
+        Ok(())
+    }
+
+    fn send_init_download(&self, info: &BinaryInform) -> reqwest::Result<()> {
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
         let init_xml = xml::binary_init_req_xml(
-            &self.info.filename,
+            &info.filename,
             &nonce,
-            &self.info.version,
-            &self.info.model_type,
-            &self.info.region,
+            &info.version,
+            &info.model_type,
+            &info.region,
         );
         self.make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)?;
         Ok(())
+    }
+
+    /// Requests a download authorization ticket from FUS for `info` and consumes
+    /// this client into an active [`DownloadSession`].
+    pub fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
+        self.send_init_download(&info)?;
+        Ok(DownloadSession {
+            client: self,
+            info,
+            reauth_gen: Mutex::new(0),
+        })
+    }
+}
+
+/// Active firmware download session holding an authenticated [`FusClient`]
+/// and the resolved [`BinaryInform`] metadata.
+pub struct DownloadSession {
+    client: FusClient,
+    info: BinaryInform,
+    /// Reauthentication generation counter. It also serves as the lock that
+    /// serializes reauth: a token expiry observed by many download threads at
+    /// once triggers a single refresh, and the rest reuse its result.
+    reauth_gen: Mutex<u64>,
+}
+
+impl DownloadSession {
+    /// Returns the firmware binary metadata associated with this download session.
+    pub fn info(&self) -> &BinaryInform {
+        &self.info
     }
 
     /// Fetches a specific byte range or chunk of the firmware binary package, transparently
@@ -159,11 +190,7 @@ impl FusClient {
     /// Both `start` and the inclusive `end` are automatically expanded outward to the nearest
     /// 16-byte AES-128 block boundaries when fetching from the server, with any excess leading
     /// or trailing bytes trimmed from the returned stream.
-    pub fn download_file(
-        &self,
-        start: Option<u64>,
-        end: Option<u64>,
-    ) -> reqwest::Result<impl Read + use<>> {
+    pub fn fetch_range(&self, start: Option<u64>, end: Option<u64>) -> Result<impl Read + use<>> {
         let aligned = AlignedRange::new(start, end);
         if aligned.remaining == Some(0) {
             return Ok(DecryptReader(None));
@@ -174,14 +201,14 @@ impl FusClient {
         // thread has already rotated the token in the meantime.
         let gen_used = *self.reauth_gen.lock().unwrap();
 
-        let resp = match self.download_file_once(aligned.start, aligned.end) {
+        let resp = match self.fetch_range_once(aligned.start, aligned.end) {
             Err(e) if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) => {
                 // The download token expired mid-transfer. Refresh it (at most
                 // once per expiry across all threads) and retry the request once
                 // with the new token. If it still fails, the caller's retry loop
                 // takes over.
                 self.reauthenticate(gen_used);
-                self.download_file_once(aligned.start, aligned.end)?
+                self.fetch_range_once(aligned.start, aligned.end)?
             }
             other => other?,
         };
@@ -194,12 +221,8 @@ impl FusClient {
         ))
     }
 
-    fn download_file_once(
-        &self,
-        start: Option<u64>,
-        end: Option<u64>,
-    ) -> reqwest::Result<Response> {
-        let mut headers = self.make_headers();
+    fn fetch_range_once(&self, start: Option<u64>, end: Option<u64>) -> reqwest::Result<Response> {
+        let mut headers = self.client.make_headers();
         match (start, end) {
             (Some(s), Some(e)) => headers.insert(
                 RANGE,
@@ -221,6 +244,7 @@ impl FusClient {
             self.info.path, self.info.filename
         );
         self.client
+            .client
             .get(url)
             .headers(headers)
             .send()?
@@ -242,10 +266,8 @@ impl FusClient {
         if *generation != gen_seen {
             return;
         }
-        if self
-            .make_req("NF_SmartDownloadGenerateNonce.do", "")
-            .is_ok()
-            && self.init_download().is_ok()
+        if self.client.generate_nonce().is_ok()
+            && self.client.send_init_download(&self.info).is_ok()
         {
             *generation += 1;
         }
@@ -434,26 +456,6 @@ mod tests {
     use super::*;
     use aes::cipher::BlockModeEncrypt;
     use std::io::Cursor;
-
-    impl FusClient {
-        pub(crate) fn new_mock(size: u64) -> Self {
-            Self {
-                client: Client::new(),
-                auth_state: Mutex::new(AuthState::default()),
-                reauth_gen: Mutex::new(0),
-                info: BinaryInform {
-                    version: "S931U1UES1AXB2/S931U1OYM1AXB2/S931U1UES1AXB2/S931U1UES1AXB2"
-                        .to_string(),
-                    filename: "SM-S931U1_1_20240215120000_abcdefghij_fac.zip.enc4".to_string(),
-                    path: "T1/SM-S931U1/XAA/".to_string(),
-                    size,
-                    key: vec![0x42; 16],
-                    model_type: "SM-S931U1".to_string(),
-                    region: "XAA".to_string(),
-                },
-            }
-        }
-    }
 
     const TEST_KEY: [u8; 16] = [0x13; 16];
 

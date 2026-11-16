@@ -70,17 +70,18 @@ pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error
         }
     };
 
-    let mut client = FusClient::new().expect("Unable to establish FusClient");
-    client.fetch_binary_info(&args.fus.model, &args.fus.region, &version);
+    let client = FusClient::new().expect("Unable to establish FusClient");
+    let info = client
+        .fetch_binary_info(&args.fus.model, &args.fus.region, &version)
+        .map_err(|e| format!("Failed to fetch binary info: {e}"))?;
 
-    println!("Firmware Version: {}", client.info.version);
+    println!("Firmware Version: {}", info.version);
 
-    let default_name = client
-        .info
+    let default_name = info
         .filename
         .strip_suffix(".enc4")
-        .or_else(|| client.info.filename.strip_suffix(".enc2"))
-        .unwrap_or(client.info.filename.as_str());
+        .or_else(|| info.filename.strip_suffix(".enc2"))
+        .unwrap_or(info.filename.as_str());
 
     let final_out = match (args.out_file, args.out_dir) {
         (Some(name), _) => name,
@@ -88,7 +89,11 @@ pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error
         _ => default_name.to_string(),
     };
 
-    println!("Downloading {} to {}", client.info.filename, final_out);
+    println!("Downloading {} to {}", info.filename, final_out);
+
+    let session = client
+        .init_download(info)
+        .expect("Failed to initialize download");
 
     let progress = ProgressBar::no_length()
         .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
@@ -104,7 +109,7 @@ pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error
         force: args.force,
     };
 
-    if let Err(e) = download_firmware(&client, &final_out, options, &wrapper) {
+    if let Err(e) = download_firmware(&session, &final_out, options, &wrapper) {
         progress.abandon();
         // Keep the error apart from the abandoned progress bar
         eprintln!();
