@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use fast_md5::Md5;
 use roxmltree::{Document, Node};
 use std::collections::HashMap;
 
@@ -218,6 +219,23 @@ pub struct BinaryInform {
 }
 
 impl BinaryInform {
+    pub(crate) fn checksum(&self) -> [u8; 16] {
+        fn update_len_prefixed(hasher: &mut Md5, data: &[u8]) {
+            hasher.update(&(data.len() as u64).to_le_bytes());
+            hasher.update(data);
+        }
+
+        let mut hasher = Md5::new();
+        update_len_prefixed(&mut hasher, self.version.as_bytes());
+        update_len_prefixed(&mut hasher, self.filename.as_bytes());
+        update_len_prefixed(&mut hasher, self.path.as_bytes());
+        hasher.update(&self.size.to_le_bytes());
+        update_len_prefixed(&mut hasher, &self.key);
+        update_len_prefixed(&mut hasher, self.model_type.as_bytes());
+        update_len_prefixed(&mut hasher, self.region.as_bytes());
+        hasher.finalize()
+    }
+
     pub(crate) fn parse(xml: &str) -> Option<BinaryInform> {
         let mut kv = parse_xml_data(xml)?;
         let fw_ver = kv

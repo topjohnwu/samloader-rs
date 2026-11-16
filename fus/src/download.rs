@@ -16,7 +16,6 @@
 
 use crate::FusClient;
 use crate::error::Result;
-use fast_md5::Md5;
 use memmap2::MmapMut;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -34,10 +33,13 @@ const BLOCK_SIZE: usize = 2 * 1024 * 1024;
 const FOOTER_MAGIC: &[u8; 8] = b"SAMLOADR";
 
 /// Version of the footer layout format.
-const FOOTER_VERSION: u32 = 1;
+const FOOTER_VERSION: u32 = 2;
 
-/// Length of the fixed trailing trailer: 16 (MD5) + 4 (footer_len) + 8 (magic) = 28 bytes.
-const TRAILER_LEN: usize = 28;
+/// Length of the fixed header: 4 (version) + 16 (info_checksum) + 4 (block_size) + 4 (num_blocks) = 28 bytes.
+const HEADER_LEN: usize = 28;
+
+/// Length of the fixed trailing trailer: 4 (footer_len) + 8 (magic) = 12 bytes.
+const TRAILER_LEN: usize = 12;
 
 /// A trait for reporting firmware download progress and logging messages.
 pub trait DownloadProgress: Send + Sync {
@@ -98,7 +100,6 @@ struct ByteRange {
 
 struct FooterLayout {
     num_blocks: usize,
-    bitfield_offset: usize,
     bitfield_len: usize,
     footer_len: usize,
 }
@@ -107,20 +108,10 @@ impl FooterLayout {
     fn new(client: &FusClient) -> Self {
         let num_blocks = client.info.size.div_ceil(BLOCK_SIZE as u64) as usize;
         let bitfield_len = num_blocks.div_ceil(8);
-        let bitfield_offset = 4 // version
-            + 8 // file_size
-            + 16 // key
-            + 4 // block_size
-            + 4 // num_blocks
-            + 2 // filename_len
-            + client.info.filename.len()
-            + 2 // version_len
-            + client.info.version.len();
-        let footer_len = bitfield_offset + bitfield_len + TRAILER_LEN;
+        let footer_len = HEADER_LEN + bitfield_len + TRAILER_LEN;
 
         Self {
             num_blocks,
-            bitfield_offset,
             bitfield_len,
             footer_len,
         }
@@ -132,35 +123,18 @@ impl FooterLayout {
 
         out[cursor..cursor + 4].copy_from_slice(&FOOTER_VERSION.to_le_bytes());
         cursor += 4;
-        out[cursor..cursor + 8].copy_from_slice(&client.info.size.to_le_bytes());
-        cursor += 8;
-        out[cursor..cursor + 16].copy_from_slice(client.info.key.as_slice());
+        out[cursor..cursor + 16].copy_from_slice(&client.info.checksum());
         cursor += 16;
         out[cursor..cursor + 4].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         cursor += 4;
         out[cursor..cursor + 4].copy_from_slice(&(self.num_blocks as u32).to_le_bytes());
         cursor += 4;
 
-        let fn_bytes = client.info.filename.as_bytes();
-        out[cursor..cursor + 2].copy_from_slice(&(fn_bytes.len() as u16).to_le_bytes());
-        cursor += 2;
-        out[cursor..cursor + fn_bytes.len()].copy_from_slice(fn_bytes);
-        cursor += fn_bytes.len();
-
-        let ver_bytes = client.info.version.as_bytes();
-        out[cursor..cursor + 2].copy_from_slice(&(ver_bytes.len() as u16).to_le_bytes());
-        cursor += 2;
-        out[cursor..cursor + ver_bytes.len()].copy_from_slice(ver_bytes);
-        cursor += ver_bytes.len();
+        debug_assert_eq!(cursor, HEADER_LEN);
 
         // Zero out bitfield initially
         out[cursor..cursor + self.bitfield_len].fill(0);
         cursor += self.bitfield_len;
-
-        // Checksum over header + bitfield
-        let checksum = fast_md5::digest(&out[..cursor]);
-        out[cursor..cursor + 16].copy_from_slice(&checksum);
-        cursor += 16;
 
         out[cursor..cursor + 4].copy_from_slice(&(self.footer_len as u32).to_le_bytes());
         cursor += 4;
@@ -179,20 +153,20 @@ struct ParsedFooter {
 impl ParsedFooter {
     fn read_and_validate<R: Read + Seek>(reader: &mut R, client: &FusClient) -> Option<Self> {
         let file_len = reader.seek(SeekFrom::End(0)).ok()?;
-        if file_len < TRAILER_LEN as u64 {
+        if file_len < (HEADER_LEN + TRAILER_LEN) as u64 {
             return None;
         }
 
         // Read trailing 12 bytes: footer_len (4) + magic (8)
-        reader.seek(SeekFrom::End(-12)).ok()?;
-        let mut tail = [0u8; 12];
+        reader.seek(SeekFrom::End(-(TRAILER_LEN as i64))).ok()?;
+        let mut tail = [0u8; TRAILER_LEN];
         reader.read_exact(&mut tail).ok()?;
         let (footer_len_bytes, magic_bytes) = tail.split_at(4);
         if magic_bytes != FOOTER_MAGIC {
             return None;
         }
         let footer_len = u32::from_le_bytes(footer_len_bytes.try_into().unwrap()) as usize;
-        if footer_len < TRAILER_LEN || footer_len as u64 > file_len {
+        if footer_len < HEADER_LEN + TRAILER_LEN || footer_len as u64 > file_len {
             return None;
         }
 
@@ -215,15 +189,9 @@ impl ParsedFooter {
             return None;
         }
 
-        let file_size = u64::from_le_bytes(footer_bytes.get(cursor..cursor + 8)?.try_into().ok()?);
-        cursor += 8;
-        if file_size != client.info.size {
-            return None;
-        }
-
-        let key = footer_bytes.get(cursor..cursor + 16)?;
+        let info_checksum = footer_bytes.get(cursor..cursor + 16)?;
         cursor += 16;
-        if key != client.info.key.as_slice() {
+        if info_checksum != client.info.checksum() {
             return None;
         }
 
@@ -240,48 +208,15 @@ impl ParsedFooter {
             return None;
         }
 
-        let fn_len =
-            u16::from_le_bytes(footer_bytes.get(cursor..cursor + 2)?.try_into().ok()?) as usize;
-        cursor += 2;
-        let filename = std::str::from_utf8(footer_bytes.get(cursor..cursor + fn_len)?).ok()?;
-        cursor += fn_len;
-        if filename != client.info.filename {
-            return None;
-        }
+        debug_assert_eq!(cursor, HEADER_LEN);
 
-        let ver_len =
-            u16::from_le_bytes(footer_bytes.get(cursor..cursor + 2)?.try_into().ok()?) as usize;
-        cursor += 2;
-        let ver_str = std::str::from_utf8(footer_bytes.get(cursor..cursor + ver_len)?).ok()?;
-        cursor += ver_len;
-        if ver_str != client.info.version {
-            return None;
-        }
-
-        let bitfield_offset = cursor;
         let bitfield_len = (num_blocks as usize).div_ceil(8);
-        if bitfield_offset + bitfield_len != payload_len {
-            return None;
-        }
-
-        // Verify checksum assuming all bitfields are zero
-        let mut hasher = Md5::new();
-        hasher.update(&footer_bytes[..bitfield_offset]);
-        const ZERO_CHUNK: [u8; 1024] = [0u8; 1024];
-        let mut remaining = bitfield_len;
-        while remaining > 0 {
-            let chunk_len = remaining.min(ZERO_CHUNK.len());
-            hasher.update(&ZERO_CHUNK[..chunk_len]);
-            remaining -= chunk_len;
-        }
-        let expected_checksum = hasher.finalize();
-        let stored_checksum = &footer_bytes[payload_len..payload_len + 16];
-        if expected_checksum.as_slice() != stored_checksum {
+        if HEADER_LEN + bitfield_len != payload_len {
             return None;
         }
 
         let bitfield = footer_bytes
-            .get(bitfield_offset..bitfield_offset + bitfield_len)?
+            .get(HEADER_LEN..HEADER_LEN + bitfield_len)?
             .to_vec();
 
         Some(Self {
@@ -362,22 +297,15 @@ fn partition_ranges_for_threads(ranges: &[ByteRange], threads: u64) -> Vec<ByteR
 }
 
 struct StateTracker<'a> {
-    footer: &'a mut [u8],
-    bitfield_offset: usize,
+    bitfield: &'a mut [u8],
     total_blocks: usize,
     file_size: u64,
 }
 
 impl<'a> StateTracker<'a> {
-    fn new(
-        footer: &'a mut [u8],
-        bitfield_offset: usize,
-        total_blocks: usize,
-        file_size: u64,
-    ) -> Self {
+    fn new(bitfield: &'a mut [u8], total_blocks: usize, file_size: u64) -> Self {
         Self {
-            footer,
-            bitfield_offset,
+            bitfield,
             total_blocks,
             file_size,
         }
@@ -399,9 +327,9 @@ impl<'a> StateTracker<'a> {
                 (blk + 1) as u64 * BLOCK_SIZE as u64
             };
             if curr_pos >= blk_end {
-                let byte_idx = self.bitfield_offset + blk / 8;
+                let byte_idx = blk / 8;
                 let bit_mask = 1 << (blk % 8);
-                self.footer[byte_idx] |= bit_mask;
+                self.bitfield[byte_idx] |= bit_mask;
             }
         }
     }
@@ -509,8 +437,7 @@ where
         let (payload_map, footer_map) = map.split_at_mut(client.info.size as usize);
 
         let tracker = Mutex::new(StateTracker::new(
-            footer_map,
-            layout.bitfield_offset,
+            &mut footer_map[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
             layout.num_blocks,
             client.info.size,
         ));
@@ -817,22 +744,29 @@ mod tests {
         // The untampered footer is valid, so each failure below is caused by its change
         assert!(validate(&buf, &client));
 
-        // Tamper with magic
-        let mut tampered = buf.clone();
-        let len = tampered.len();
-        tampered[len - 1] ^= 0xFF;
-        assert!(!validate(&tampered, &client));
+        // Tamper with header/trailer fields: version, info_checksum, block_size, num_blocks, footer_len, magic
+        let len = buf.len();
+        for offset in [0, 4, 20, 24, len - 9, len - 1] {
+            let mut tampered = buf.clone();
+            tampered[offset] ^= 0xFF;
+            assert!(!validate(&tampered, &client), "offset={offset}");
+        }
 
-        // Tamper with checksum
-        let mut tampered = buf.clone();
-        tampered[len - 20] ^= 0xFF;
-        assert!(!validate(&tampered, &client));
-
-        // Mismatched client info: a different size, or the same size but another key
+        // Mismatched client info: different size, or any mutated BinaryInform field
         assert!(!validate(&buf, &FusClient::new_mock(2 * size)));
-        let mut other_client = FusClient::new_mock(size);
-        other_client.info.key = vec![0x43; 16];
-        assert!(!validate(&buf, &other_client));
+        let mutations: Vec<fn(&mut crate::BinaryInform)> = vec![
+            |i| i.version.push('X'),
+            |i| i.filename.push('X'),
+            |i| i.path.push('X'),
+            |i| i.key[0] ^= 0xFF,
+            |i| i.model_type.push('X'),
+            |i| i.region.push('X'),
+        ];
+        for mutate in mutations {
+            let mut other_client = FusClient::new_mock(size);
+            mutate(&mut other_client.info);
+            assert!(!validate(&buf, &other_client));
+        }
     }
 
     #[test]
@@ -884,23 +818,22 @@ mod tests {
         // First run: completes blocks 0 and 1, then abruptly stops (no manual flush)
         {
             let mut tracker = StateTracker::new(
-                &mut footer,
-                layout.bitfield_offset,
+                &mut footer[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
                 layout.num_blocks,
                 client.info.size,
             );
 
             // Decrypt first 1 MiB (not complete block yet)
             tracker.on_bytes_decrypted(0, 0, 1024 * 1024);
-            assert_eq!(tracker.footer[layout.bitfield_offset], 0);
+            assert_eq!(tracker.bitfield[0], 0);
 
             // Decrypt across the 2 MiB boundary -> block 0 complete
             tracker.on_bytes_decrypted(0, 1024 * 1024, BLOCK_SIZE);
-            assert_eq!(tracker.footer[layout.bitfield_offset], 0b01);
+            assert_eq!(tracker.bitfield[0], 0b01);
 
             // Complete block 1
             tracker.on_bytes_decrypted(BLOCK_SIZE as u64, 0, BLOCK_SIZE);
-            assert_eq!(tracker.footer[layout.bitfield_offset], 0b11);
+            assert_eq!(tracker.bitfield[0], 0b11);
         }
 
         let range = |start: usize| ByteRange {
@@ -912,8 +845,7 @@ mod tests {
         // Second run: resumes and completes block 2
         {
             let mut tracker = StateTracker::new(
-                &mut footer,
-                layout.bitfield_offset,
+                &mut footer[HEADER_LEN..HEADER_LEN + layout.bitfield_len],
                 layout.num_blocks,
                 client.info.size,
             );
