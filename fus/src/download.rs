@@ -16,8 +16,6 @@
 
 use crate::FusClient;
 use crate::error::Result;
-use aes::cipher::BlockModeDecrypt;
-use aes::cipher::inout::InOutBuf;
 use fast_md5::Md5;
 use memmap2::MmapMut;
 use std::collections::VecDeque;
@@ -730,13 +728,12 @@ fn download_chunk(
     progress: &impl DownloadProgress,
     tracker: &Mutex<StateTracker<'_>>,
 ) -> ChunkOutcome {
-    let mut dec = client.get_decryptor();
     let mut dec_pos = 0_usize;
     let mut retries = 0_u32;
 
     loop {
-        let mut resp = match client.download_file(Some(start + dec_pos as u64), end) {
-            Ok(resp) => resp,
+        let mut reader = match client.download_file(Some(start + dec_pos as u64), end) {
+            Ok(reader) => reader,
             Err(e) => {
                 retries += 1;
                 if retries > MAX_STALL_RETRIES {
@@ -752,41 +749,28 @@ fn download_chunk(
         };
 
         let resume_from = dec_pos;
-        let mut dl_pos = dec_pos;
 
         let stall = loop {
-            match resp.read(&mut chunk[dl_pos..]) {
-                Ok(0) => {
+            match reader.read(&mut chunk[dec_pos..]) {
+                Ok(0) => return ChunkOutcome::Done,
+                Ok(n) => {
+                    let prev_dec = dec_pos;
+                    dec_pos += n;
+                    progress.inc(n as u64);
+
                     tracker
                         .lock()
                         .unwrap()
-                        .on_bytes_decrypted(start, resume_from, dec_pos);
-                    return ChunkOutcome::Done;
+                        .on_bytes_decrypted(start, prev_dec, dec_pos);
+
+                    if dec_pos == chunk.len() {
+                        return ChunkOutcome::Done;
+                    }
                 }
-                Ok(n) => dl_pos += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => break e,
             }
-
-            let prev_dec = dec_pos;
-            let (blocks, tail) = InOutBuf::from(&mut chunk[dec_pos..dl_pos]).into_chunks();
-            dec.decrypt_blocks_inout(blocks);
-            dec_pos = dl_pos - tail.len();
-            progress.inc((dec_pos - prev_dec) as u64);
-
-            tracker
-                .lock()
-                .unwrap()
-                .on_bytes_decrypted(start, prev_dec, dec_pos);
         };
-
-        if dec_pos == chunk.len() {
-            tracker
-                .lock()
-                .unwrap()
-                .on_bytes_decrypted(start, resume_from, dec_pos);
-            return ChunkOutcome::Done;
-        }
 
         if dec_pos > resume_from {
             retries = 0;

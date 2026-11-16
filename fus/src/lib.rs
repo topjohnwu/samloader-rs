@@ -25,12 +25,10 @@ mod xml;
 
 pub use download::{DownloadOptions, DownloadProgress, download_firmware};
 pub use error::{Error, Result};
-pub use fusclient::{Aes128EcbDec, FusClient};
+pub use fusclient::FusClient;
 pub use xml::{BinaryInform, VersionInfo};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
-pub use aes;
-pub use ecb;
 pub use reqwest;
 
 /// Queries and fetches the standard firmware `version.xml` document for the specified device model and region.
