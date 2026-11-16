@@ -33,7 +33,7 @@ pub use reqwest;
 
 /// Queries and fetches the standard firmware `version.xml` document for the specified
 /// device model and region.
-fn fetch_version_xml(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+fn fetch_version_xml(model: &str, region: &str) -> Result<VersionInfo> {
     let version_url = format!(
         "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
         region, model
@@ -43,14 +43,15 @@ fn fetch_version_xml(model: &str, region: &str) -> reqwest::Result<VersionInfo> 
         .get(&version_url)
         .header(reqwest::header::USER_AGENT, "Kies2.0_FUS")
         .send()?
+        .error_for_status()?
         .text()?;
 
-    Ok(xml::parse_version_xml(&version_xml).expect("Failed to parse version.xml"))
+    xml::parse_version_xml(&version_xml)
 }
 
 /// Fetches the historical list of released firmware versions for the target model and region
 /// through the `SmartHistory.do` endpoint.
-fn fetch_smart_history(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+fn fetch_smart_history(model: &str, region: &str) -> Result<VersionInfo> {
     let (nonce, signature) = auth::compute_history_headers(model);
     let auth_val = format!(
         "FUS nonce=\"{nonce}\", signature=\"{signature}\", \
@@ -67,10 +68,10 @@ fn fetch_smart_history(model: &str, region: &str) -> reqwest::Result<VersionInfo
         .error_for_status()?
         .text()?;
 
-    Ok(xml::parse_history_xml(&xml).expect("Failed to parse history.xml"))
+    xml::parse_history_xml(&xml)
 }
 
 /// Fetches the historical list of released firmware versions for the target model and region.
-pub fn fetch_history(model: &str, region: &str) -> reqwest::Result<VersionInfo> {
+pub fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
     fetch_smart_history(model, region).or_else(|_| fetch_version_xml(model, region))
 }

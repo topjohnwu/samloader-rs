@@ -51,16 +51,17 @@ fn normalize_version(v: &str) -> String {
     parts.join("/")
 }
 
-pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {
-    let doc = Document::parse(xml).ok()?;
+pub(crate) fn parse_version_xml(xml: &str) -> crate::Result<VersionInfo> {
+    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
 
-    let latest_node = doc.descendants().find(|n| n.has_tag_name("latest"))?;
-    let latest_text = latest_node.text()?.trim();
-    if latest_text.is_empty() {
-        return None;
-    }
-
-    let latest = normalize_version(latest_text);
+    let latest = doc
+        .descendants()
+        .find(|n| n.has_tag_name("latest"))
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_version)
+        .ok_or_else(|| Error::InvalidResponse("missing latest version in version.xml".into()))?;
 
     let mut upgrade_entries = Vec::new();
     if let Some(upgrade_node) = doc.descendants().find(|n| n.has_tag_name("upgrade")) {
@@ -89,7 +90,7 @@ pub(crate) fn parse_version_xml(xml: &str) -> Option<VersionInfo> {
         .map(|(_, _, version)| version)
         .collect();
 
-    Some(VersionInfo {
+    Ok(VersionInfo {
         latest,
         previous,
         beta: Vec::new(),
@@ -167,9 +168,7 @@ pub(crate) fn history_req_xml(model: &str, region: &str) -> String {
     )
 }
 
-fn parse_xml_data(xml: &str) -> crate::Result<HashMap<String, String>> {
-    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
-
+fn parse_xml_status(doc: &Document) -> crate::Result<()> {
     let status_str = doc
         .root_element()
         .children()
@@ -185,6 +184,17 @@ fn parse_xml_data(xml: &str) -> crate::Result<HashMap<String, String>> {
         });
     }
 
+    Ok(())
+}
+
+pub(crate) fn check_xml_status(xml: &str) -> crate::Result<()> {
+    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
+    parse_xml_status(&doc)
+}
+
+fn parse_xml_data(xml: &str) -> crate::Result<HashMap<String, String>> {
+    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
+    parse_xml_status(&doc)?;
     Ok(get_xml_node_data(doc.root()))
 }
 
@@ -202,7 +212,6 @@ fn get_xml_node_data(node: Node) -> HashMap<String, String> {
 }
 
 /// Detailed information about a firmware binary package.
-#[derive(Default)]
 pub struct BinaryInform {
     /// The firmware build version identifier (e.g., PDA/CSC/PHONE/PHONE).
     pub version: String,
@@ -312,8 +321,8 @@ impl BinaryInfo {
     }
 }
 
-pub(crate) fn parse_history_xml(xml: &str) -> Option<VersionInfo> {
-    let doc = Document::parse(xml).ok()?;
+pub(crate) fn parse_history_xml(xml: &str) -> crate::Result<VersionInfo> {
+    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
     let mut consolidated: HashMap<(String, String, i64), BinaryInfo> = HashMap::new();
 
     for node in doc.descendants().filter(|n| n.has_tag_name("BINARY_INFO")) {
@@ -336,7 +345,9 @@ pub(crate) fn parse_history_xml(xml: &str) -> Option<VersionInfo> {
     }
 
     if consolidated.is_empty() {
-        return None;
+        return Err(Error::InvalidResponse(
+            "no firmware entries in history.xml".into(),
+        ));
     }
 
     // Chronological Sorting (Newest First)
@@ -363,12 +374,14 @@ pub(crate) fn parse_history_xml(xml: &str) -> Option<VersionInfo> {
     beta.dedup();
 
     if previous.is_empty() {
-        return None;
+        return Err(Error::InvalidResponse(
+            "no stable firmware versions in history.xml".into(),
+        ));
     }
 
     let latest = previous.remove(0);
 
-    Some(VersionInfo {
+    Ok(VersionInfo {
         latest,
         previous,
         beta,
@@ -511,14 +524,19 @@ mod tests {
         let status_xml =
             r#"<FUSMsg><FUSBody><Results><Status>S01</Status></Results></FUSBody></FUSMsg>"#;
         assert!(matches!(
+            check_xml_status(status_xml),
+            Err(Error::ServerStatus { status }) if status == "S01"
+        ));
+        assert!(matches!(
             BinaryInform::parse(status_xml),
             Err(Error::ServerStatus { status }) if status == "S01"
         ));
 
-        let missing_xml =
+        let ok_xml =
             r#"<FUSMsg><FUSBody><Results><Status>S00</Status></Results></FUSBody></FUSMsg>"#;
+        assert!(check_xml_status(ok_xml).is_ok());
         assert!(matches!(
-            BinaryInform::parse(missing_xml),
+            BinaryInform::parse(ok_xml),
             Err(Error::InvalidResponse(_))
         ));
     }

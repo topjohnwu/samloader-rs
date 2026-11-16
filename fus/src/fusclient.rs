@@ -142,7 +142,7 @@ impl FusClient {
         Ok(())
     }
 
-    fn send_init_download(&self, info: &BinaryInform) -> reqwest::Result<()> {
+    fn send_init_download(&self, info: &BinaryInform) -> Result<()> {
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
         let init_xml = xml::binary_init_req_xml(
             &info.filename,
@@ -151,8 +151,10 @@ impl FusClient {
             &info.model_type,
             &info.region,
         );
-        self.make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)?;
-        Ok(())
+        let xml = self
+            .make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)?
+            .text()?;
+        xml::check_xml_status(&xml)
     }
 
     /// Requests a download authorization ticket from FUS for `info` and consumes
