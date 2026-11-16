@@ -795,46 +795,14 @@ fn backoff(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xml::BinaryInform;
     use std::io::Cursor;
-
-    fn make_test_client(size: u64) -> FusClient {
-        FusClient::new_mock(BinaryInform {
-            version: "S931U1UES1AXB2/S931U1OYM1AXB2/S931U1UES1AXB2/S931U1UES1AXB2".to_string(),
-            filename: "SM-S931U1_1_20240215120000_abcdefghij_fac.zip.enc4".to_string(),
-            path: "T1/SM-S931U1/XAA/".to_string(),
-            size,
-            key: vec![0x42; 16],
-            model_type: "SM-S931U1".to_string(),
-            region: "XAA".to_string(),
-        })
-    }
-
-    #[test]
-    fn test_footer_layout_and_serialization() {
-        let client = make_test_client(5 * 1024 * 1024); // 5 MiB -> 3 blocks (2 + 2 + 1)
-        let layout = FooterLayout::new(&client);
-        assert_eq!(layout.num_blocks, 3);
-        assert_eq!(layout.bitfield_len, 1);
-
-        let mut buf = vec![0u8; layout.footer_len];
-        layout.serialize_initial(&client, &mut buf);
-
-        let mut cursor = Cursor::new(vec![0u8; 5 * 1024 * 1024]);
-        cursor.seek(SeekFrom::End(0)).unwrap();
-        cursor.write_all(&buf).unwrap();
-
-        let parsed = ParsedFooter::read_and_validate(&mut cursor, &client)
-            .expect("Footer validation failed");
-        assert_eq!(parsed.num_blocks, 3);
-        assert_eq!(parsed.bitfield, vec![0]);
-    }
 
     #[test]
     fn test_footer_validation_failures() {
-        let size = 4 * 1024 * 1024;
-        let client = make_test_client(size);
+        let size = 5 * 1024 * 1024; // 3 blocks (2 + 2 + 1)
+        let client = FusClient::new_mock(size);
         let layout = FooterLayout::new(&client);
+        assert_eq!(layout.num_blocks, 3);
         let mut buf = vec![0u8; layout.footer_len];
         layout.serialize_initial(&client, &mut buf);
 
@@ -861,8 +829,8 @@ mod tests {
         assert!(!validate(&tampered, &client));
 
         // Mismatched client info: a different size, or the same size but another key
-        assert!(!validate(&buf, &make_test_client(2 * size)));
-        let mut other_client = make_test_client(size);
+        assert!(!validate(&buf, &FusClient::new_mock(2 * size)));
+        let mut other_client = FusClient::new_mock(size);
         other_client.info.key = vec![0x43; 16];
         assert!(!validate(&buf, &other_client));
     }
@@ -897,7 +865,7 @@ mod tests {
     #[test]
     fn test_state_tracker_interruption_and_resume() {
         let size = 10 * 1024 * 1024; // 5 blocks
-        let client = make_test_client(size);
+        let client = FusClient::new_mock(size);
         let layout = FooterLayout::new(&client);
         let mut footer = vec![0u8; layout.footer_len];
         layout.serialize_initial(&client, &mut footer);

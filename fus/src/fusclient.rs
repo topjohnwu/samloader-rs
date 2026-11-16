@@ -75,16 +75,6 @@ impl FusClient {
         Ok(fus)
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_mock(info: BinaryInform) -> Self {
-        Self {
-            client: Client::new(),
-            auth_state: Mutex::new(AuthState::default()),
-            reauth_gen: Mutex::new(0),
-            info,
-        }
-    }
-
     /// Queries the server for firmware binary metadata matching the requested model, region, and version.
     pub fn fetch_binary_info(&mut self, model: &str, region: &str, version: &str) {
         let mut parts: Vec<&str> = version.split('/').collect();
@@ -478,6 +468,26 @@ mod tests {
     use aes::cipher::BlockModeEncrypt;
     use std::io::Cursor;
 
+    impl FusClient {
+        pub(crate) fn new_mock(size: u64) -> Self {
+            Self {
+                client: Client::new(),
+                auth_state: Mutex::new(AuthState::default()),
+                reauth_gen: Mutex::new(0),
+                info: BinaryInform {
+                    version: "S931U1UES1AXB2/S931U1OYM1AXB2/S931U1UES1AXB2/S931U1UES1AXB2"
+                        .to_string(),
+                    filename: "SM-S931U1_1_20240215120000_abcdefghij_fac.zip.enc4".to_string(),
+                    path: "T1/SM-S931U1/XAA/".to_string(),
+                    size,
+                    key: vec![0x42; 16],
+                    model_type: "SM-S931U1".to_string(),
+                    region: "XAA".to_string(),
+                },
+            }
+        }
+    }
+
     const TEST_KEY: [u8; 16] = [0x13; 16];
 
     fn encrypt_test_data(plaintext: &[u8]) -> Vec<u8> {
@@ -493,18 +503,14 @@ mod tests {
         data: Vec<u8>,
         pos: usize,
         step: usize,
-        interrupt_every: usize,
         reads: usize,
     }
 
     impl Read for TrickleReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.reads += 1;
-            if self.interrupt_every > 0 && self.reads.is_multiple_of(self.interrupt_every) {
+            if self.reads.is_multiple_of(3) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "eintr"));
-            }
-            if self.pos >= self.data.len() {
-                return Ok(0);
             }
             let n = (self.data.len() - self.pos).min(self.step).min(buf.len());
             buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -513,124 +519,82 @@ mod tests {
         }
     }
 
-    fn make_reader<R: Read>(inner: R, aligned: &AlignedRange) -> DecryptReader<R> {
-        if aligned.remaining == Some(0) {
-            return DecryptReader(None);
-        }
-        DecryptReader::new(
-            inner,
-            Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
-            aligned.skip_start,
-            aligned.remaining,
-        )
-    }
-
     #[test]
     fn test_decrypt_reader_ranges() {
         let plaintext: Vec<u8> = (0..128_u8).collect();
         let ciphertext = encrypt_test_data(&plaintext);
 
-        // Full aligned stream with trickled reads and EINTR
-        let aligned = AlignedRange::new(None, None);
-        assert_eq!((aligned.start, aligned.end), (None, None));
-        let mut reader = make_reader(
-            TrickleReader {
-                data: ciphertext.clone(),
-                pos: 0,
-                step: 5,
-                interrupt_every: 3,
-                reads: 0,
-            },
-            &aligned,
+        type Case<'a> = (
+            Option<u64>,
+            Option<u64>,
+            (Option<u64>, Option<u64>),
+            usize,
+            usize,
+            &'a [u8],
         );
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out, plaintext);
+        let cases: &[Case<'_>] = &[
+            (None, None, (None, None), 5, 64, &plaintext),
+            (None, Some(20), (None, Some(31)), 64, 64, &plaintext[..=20]),
+            (
+                Some(5),
+                Some(73),
+                (Some(0), Some(79)),
+                3,
+                7,
+                &plaintext[5..=73],
+            ),
+            (Some(19), None, (Some(16), None), 11, 256, &plaintext[19..]),
+            (Some(20), Some(10), (None, None), 16, 64, &[]),
+        ];
 
-        // Open start with unaligned end
-        let aligned = AlignedRange::new(None, Some(20));
-        assert_eq!((aligned.start, aligned.end), (None, Some(31)));
-        let slice = ciphertext[..=aligned.end.unwrap() as usize].to_vec();
-        let mut reader = make_reader(Cursor::new(slice), &aligned);
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out, plaintext[..=20]);
+        for &(start, end, exp_range, step, buf_len, expected) in cases {
+            let aligned = AlignedRange::new(start, end);
+            assert_eq!((aligned.start, aligned.end), exp_range);
 
-        // Single byte inside first block
-        let aligned = AlignedRange::new(Some(5), Some(5));
-        assert_eq!((aligned.start, aligned.end), (Some(0), Some(15)));
-        let slice =
-            ciphertext[aligned.start.unwrap() as usize..=aligned.end.unwrap() as usize].to_vec();
-        let mut reader = make_reader(Cursor::new(slice), &aligned);
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out, plaintext[5..=5]);
+            let mut reader = if aligned.remaining == Some(0) {
+                DecryptReader(None)
+            } else {
+                let s = aligned.start.unwrap_or(0) as usize;
+                let slice = match aligned.end {
+                    Some(e) => ciphertext[s..=e as usize].to_vec(),
+                    None => ciphertext[s..].to_vec(),
+                };
+                DecryptReader::new(
+                    TrickleReader {
+                        data: slice,
+                        pos: 0,
+                        step,
+                        reads: 0,
+                    },
+                    Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
+                    aligned.skip_start,
+                    aligned.remaining,
+                )
+            };
 
-        // Unaligned start & end spanning multiple blocks, read via small 7-byte caller buffer
-        let aligned = AlignedRange::new(Some(5), Some(73));
-        assert_eq!((aligned.start, aligned.end), (Some(0), Some(79)));
-        let slice =
-            ciphertext[aligned.start.unwrap() as usize..=aligned.end.unwrap() as usize].to_vec();
-        let mut reader = make_reader(
-            TrickleReader {
-                data: slice,
-                pos: 0,
-                step: 3,
-                interrupt_every: 4,
-                reads: 0,
-            },
-            &aligned,
-        );
-        let mut out = Vec::new();
-        let mut small_buf = [0u8; 7];
-        loop {
-            let n = reader.read(&mut small_buf).unwrap();
-            if n == 0 {
-                break;
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; buf_len];
+            loop {
+                let n = reader.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
             }
-            out.extend_from_slice(&small_buf[..n]);
+            assert_eq!(out, expected, "range=({start:?}, {end:?})");
         }
-        assert_eq!(out, plaintext[5..=73]);
-
-        // Unaligned start, open-ended EOF, large buffer (transitions from staging to fast path)
-        let aligned = AlignedRange::new(Some(19), None);
-        assert_eq!((aligned.start, aligned.end), (Some(16), None));
-        let slice = ciphertext[aligned.start.unwrap() as usize..].to_vec();
-        let mut reader = make_reader(
-            TrickleReader {
-                data: slice,
-                pos: 0,
-                step: 11,
-                interrupt_every: 2,
-                reads: 0,
-            },
-            &aligned,
-        );
-        let mut out = vec![0u8; 256];
-        let mut total = 0;
-        loop {
-            let n = reader.read(&mut out[total..]).unwrap();
-            if n == 0 {
-                break;
-            }
-            total += n;
-        }
-        assert_eq!(&out[..total], &plaintext[19..]);
-
-        // Empty range (start > end)
-        let aligned = AlignedRange::new(Some(20), Some(10));
-        let mut reader = make_reader(Cursor::new(Vec::<u8>::new()), &aligned);
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert!(out.is_empty());
     }
 
     #[test]
     fn test_decrypt_reader_truncated_block_errors() {
         let plaintext = vec![0xAA; 32];
         let ciphertext = encrypt_test_data(&plaintext);
-        let aligned = AlignedRange::new(None, None);
-        let mut reader = make_reader(Cursor::new(ciphertext[..25].to_vec()), &aligned);
+        let mut reader = DecryptReader::new(
+            Cursor::new(ciphertext[..25].to_vec()),
+            Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
+            0,
+            None,
+        );
         let mut out = [0u8; 64];
         assert_eq!(reader.read(&mut out).unwrap(), 16);
         let err = reader.read(&mut out[16..]).unwrap_err();

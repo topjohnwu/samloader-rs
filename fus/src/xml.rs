@@ -464,13 +464,6 @@ mod tests {
         );
         assert_eq!(info.size, 5000000000);
         assert_eq!(info.region, "XAA");
-        let expected_key_str = get_logic_check(
-            "S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1/S931U1UEU1AWF1",
-            "1234567890abcdef",
-        );
-        assert_eq!(
-            info.key,
-            fast_md5::digest(expected_key_str.as_bytes()).to_vec()
-        );
+        assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U").to_vec());
     }
 }
