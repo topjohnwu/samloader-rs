@@ -186,15 +186,22 @@ impl DownloadSession {
         &self.info
     }
 
+    /// Streams and transparently decrypts the entire firmware binary package,
+    /// stripping trailing PKCS#7 padding and automatically handling re-authentication
+    /// as needed.
+    pub fn fetch(&self) -> Result<impl Read + use<>> {
+        self.fetch_range(None, None)
+    }
+
     /// Fetches a specific byte range or chunk of the firmware binary package, transparently
     /// decrypting it and automatically handling re-authentication as needed.
     ///
     /// Both `start` and the inclusive `end` are automatically expanded outward to the nearest
     /// 16-byte AES-128 block boundaries when fetching from the server, with any excess leading
-    /// or trailing bytes trimmed from the returned stream.
+    /// bytes, trailing bytes, or EOF PKCS#7 padding trimmed from the returned stream.
     pub fn fetch_range(&self, start: Option<u64>, end: Option<u64>) -> Result<impl Read + use<>> {
-        let aligned = AlignedRange::new(start, end);
-        if aligned.remaining == Some(0) {
+        let aligned = AlignedRange::new(start, end, self.info.size);
+        if aligned.dec_remaining == 0 {
             return Ok(DecryptReader(None));
         }
 
@@ -203,24 +210,19 @@ impl DownloadSession {
         // thread has already rotated the token in the meantime.
         let gen_used = *self.reauth_gen.lock().unwrap();
 
-        let resp = match self.fetch_range_once(aligned.start, aligned.end) {
+        let resp = match self.fetch_range_once(aligned.http_start, aligned.http_end) {
             Err(e) if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) => {
                 // The download token expired mid-transfer. Refresh it (at most
                 // once per expiry across all threads) and retry the request once
                 // with the new token. If it still fails, the caller's retry loop
                 // takes over.
                 self.reauthenticate(gen_used);
-                self.fetch_range_once(aligned.start, aligned.end)?
+                self.fetch_range_once(aligned.http_start, aligned.http_end)?
             }
             other => other?,
         };
 
-        Ok(DecryptReader::new(
-            resp,
-            self.get_decryptor(),
-            aligned.skip_start,
-            aligned.remaining,
-        ))
+        Ok(DecryptReader::new(resp, self.get_decryptor(), aligned))
     }
 
     fn fetch_range_once(&self, start: Option<u64>, end: Option<u64>) -> reqwest::Result<Response> {
@@ -276,37 +278,56 @@ impl DownloadSession {
     }
 
     fn get_decryptor(&self) -> Aes128EcbDec {
-        Aes128EcbDec::new_from_slice(self.info.key.as_slice()).unwrap()
+        Aes128EcbDec::new(&self.info.key.into())
     }
 }
 
 struct AlignedRange {
-    start: Option<u64>,
-    end: Option<u64>,
+    http_start: Option<u64>,
+    http_end: Option<u64>,
     skip_start: usize,
-    remaining: Option<u64>,
+    dec_remaining: u64,
+    enc_remaining: u64,
+    unpad_tail: bool,
 }
 
 impl AlignedRange {
-    fn new(start: Option<u64>, end: Option<u64>) -> Self {
+    fn new(start: Option<u64>, end: Option<u64>, file_size: u64) -> Self {
+        let empty = Self {
+            http_start: None,
+            http_end: None,
+            skip_start: 0,
+            dec_remaining: 0,
+            enc_remaining: 0,
+            unpad_tail: false,
+        };
+        if file_size == 0 {
+            return empty;
+        }
+
         let req_start = start.unwrap_or(0);
-        if let Some(req_end) = end
-            && req_end < req_start
-        {
-            return Self {
-                start: None,
-                end: None,
-                skip_start: 0,
-                remaining: Some(0),
-            };
+        let max_end = file_size - 1;
+        let req_end = end.map_or(max_end, |e| e.min(max_end));
+        if req_end < req_start {
+            return empty;
         }
 
         let aligned_start = req_start & !15;
+        let aligned_end = (req_end | 15).min(max_end);
+        let Some(dec_remaining) = (req_end - req_start).checked_add(1) else {
+            return empty;
+        };
+        let Some(enc_remaining) = (aligned_end - aligned_start).checked_add(1) else {
+            return empty;
+        };
+
         Self {
-            start: start.map(|_| aligned_start),
-            end: end.map(|e| e | 15),
+            http_start: start.map(|_| aligned_start),
+            http_end: end.map(|_| aligned_end),
             skip_start: (req_start - aligned_start) as usize,
-            remaining: end.and_then(|e| (e - req_start).checked_add(1)),
+            dec_remaining,
+            enc_remaining,
+            unpad_tail: file_size >= 16 && file_size.is_multiple_of(16) && aligned_end == max_end,
         }
     }
 }
@@ -321,11 +342,16 @@ struct DecryptInner<R> {
     dec_pos: usize,
     dec_len: usize,
     skip_start: usize,
-    remaining: Option<u64>,
+    dec_remaining: u64,
+    enc_remaining: u64,
+    unpad_tail: bool,
 }
 
 impl<R> DecryptReader<R> {
-    fn new(resp: R, dec: Aes128EcbDec, skip_start: usize, remaining: Option<u64>) -> Self {
+    fn new(resp: R, dec: Aes128EcbDec, aligned: AlignedRange) -> Self {
+        if aligned.dec_remaining == 0 {
+            return Self(None);
+        }
         Self(Some(DecryptInner {
             resp,
             dec,
@@ -333,8 +359,10 @@ impl<R> DecryptReader<R> {
             enc_len: 0,
             dec_pos: 0,
             dec_len: 0,
-            skip_start,
-            remaining,
+            skip_start: aligned.skip_start,
+            dec_remaining: aligned.dec_remaining,
+            enc_remaining: aligned.enc_remaining,
+            unpad_tail: aligned.unpad_tail,
         }))
     }
 }
@@ -344,21 +372,27 @@ impl<R> DecryptInner<R> {
         let n = (self.dec_len - self.dec_pos).min(buf.len());
         buf[..n].copy_from_slice(&self.rem[self.dec_pos..self.dec_pos + n]);
         self.dec_pos += n;
-        if let Some(rem) = &mut self.remaining {
-            *rem -= n as u64;
-        }
+        self.dec_remaining -= n as u64;
         n
+    }
+}
+
+fn unpadded_block_len(block: &[u8; 16]) -> usize {
+    let pad = block[15] as usize;
+    if (1..=16).contains(&pad) && block[16 - pad..].iter().all(|&b| b == pad as u8) {
+        16 - pad
+    } else {
+        16
     }
 }
 
 fn read_at_least_16<R: Read>(resp: &mut R, dst: &mut [u8], total: &mut usize) -> io::Result<()> {
     while *total < 16 {
         match resp.read(&mut dst[*total..]) {
-            Ok(0) if *total == 0 => return Ok(()),
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "truncated AES block at EOF",
+                    "premature EOF in encrypted stream",
                 ));
             }
             Ok(n) => *total += n,
@@ -380,19 +414,25 @@ impl<R: Read> Read for DecryptReader<R> {
 
         if inner.dec_pos < inner.dec_len {
             let n = inner.drain_dec_rem(buf);
-            if inner.remaining == Some(0) {
+            if inner.dec_remaining == 0 {
                 self.0 = None;
             }
             return Ok(n);
         }
 
-        // Zero-copy fast path: aligned start, >= 16 bytes requested and remaining.
-        if inner.skip_start == 0 && buf.len() >= 16 && inner.remaining.is_none_or(|rem| rem >= 16) {
-            let cap = inner.remaining.map_or(buf.len(), |rem| {
-                buf.len().min(rem.min(usize::MAX as u64) as usize)
-            });
-            let max_aligned = cap & !15;
+        let enc_fast_limit = if inner.unpad_tail {
+            inner.enc_remaining.saturating_sub(16)
+        } else {
+            inner.enc_remaining
+        };
+        let fast_cap = buf
+            .len()
+            .min(inner.dec_remaining.min(usize::MAX as u64) as usize)
+            .min(enc_fast_limit.min(usize::MAX as u64) as usize);
+        let max_aligned = fast_cap & !15;
 
+        // Zero-copy fast path: aligned start and >= 16 non-final bytes requested and available.
+        if inner.skip_start == 0 && max_aligned >= 16 {
             let mut total = inner.enc_len;
             buf[..total].copy_from_slice(&inner.rem[..total]);
             inner.enc_len = 0;
@@ -401,10 +441,6 @@ impl<R: Read> Read for DecryptReader<R> {
                 inner.rem[..total].copy_from_slice(&buf[..total]);
                 inner.enc_len = total;
                 return Err(e);
-            }
-            if total == 0 {
-                self.0 = None;
-                return Ok(0);
             }
 
             let tail_len = total & 15;
@@ -415,16 +451,16 @@ impl<R: Read> Read for DecryptReader<R> {
             let (blocks, _) = InOutBuf::from(&mut buf[..aligned]).into_chunks();
             inner.dec.decrypt_blocks_inout(blocks);
 
-            if let Some(rem) = &mut inner.remaining {
-                *rem -= aligned as u64;
-                if *rem == 0 {
-                    self.0 = None;
-                }
+            inner.enc_remaining -= aligned as u64;
+            inner.dec_remaining -= aligned as u64;
+            if inner.dec_remaining == 0 {
+                self.0 = None;
             }
             return Ok(aligned);
         }
 
-        // Staging path for unaligned prefix, small caller buffers (< 16), or final tail (< 16).
+        // Staging path for unaligned prefix, small caller buffers (< 16),
+        // unaligned range end (< 16 remaining), or the final PKCS#7-padded block.
         let mut total = inner.enc_len;
         inner.enc_len = 0;
 
@@ -432,21 +468,29 @@ impl<R: Read> Read for DecryptReader<R> {
             inner.enc_len = total;
             return Err(e);
         }
-        if total == 0 {
-            self.0 = None;
-            return Ok(0);
-        }
+        inner.enc_remaining = inner.enc_remaining.saturating_sub(16);
 
         let (blocks, _) = InOutBuf::from(&mut inner.rem[..]).into_chunks();
         inner.dec.decrypt_blocks_inout(blocks);
 
-        inner.dec_pos = inner.skip_start;
+        let block_plain_len = if inner.unpad_tail && inner.enc_remaining == 0 {
+            unpadded_block_len(&inner.rem)
+        } else {
+            16
+        };
+
+        let start_in_block = inner.skip_start.min(block_plain_len);
         inner.skip_start = 0;
-        let max_avail = inner.remaining.unwrap_or(u64::MAX).min(16) as usize;
-        inner.dec_len = inner.dec_pos + (16 - inner.dec_pos).min(max_avail);
+        let max_avail = inner.dec_remaining.min(16) as usize;
+        let avail = (block_plain_len - start_in_block).min(max_avail);
+        inner.dec_pos = start_in_block;
+        inner.dec_len = start_in_block + avail;
+        if inner.enc_remaining == 0 {
+            inner.dec_remaining = avail as u64;
+        }
 
         let n = inner.drain_dec_rem(buf);
-        if inner.remaining == Some(0) {
+        if inner.dec_remaining == 0 {
             self.0 = None;
         }
         Ok(n)
@@ -470,6 +514,13 @@ mod tests {
         buf
     }
 
+    fn encrypt_pkcs7(plaintext: &[u8]) -> Vec<u8> {
+        let pad = 16 - (plaintext.len() % 16);
+        let mut padded = plaintext.to_vec();
+        padded.extend(std::iter::repeat_n(pad as u8, pad));
+        encrypt_test_data(&padded)
+    }
+
     struct TrickleReader {
         data: Vec<u8>,
         pos: usize,
@@ -488,6 +539,50 @@ mod tests {
             self.pos += n;
             Ok(n)
         }
+    }
+
+    fn read_range(
+        ciphertext: &[u8],
+        start: Option<u64>,
+        end: Option<u64>,
+        step: usize,
+        buf_len: usize,
+    ) -> ((Option<u64>, Option<u64>), Vec<u8>) {
+        let file_size = ciphertext.len() as u64;
+        let aligned = AlignedRange::new(start, end, file_size);
+        let http_range = (aligned.http_start, aligned.http_end);
+
+        let slice = if aligned.dec_remaining == 0 {
+            Vec::new()
+        } else {
+            let s = aligned.http_start.unwrap_or(0) as usize;
+            match aligned.http_end {
+                Some(e) => ciphertext[s..=e as usize].to_vec(),
+                None => ciphertext[s..].to_vec(),
+            }
+        };
+
+        let mut reader = DecryptReader::new(
+            TrickleReader {
+                data: slice,
+                pos: 0,
+                step,
+                reads: 0,
+            },
+            Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
+            aligned,
+        );
+
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; buf_len];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        (http_range, out)
     }
 
     #[test]
@@ -516,59 +611,127 @@ mod tests {
             ),
             (Some(19), None, (Some(16), None), 11, 256, &plaintext[19..]),
             (Some(20), Some(10), (None, None), 16, 64, &[]),
+            (Some(128), None, (None, None), 16, 64, &[]),
         ];
 
         for &(start, end, exp_range, step, buf_len, expected) in cases {
-            let aligned = AlignedRange::new(start, end);
-            assert_eq!((aligned.start, aligned.end), exp_range);
-
-            let mut reader = if aligned.remaining == Some(0) {
-                DecryptReader(None)
-            } else {
-                let s = aligned.start.unwrap_or(0) as usize;
-                let slice = match aligned.end {
-                    Some(e) => ciphertext[s..=e as usize].to_vec(),
-                    None => ciphertext[s..].to_vec(),
-                };
-                DecryptReader::new(
-                    TrickleReader {
-                        data: slice,
-                        pos: 0,
-                        step,
-                        reads: 0,
-                    },
-                    Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
-                    aligned.skip_start,
-                    aligned.remaining,
-                )
-            };
-
-            let mut out = Vec::new();
-            let mut buf = vec![0u8; buf_len];
-            loop {
-                let n = reader.read(&mut buf).unwrap();
-                if n == 0 {
-                    break;
-                }
-                out.extend_from_slice(&buf[..n]);
-            }
+            let (http_range, out) = read_range(&ciphertext, start, end, step, buf_len);
+            assert_eq!(http_range, exp_range, "range=({start:?}, {end:?})");
             assert_eq!(out, expected, "range=({start:?}, {end:?})");
         }
+    }
+
+    #[test]
+    fn test_decrypt_reader_pkcs7_unpadding() {
+        // Test 1-byte padding, partial-block (5-byte) padding, and full-block (16-byte) padding.
+        for plain_len in [15_usize, 43, 48] {
+            let plaintext: Vec<u8> = (0..plain_len).map(|i| (i as u8).wrapping_mul(3)).collect();
+            let ciphertext = encrypt_pkcs7(&plaintext);
+
+            for (step, buf_len) in [(5, 7), (64, 64)] {
+                let (_, full) = read_range(&ciphertext, None, None, step, buf_len);
+                assert_eq!(full, plaintext, "plain_len={plain_len}");
+
+                let (_, tail) = read_range(&ciphertext, Some(10), None, step, buf_len);
+                assert_eq!(tail, &plaintext[10..], "plain_len={plain_len}");
+            }
+        }
+
+        // Ranges overlapping and inside trailing PKCS#7 padding (43 plain + 5 pad = 48 encrypted).
+        let plaintext: Vec<u8> = (0..43_u8).map(|i| i + 50).collect();
+        let ciphertext = encrypt_pkcs7(&plaintext);
+        assert_eq!(ciphertext.len(), 48);
+
+        // Straddling plaintext/padding boundary (40..=46 -> only 40..43 are real plaintext)
+        let (_, straddle) = read_range(&ciphertext, Some(40), Some(46), 7, 32);
+        assert_eq!(straddle, &plaintext[40..43]);
+
+        // Entirely inside the 5-byte padding region
+        let (_, only_pad) = read_range(&ciphertext, Some(43), Some(47), 16, 32);
+        assert!(only_pad.is_empty());
+
+        // Starting at the full 16-byte PKCS#7 block (48 plain + 16 pad = 64 encrypted)
+        let aligned_plain: Vec<u8> = (0..48_u8).map(|i| i + 20).collect();
+        let aligned_cipher = encrypt_pkcs7(&aligned_plain);
+        assert_eq!(aligned_cipher.len(), 64);
+        let (_, pad_block) = read_range(&aligned_cipher, Some(48), None, 16, 64);
+        assert!(pad_block.is_empty());
     }
 
     #[test]
     fn test_decrypt_reader_truncated_block_errors() {
         let plaintext = vec![0xAA; 32];
         let ciphertext = encrypt_test_data(&plaintext);
+
+        // Truncated mid-block (25 of 32 bytes) and on a block boundary (16 of 32 bytes)
+        for trunc_len in [25_usize, 16] {
+            let aligned = AlignedRange::new(None, None, 32);
+            let mut reader = DecryptReader::new(
+                Cursor::new(ciphertext[..trunc_len].to_vec()),
+                Aes128EcbDec::new(&TEST_KEY.into()),
+                aligned,
+            );
+            let mut out = [0u8; 64];
+            assert_eq!(reader.read(&mut out).unwrap(), 16);
+            let err = reader.read(&mut out[16..]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        }
+    }
+
+    #[test]
+    fn test_decrypt_reader_error_recovery_across_paths() {
+        struct FlakyReader {
+            data: Vec<u8>,
+            pos: usize,
+            fail_next: bool,
+        }
+
+        impl Read for FlakyReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.fail_next {
+                    self.fail_next = false;
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
+                let n = (self.data.len() - self.pos).min(7).min(buf.len());
+                if n > 0 {
+                    self.fail_next = true;
+                }
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+
+        let plaintext: Vec<u8> = (0..37_u8).map(|i| i ^ 0x5A).collect();
+        let ciphertext = encrypt_pkcs7(&plaintext);
+        let aligned = AlignedRange::new(None, None, ciphertext.len() as u64);
         let mut reader = DecryptReader::new(
-            Cursor::new(ciphertext[..25].to_vec()),
-            Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
-            0,
-            None,
+            FlakyReader {
+                data: ciphertext,
+                pos: 0,
+                fail_next: false,
+            },
+            Aes128EcbDec::new(&TEST_KEY.into()),
+            aligned,
         );
-        let mut out = [0u8; 64];
-        assert_eq!(reader.read(&mut out).unwrap(), 16);
-        let err = reader.read(&mut out[16..]).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        // Alternate between 64-byte (fast path) and 3-byte (staging path) buffers across WouldBlock
+        let mut out = Vec::new();
+        let mut use_large = true;
+        loop {
+            let mut buf = vec![0u8; if use_large { 64 } else { 3 }];
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buf[..n]);
+                    use_large = !use_large;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    use_large = !use_large;
+                }
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(out, plaintext);
     }
 }

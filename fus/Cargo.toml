@@ -14,7 +14,6 @@ aes = { workspace = true }
 ecb = { workspace = true }
 fast-md5 = { workspace = true }
 roxmltree = { workspace = true }
-memmap2 = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_env = "musl")'.dependencies]

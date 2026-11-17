@@ -15,6 +15,8 @@ samloader-odin = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
 cfg-if = { workspace = true }
+memmap2 = { workspace = true }
+fast-md5 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

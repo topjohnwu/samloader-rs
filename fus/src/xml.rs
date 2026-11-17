@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::Error;
-use fast_md5::Md5;
 use roxmltree::{Document, Node};
 use std::collections::HashMap;
 
@@ -31,6 +30,7 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
 }
 
 /// Firmware version information parsed from server responses (e.g., version.xml or history.xml).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionInfo {
     /// The latest available stable firmware version string.
     pub latest: String,
@@ -212,6 +212,7 @@ fn get_xml_node_data(node: Node) -> HashMap<String, String> {
 }
 
 /// Detailed information about a firmware binary package.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryInform {
     /// The firmware build version identifier (e.g., PDA/CSC/PHONE/PHONE).
     pub version: String,
@@ -219,10 +220,10 @@ pub struct BinaryInform {
     pub filename: String,
     /// The relative URL path on the server to download the firmware.
     pub path: String,
-    /// The size of the firmware binary package in bytes.
+    /// The encrypted size of the firmware binary package on the server in bytes.
     pub size: u64,
     /// The 128-bit key used for AES-128 decryption.
-    pub key: Vec<u8>,
+    pub key: [u8; 16],
     /// The device model type classification string.
     pub model_type: String,
     /// The local CSC or sales region code.
@@ -230,23 +231,6 @@ pub struct BinaryInform {
 }
 
 impl BinaryInform {
-    pub(crate) fn checksum(&self) -> [u8; 16] {
-        fn update_len_prefixed(hasher: &mut Md5, data: &[u8]) {
-            hasher.update(&(data.len() as u64).to_le_bytes());
-            hasher.update(data);
-        }
-
-        let mut hasher = Md5::new();
-        update_len_prefixed(&mut hasher, self.version.as_bytes());
-        update_len_prefixed(&mut hasher, self.filename.as_bytes());
-        update_len_prefixed(&mut hasher, self.path.as_bytes());
-        hasher.update(&self.size.to_le_bytes());
-        update_len_prefixed(&mut hasher, &self.key);
-        update_len_prefixed(&mut hasher, self.model_type.as_bytes());
-        update_len_prefixed(&mut hasher, self.region.as_bytes());
-        hasher.finalize()
-    }
-
     pub(crate) fn parse(xml: &str) -> crate::Result<BinaryInform> {
         let missing = |field: &str| Error::InvalidResponse(format!("missing {field}"));
         let mut kv = parse_xml_data(xml)?;
@@ -269,14 +253,14 @@ impl BinaryInform {
                 .or_else(|| filename.split('_').next().map(str::to_string))
                 .ok_or_else(|| missing("BINARY_MODEL_NAME"))?;
             let dec_str = format!("{region}:{model}:{fw_ver}");
-            fast_md5::digest(dec_str.as_bytes()).to_vec()
+            fast_md5::digest(dec_str.as_bytes())
         } else {
             let logic_val = kv
                 .remove("LOGIC_VALUE_FACTORY")
                 .or_else(|| kv.remove("LOGIC_VALUE_HOME"))
                 .ok_or_else(|| missing("LOGIC_VALUE"))?;
             let key = get_logic_check(&fw_ver, &logic_val);
-            fast_md5::digest(key.as_bytes()).to_vec()
+            fast_md5::digest(key.as_bytes())
         };
 
         let path = kv
@@ -487,7 +471,6 @@ mod tests {
         assert_eq!(
             info.key,
             fast_md5::digest(b"XSP:GT-I9305:I9305XXUEML8/I9305QLBEML4/I9305XXUEMK1/I9305XXUEML8")
-                .to_vec()
         );
     }
 
@@ -516,7 +499,7 @@ mod tests {
         );
         assert_eq!(info.size, 5000000000);
         assert_eq!(info.region, "XAA");
-        assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U").to_vec());
+        assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U"));
     }
 
     #[test]

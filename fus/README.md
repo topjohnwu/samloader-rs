@@ -1,21 +1,21 @@
 # samloader-fus
 
-A pure-Rust client library for interacting with the Samsung Firmware Update Server (FUS) to query and download official Samsung device firmware packages.
+A pure-Rust client library for interacting with the Samsung Firmware Update Server (FUS) to query and stream official Samsung device firmware packages.
 
 ## Features
 
-- Negotiates secure FUS handshakes and automatically rotates nonces.
+- Negotiates secure FUS handshakes, rotates nonces, and automatically refreshes expired download tokens.
 - Fetches stable, previous, and beta firmware versions for any model and CSC.
-- Resolves binary sizes, file paths, MD5 checksums, and decryption keys.
-- Downloads firmware using a multi-threaded engine with connection pooling.
-- Performs zero-copy, in-memory AES-128-ECB decryption of `.enc4` payloads.
+- Resolves binary sizes, file paths, and decryption keys.
+- Streams arbitrary byte ranges with transparent, zero-copy AES-128-ECB decryption and PKCS#7 unpadding of `.enc2`/`.enc4` payloads.
 
 ## Usage
 
-### Basic Version Checking & Downloading
+### Basic Version Checking & Streaming Download
 
-```rust
-use samloader_fus::{DownloadOptions, FusClient, download_firmware, fetch_history};
+```rust,no_run
+use samloader_fus::{FusClient, fetch_history};
+use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch version info
@@ -28,13 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("File name: {}, size: {}", info.filename, info.size);
     let session = client.init_download(info)?;
 
-    // 3. Download the firmware in parallel (resumable)
-    // Implement `DownloadProgress` or pass `&()` for a silent download.
-    let options = DownloadOptions {
-        threads: 8,
-        force: false,
-    };
-    download_firmware(&session, "firmware.zip", options, &())?;
+    // 3. Stream and decrypt the firmware package (or use `fetch_range` for parallel ranges)
+    let mut reader = session.fetch()?;
+    let mut file = File::create("firmware.zip")?;
+    std::io::copy(&mut reader, &mut file)?;
     println!("Download complete!");
 
     Ok(())

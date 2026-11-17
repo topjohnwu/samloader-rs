@@ -19,10 +19,6 @@ use thiserror::Error;
 /// Error types for samloader-fus.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// An I/O error occurred during file initialization, memory mapping, flushing, or truncating.
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
     /// A network error occurred while communicating with the FUS server.
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
@@ -37,13 +33,6 @@ pub enum Error {
     /// The server returned malformed XML or was missing expected metadata.
     #[error("Invalid server response: {0}")]
     InvalidResponse(String),
-
-    /// The download stalled completely because the server stopped responding.
-    #[error("Download stalled at offset {offset}: server stopped responding")]
-    Stalled {
-        /// The byte offset where the stall was detected.
-        offset: u64,
-    },
 }
 
 /// A specialized Result type for samloader-fus operations.

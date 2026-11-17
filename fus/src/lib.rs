@@ -18,12 +18,10 @@
 #![deny(missing_docs)]
 
 mod auth;
-mod download;
 mod error;
 mod fusclient;
 mod xml;
 
-pub use download::{DownloadOptions, DownloadProgress, download_firmware};
 pub use error::{Error, Result};
 pub use fusclient::{DownloadSession, FusClient};
 pub use xml::{BinaryInform, VersionInfo};
@@ -75,3 +73,7 @@ fn fetch_smart_history(model: &str, region: &str) -> Result<VersionInfo> {
 pub fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
     fetch_smart_history(model, region).or_else(|_| fetch_version_xml(model, region))
 }
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
