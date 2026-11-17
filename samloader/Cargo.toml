@@ -16,12 +16,14 @@ binrw = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
 cfg-if = { workspace = true }
-memmap2 = { workspace = true }
 fast-md5 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
 
 [features]
 default = ["nusb", "serialport"]

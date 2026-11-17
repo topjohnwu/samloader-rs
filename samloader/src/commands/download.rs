@@ -16,20 +16,20 @@ use crate::cli::DownloadArgs;
 use binrw::{BinRead, BinWrite, binrw};
 use fast_md5::Md5;
 use indicatif::{ProgressBar, ProgressStyle};
-use mmap::MmapBuf;
 use samloader_fus::{
     BinaryInform, DownloadSession, FusClient, fetch_history, futures::io::AsyncReadExt,
 };
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
-use std::fs::OpenOptions;
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::task::JoinSet;
+use tokio::sync::{Notify, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 
 const PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
@@ -75,7 +75,7 @@ fn info_checksum(info: &BinaryInform) -> [u8; 16] {
     hasher.finalize()
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct ByteRange {
     start: u64,
     end: u64, // exclusive
@@ -257,77 +257,84 @@ fn partition_ranges_for_threads(ranges: &[ByteRange], threads: u64) -> Vec<ByteR
     result
 }
 
-mod mmap {
-    use memmap2::MmapRaw;
-    use std::fs::File;
-    use std::io;
-    use std::sync::Arc;
-
-    pub(super) struct MmapBuf {
-        map: Arc<MmapRaw>,
-        offset: usize,
-        len: usize,
+fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::write_at(file, buf, offset)
     }
-
-    impl MmapBuf {
-        /// Maps `file` into memory as a single root buffer covering its current length.
-        ///
-        /// # Safety
-        ///
-        /// The backing file must not be truncated or externally mutated until this
-        /// `MmapBuf` and all slices split from it have been dropped.
-        pub(super) unsafe fn map(file: &File) -> io::Result<Self> {
-            let map = Arc::new(MmapRaw::map_raw(file)?);
-            let len = map.len();
-            Ok(Self {
-                map,
-                offset: 0,
-                len,
-            })
-        }
-
-        pub(super) fn split_at(self, mid: usize) -> (Self, Self) {
-            assert!(mid <= self.len);
-            let left = Self {
-                map: Arc::clone(&self.map),
-                offset: self.offset,
-                len: mid,
-            };
-            let right = Self {
-                map: self.map,
-                offset: self.offset + mid,
-                len: self.len - mid,
-            };
-            (left, right)
-        }
-
-        pub(super) fn flush_and_unmap(self) -> io::Result<()> {
-            let map = Arc::into_inner(self.map).expect("other MmapBuf slices still alive");
-            map.flush()
-        }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_write(file, buf, offset)
     }
+}
 
-    impl AsMut<[u8]> for MmapBuf {
-        fn as_mut(&mut self) -> &mut [u8] {
-            // SAFETY: `MmapBuf` is `!Clone`, constructed once per mapping via `map`,
-            // and only divided into disjoint ranges via `split_at`; the caller of
-            // `map` upholds that the backing file's size stays fixed until unmapped.
-            unsafe {
-                std::slice::from_raw_parts_mut(self.map.as_mut_ptr().add(self.offset), self.len)
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match write_at(file, buf, offset) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
             }
+            Ok(n) => {
+                buf = &buf[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_sparse(file: &File, sparse: bool) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::{FILE_SET_SPARSE_BUFFER, FSCTL_SET_SPARSE};
+
+    let buf = FILE_SET_SPARSE_BUFFER { SetSparse: sparse };
+    let mut returned = 0_u32;
+    // Best-effort: avoids NTFS synchronously zero-filling up to `info.size` on
+    // initial footer creation and out-of-order worker writes; ignored on
+    // filesystems that do not support sparse files (e.g. exFAT).
+    //
+    // SAFETY: `file` owns a valid open `HANDLE` for the duration of the call,
+    // and `buf` / `returned` outlive the synchronous `DeviceIoControl` call.
+    unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_SPARSE,
+            (&raw const buf).cast(),
+            size_of::<FILE_SET_SPARSE_BUFFER>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        );
     }
 }
 
-struct StateTracker<B = MmapBuf> {
+struct StateTracker {
     footer: Footer,
-    footer_buf: B,
+    footer_buf: Vec<u8>,
 }
 
-impl<B: AsMut<[u8]>> StateTracker<B> {
-    fn on_bytes_decrypted(&mut self, start: u64, prev_dec: usize, new_dec: usize) {
-        let prev_pos = start + prev_dec as u64;
-        let curr_pos = start + new_dec as u64;
+impl StateTracker {
+    fn new(footer: Footer) -> Self {
+        let footer_buf = footer.to_bytes();
+        Self { footer, footer_buf }
+    }
+
+    fn serialize(&mut self) -> &[u8] {
+        self.footer.write_to_slice(&mut self.footer_buf);
+        &self.footer_buf
+    }
+
+    fn on_bytes_written(&mut self, offset: u64, len: usize) -> Option<&[u8]> {
+        let prev_pos = offset;
+        let curr_pos = offset + len as u64;
         let start_blk = (prev_pos / BLOCK_SIZE as u64) as usize;
         let end_blk = (curr_pos / BLOCK_SIZE as u64) as usize;
         let total_blocks = self.footer.blocks.len();
@@ -344,25 +351,122 @@ impl<B: AsMut<[u8]>> StateTracker<B> {
                 changed |= self.footer.blocks.set(blk);
             }
         }
-        if changed {
-            self.footer.write_to_slice(self.footer_buf.as_mut());
-        }
+        changed.then(|| self.serialize())
     }
 
-    fn on_eof_reached(&mut self, padding: u8) {
+    fn on_eof_reached(&mut self, padding: u8) -> &[u8] {
         self.footer.padding = padding;
         let total_blocks = self.footer.blocks.len();
         if total_blocks > 0 {
             self.footer.blocks.set(total_blocks - 1);
         }
-        self.footer.write_to_slice(self.footer_buf.as_mut());
+        self.serialize()
     }
 }
 
-struct Chunk {
-    buf: MmapBuf,
-    start: u64,
-    end: Option<u64>,
+struct WriteJob {
+    offset: u64,
+    len: usize,
+    eof_pad: Option<u8>,
+    data: Vec<u8>,
+    done: oneshot::Sender<io::Result<Vec<u8>>>,
+}
+
+fn write_job(
+    file: &File,
+    footer_offset: u64,
+    tracker: &mut StateTracker,
+    job: &WriteJob,
+) -> io::Result<()> {
+    if job.len > 0 {
+        write_all_at(file, &job.data[..job.len], job.offset)?;
+    }
+    let footer_bytes = match job.eof_pad {
+        Some(pad) => Some(tracker.on_eof_reached(pad)),
+        None if job.len > 0 => tracker.on_bytes_written(job.offset, job.len),
+        None => None,
+    };
+    if let Some(bytes) = footer_bytes {
+        write_all_at(file, bytes, footer_offset)?;
+    }
+    Ok(())
+}
+
+/// Spawns the dedicated disk-writer thread owning `file` and `StateTracker`.
+fn spawn_disk_writer(
+    file: File,
+    footer: Footer,
+    footer_offset: u64,
+) -> (mpsc::Sender<WriteJob>, JoinHandle<(File, u8)>) {
+    let (tx, rx) = mpsc::channel::<WriteJob>();
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut tracker = StateTracker::new(footer);
+        for mut job in rx {
+            let res = write_job(&file, footer_offset, &mut tracker, &job)
+                .map(|()| std::mem::take(&mut job.data));
+            let _ = job.done.send(res);
+        }
+        (file, tracker.footer.padding)
+    });
+    (tx, handle)
+}
+
+/// Per-worker double-buffered block writer that overlaps async network reads
+/// into `buf` while the disk-writer thread flushes the previous block.
+struct BlockWriter {
+    tx: mpsc::Sender<WriteJob>,
+    buf: Vec<u8>,
+    spare: Vec<u8>,
+    pending: Option<oneshot::Receiver<io::Result<Vec<u8>>>>,
+}
+
+impl BlockWriter {
+    fn new(tx: mpsc::Sender<WriteJob>) -> Self {
+        Self {
+            tx,
+            buf: vec![0; BLOCK_SIZE],
+            spare: vec![0; BLOCK_SIZE],
+            pending: None,
+        }
+    }
+
+    async fn wait_pending(&mut self) -> io::Result<()> {
+        if let Some(rx) = self.pending.take() {
+            self.spare = rx.await.expect("disk writer thread panicked")?;
+        }
+        Ok(())
+    }
+
+    async fn submit(&mut self, offset: u64, len: usize, eof_pad: Option<u8>) -> io::Result<()> {
+        self.wait_pending().await?;
+        if len == 0 && eof_pad.is_none() {
+            return Ok(());
+        }
+        std::mem::swap(&mut self.buf, &mut self.spare);
+        let data = std::mem::take(&mut self.spare);
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(WriteJob {
+                offset,
+                len,
+                eof_pad,
+                data,
+                done,
+            })
+            .expect("disk writer thread panicked");
+        self.pending = Some(rx);
+        Ok(())
+    }
+
+    async fn submit_and_wait(
+        &mut self,
+        offset: u64,
+        len: usize,
+        eof_pad: Option<u8>,
+    ) -> io::Result<()> {
+        self.submit(offset, len, eof_pad).await?;
+        self.wait_pending().await
+    }
 }
 
 struct Pool {
@@ -371,7 +475,7 @@ struct Pool {
 }
 
 struct PoolInner {
-    queue: VecDeque<Chunk>,
+    queue: VecDeque<ByteRange>,
     in_flight: usize,
     live: usize,
     error: Option<io::Error>,
@@ -379,7 +483,80 @@ struct PoolInner {
 
 enum ChunkOutcome {
     Done,
-    Stalled { decrypted: usize },
+    Stalled { resume_at: u64 },
+}
+
+enum PartState {
+    Fresh,
+    Resumed,
+    Restarted,
+}
+
+fn prepare_part_file(
+    final_path: &Path,
+    part_path: &Path,
+    info: &BinaryInform,
+    force: bool,
+) -> io::Result<(File, Footer, PartState)> {
+    if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if force {
+        let _ = std::fs::remove_file(final_path);
+        let _ = std::fs::remove_file(part_path);
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(force)
+        .open(part_path)?;
+
+    let existing_len = file.seek(SeekFrom::End(0))?;
+    if !force
+        && existing_len > 0
+        && let Some(footer) = Footer::read_from_part(&mut file, info)
+    {
+        #[cfg(windows)]
+        set_sparse(&file, true);
+        return Ok((file, footer, PartState::Resumed));
+    }
+
+    let state = if !force && existing_len > 0 {
+        file.set_len(0)?;
+        PartState::Restarted
+    } else {
+        PartState::Fresh
+    };
+
+    #[cfg(windows)]
+    set_sparse(&file, true);
+
+    let footer = Footer::new(info);
+    write_all_at(&file, &footer.to_bytes(), info.size)?;
+    file.sync_data()?;
+
+    Ok((file, footer, state))
+}
+
+fn finalize_part_file(
+    file: File,
+    part_path: &Path,
+    final_path: &Path,
+    final_size: u64,
+) -> io::Result<()> {
+    file.set_len(final_size)?;
+    #[cfg(windows)]
+    set_sparse(&file, false);
+    file.sync_data()?;
+    drop(file);
+
+    if final_path.exists() {
+        let _ = std::fs::remove_file(final_path);
+    }
+    std::fs::rename(part_path, final_path)
 }
 
 async fn download_firmware(
@@ -393,110 +570,62 @@ async fn download_firmware(
     let threads = threads.max(1);
     let pb = &reporter.pb;
 
-    if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let part_path = {
         let mut s = final_path.as_os_str().to_owned();
         s.push(".part");
         PathBuf::from(s)
     };
 
-    if force {
-        let _ = std::fs::remove_file(final_path);
-        let _ = std::fs::remove_file(&part_path);
-    }
-
-    // Check if a valid partial download already exists
-    let had_existing_part = part_path.exists();
-    let existing_footer = if had_existing_part && !force {
-        OpenOptions::new()
-            .read(true)
-            .open(&part_path)
-            .ok()
-            .and_then(|mut f| Footer::read_from_part(&mut f, info))
-    } else {
-        None
+    let (file, footer, part_state) = {
+        let final_path = final_path.to_path_buf();
+        let part_path = part_path.clone();
+        let session = Arc::clone(session);
+        tokio::task::spawn_blocking(move || {
+            prepare_part_file(&final_path, &part_path, session.info(), force)
+        })
+        .await
+        .expect("part setup task panicked")?
     };
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(existing_footer.is_none())
-        .open(&part_path)?;
-
-    let footer = if let Some(footer) = existing_footer {
-        let effective_total = footer.effective_size(info.size);
-        let completed_bytes = footer.completed_bytes(info.size);
-        pb.println(format!(
-            "Resuming download: {:.2} GiB / {:.2} GiB ({:.1}%) already downloaded",
-            completed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-            effective_total as f64 / (1024.0 * 1024.0 * 1024.0),
-            if effective_total > 0 {
-                (completed_bytes as f64 / effective_total as f64) * 100.0
-            } else {
-                100.0
-            }
-        ));
-        pb.set_length(effective_total);
-        pb.set_position(completed_bytes);
-        pb.reset_eta();
-        footer
-    } else {
-        if had_existing_part && !force {
+    match part_state {
+        PartState::Resumed => {
+            let effective_total = footer.effective_size(info.size);
+            let completed_bytes = footer.completed_bytes(info.size);
+            pb.println(format!(
+                "Resuming download: {:.2} GiB / {:.2} GiB ({:.1}%) already downloaded",
+                completed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                effective_total as f64 / (1024.0 * 1024.0 * 1024.0),
+                if effective_total > 0 {
+                    (completed_bytes as f64 / effective_total as f64) * 100.0
+                } else {
+                    100.0
+                }
+            ));
+            pb.set_length(effective_total);
+            pb.set_position(completed_bytes);
+            pb.reset_eta();
+        }
+        PartState::Restarted => {
             pb.println(
                 "Existing partial download is incompatible or corrupted, restarting from scratch...",
             );
+            pb.set_length(info.size);
         }
-        let footer = Footer::new(info);
-        file.set_len(info.size)?;
-        file.seek(SeekFrom::Start(info.size))?;
-        file.write_all(&footer.to_bytes())?;
-        file.sync_data()?;
-
-        pb.set_length(info.size);
-        footer
-    };
+        PartState::Fresh => {
+            pb.set_length(info.size);
+        }
+    }
 
     pb.enable_steady_tick(Duration::from_secs(1));
 
     let uncompleted = footer.blocks.uncompleted_ranges(info.size);
     let download_chunks = partition_ranges_for_threads(&uncompleted, threads);
 
-    let padding = if !download_chunks.is_empty() {
-        // SAFETY: `file` is not truncated or externally modified until `flush_and_unmap`
-        // drops the mapping below.
-        let root_buf = unsafe { MmapBuf::map(&file)? };
-        let (payload_buf, footer_buf) = root_buf.split_at(info.size as usize);
-        let tracker = Arc::new(Mutex::new(StateTracker { footer, footer_buf }));
+    let (file, padding) = if !download_chunks.is_empty() {
+        let (job_tx, writer_task) = spawn_disk_writer(file, footer, info.size);
 
-        let mut queue = VecDeque::new();
-        let mut rest = payload_buf;
-        let mut current_offset = 0_u64;
-
-        for range in &download_chunks {
-            let skip = (range.start - current_offset) as usize;
-            let (_, tail) = rest.split_at(skip);
-            let len = (range.end - range.start) as usize;
-            let (buf, next_rest) = tail.split_at(len);
-            current_offset = range.end;
-            rest = next_rest;
-
-            queue.push_back(Chunk {
-                buf,
-                start: range.start,
-                end: if range.end == info.size {
-                    None
-                } else {
-                    Some(range.end - 1)
-                },
-            });
-        }
-        drop(rest);
-
-        let n_workers = queue.len().min(threads as usize);
+        let queue = VecDeque::from(download_chunks);
+        let n_workers = queue.len().min(threads.min(usize::MAX as u64) as usize);
         let pool = Arc::new(Pool {
             inner: Mutex::new(PoolInner {
                 queue,
@@ -519,16 +648,18 @@ async fn download_firmware(
                 }
                 state.live += 1;
             }
-            let (pool_ref, session, reporter, tracker) = (
+            let (pool_ref, session, tx, reporter) = (
                 Arc::clone(&pool),
                 Arc::clone(session),
+                job_tx.clone(),
                 reporter.clone(),
-                Arc::clone(&tracker),
             );
             workers.spawn(async move {
-                run_worker(&pool_ref, &session, &reporter, &tracker).await;
+                run_worker(&pool_ref, &session, BlockWriter::new(tx), &reporter).await;
             });
         }
+        drop(job_tx);
+
         while let Some(res) = workers.join_next().await {
             res.expect("download worker task panicked");
         }
@@ -536,43 +667,37 @@ async fn download_firmware(
         let pool_error = pool.inner.lock().unwrap().error.take();
         drop(pool);
 
-        let tracker = Arc::into_inner(tracker)
-            .expect("all workers have exited")
-            .into_inner()
-            .unwrap();
-        let padding = tracker.footer.padding;
-        tracker.footer_buf.flush_and_unmap()?;
-
+        let (file, padding) = writer_task.await.expect("disk writer thread panicked");
         if let Some(err) = pool_error {
             return Err(err);
         }
-        padding
+        (file, padding)
     } else {
-        footer.padding
+        let padding = footer.padding;
+        (file, padding)
     };
 
-    file.set_len(info.size.saturating_sub(padding as u64))?;
-    drop(file);
-
-    if final_path.exists() {
-        let _ = std::fs::remove_file(final_path);
-    }
-    std::fs::rename(&part_path, final_path)?;
-
-    Ok(())
+    let final_size = info.size.saturating_sub(padding as u64);
+    let final_path = final_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        finalize_part_file(file, &part_path, &final_path, final_size)
+    })
+    .await
+    .expect("part finalization task panicked")
 }
 
 async fn run_worker(
     pool: &Pool,
     session: &DownloadSession,
+    mut bw: BlockWriter,
     reporter: &Reporter,
-    tracker: &Mutex<StateTracker>,
 ) {
+    let info_size = session.info().size;
     let mut last_progress = reporter.pb.position();
     let mut dead_stalls = 0_u32;
 
     loop {
-        let mut chunk = loop {
+        let range = loop {
             let notified = pool.available.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -585,9 +710,9 @@ async fn run_worker(
                     pool.available.notify_waiters();
                     return;
                 }
-                if let Some(chunk) = state.queue.pop_front() {
+                if let Some(range) = state.queue.pop_front() {
                     state.in_flight += 1;
-                    break chunk;
+                    break range;
                 }
                 if state.in_flight == 0 {
                     state.live -= 1;
@@ -600,31 +725,20 @@ async fn run_worker(
             notified.await;
         };
 
-        let outcome = download_chunk(
-            session,
-            chunk.buf.as_mut(),
-            chunk.start,
-            chunk.end,
-            reporter,
-            tracker,
-        )
-        .await;
+        let end = range.end;
+        let outcome = download_chunk(session, range, info_size, &mut bw, reporter).await;
 
         match outcome {
-            ChunkOutcome::Done => {
+            Ok(ChunkOutcome::Done) => {
                 dead_stalls = 0;
                 let mut state = pool.inner.lock().unwrap();
                 state.in_flight -= 1;
                 drop(state);
                 pool.available.notify_waiters();
             }
-            ChunkOutcome::Stalled { decrypted } => {
-                let stall_off = chunk.start + decrypted as u64;
-                let Chunk { buf, end, .. } = chunk;
-                let (_done, rest) = buf.split_at(decrypted);
-                let remainder = Chunk {
-                    buf: rest,
-                    start: stall_off,
+            Ok(ChunkOutcome::Stalled { resume_at }) => {
+                let remainder = ByteRange {
+                    start: resume_at,
                     end,
                 };
 
@@ -647,7 +761,7 @@ async fn run_worker(
                     drop(state);
                     pool.available.notify_waiters();
                     reporter.log_verbose(format_args!(
-                        "Connection throttled at offset {stall_off}; \
+                        "Connection throttled at offset {resume_at}; \
                          reducing to {remaining} connection(s)"
                     ));
                     return;
@@ -664,12 +778,14 @@ async fn run_worker(
                     dead_stalls += 1;
                     if dead_stalls > MAX_DEAD_STALLS {
                         let mut state = pool.inner.lock().unwrap();
-                        state.error = Some(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "download stalled at offset {stall_off}: server stopped responding"
-                            ),
-                        ));
+                        if state.error.is_none() {
+                            state.error = Some(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "download stalled at offset {resume_at}: server stopped responding"
+                                ),
+                            ));
+                        }
                         state.live -= 1;
                         drop(state);
                         pool.available.notify_waiters();
@@ -677,52 +793,71 @@ async fn run_worker(
                     }
                 }
             }
+            Err(err) => {
+                let mut state = pool.inner.lock().unwrap();
+                if state.error.is_none() {
+                    state.error = Some(err);
+                }
+                state.in_flight -= 1;
+                state.live -= 1;
+                drop(state);
+                pool.available.notify_waiters();
+                return;
+            }
         }
     }
 }
 
 async fn download_chunk(
     session: &DownloadSession,
-    chunk: &mut [u8],
-    start: u64,
-    end: Option<u64>,
+    range: ByteRange,
+    info_size: u64,
+    bw: &mut BlockWriter,
     reporter: &Reporter,
-    tracker: &Mutex<StateTracker>,
-) -> ChunkOutcome {
-    let mut dec_pos = 0_usize;
+) -> io::Result<ChunkOutcome> {
+    let http_end = (range.end < info_size).then_some(range.end - 1);
+    let mut buf_offset = range.start;
+    let mut buf_len = 0_usize;
     let mut retries = 0_u32;
 
     loop {
-        let mut reader = match session.fetch_range(Some(start + dec_pos as u64), end).await {
+        let fetch_pos = buf_offset + buf_len as u64;
+        let mut reader = match session.fetch_range(Some(fetch_pos), http_end).await {
             Ok(reader) => reader,
             Err(e) => {
                 retries += 1;
                 if retries > MAX_STALL_RETRIES {
-                    return ChunkOutcome::Stalled { decrypted: dec_pos };
+                    bw.submit_and_wait(buf_offset, buf_len, None).await?;
+                    return Ok(ChunkOutcome::Stalled {
+                        resume_at: fetch_pos,
+                    });
                 }
                 reporter.log_verbose(format_args!(
-                    "Request error ({e}); retry {retries}/{MAX_STALL_RETRIES} at offset {}",
-                    start + dec_pos as u64
+                    "Request error ({e}); retry {retries}/{MAX_STALL_RETRIES} at offset {fetch_pos}"
                 ));
                 tokio::time::sleep(backoff(retries)).await;
                 continue;
             }
         };
 
-        let resume_from = dec_pos;
+        let resume_from = fetch_pos;
 
         let stall = loop {
-            match reader.read(&mut chunk[dec_pos..]).await {
+            let rem_in_block = BLOCK_SIZE - (buf_offset % BLOCK_SIZE as u64) as usize;
+            let target_len = (range.end - buf_offset).min(rem_in_block as u64) as usize;
+
+            match reader.read(&mut bw.buf[buf_len..target_len]).await {
                 Ok(0) => {
-                    if end.is_none() && chunk.len() - dec_pos <= 16 {
-                        let pad = (chunk.len() - dec_pos) as u8;
-                        tracker.lock().unwrap().on_eof_reached(pad);
+                    let rem_in_range = range.end - (buf_offset + buf_len as u64);
+                    if http_end.is_none() && rem_in_range <= 16 {
+                        let pad = rem_in_range as u8;
+                        bw.submit_and_wait(buf_offset, buf_len, Some(pad)).await?;
                         if pad > 0
                             && let Some(len) = reporter.pb.length()
                         {
                             reporter.pb.set_length(len.saturating_sub(pad as u64));
                         }
-                        return ChunkOutcome::Done;
+                        return Ok(ChunkOutcome::Done);
                     }
                     break io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -730,17 +865,19 @@ async fn download_chunk(
                     );
                 }
                 Ok(n) => {
-                    let prev_dec = dec_pos;
-                    dec_pos += n;
+                    buf_len += n;
                     reporter.pb.inc(n as u64);
 
-                    let mut guard = tracker.lock().unwrap();
-                    guard.on_bytes_decrypted(start, prev_dec, dec_pos);
-                    if dec_pos == chunk.len() {
-                        if end.is_none() {
-                            guard.on_eof_reached(0);
+                    if buf_len == target_len {
+                        let next_offset = buf_offset + buf_len as u64;
+                        if next_offset == range.end {
+                            let eof_pad = http_end.is_none().then_some(0);
+                            bw.submit_and_wait(buf_offset, buf_len, eof_pad).await?;
+                            return Ok(ChunkOutcome::Done);
                         }
-                        return ChunkOutcome::Done;
+                        bw.submit(buf_offset, buf_len, None).await?;
+                        buf_offset = next_offset;
+                        buf_len = 0;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -748,17 +885,20 @@ async fn download_chunk(
             }
         };
 
-        if dec_pos > resume_from {
+        let curr_pos = buf_offset + buf_len as u64;
+        if curr_pos > resume_from {
             retries = 0;
         }
         retries += 1;
         if retries > MAX_STALL_RETRIES {
-            return ChunkOutcome::Stalled { decrypted: dec_pos };
+            bw.submit_and_wait(buf_offset, buf_len, None).await?;
+            return Ok(ChunkOutcome::Stalled {
+                resume_at: curr_pos,
+            });
         }
         reporter.log_verbose(format_args!(
             "Download error ({stall}); retry {retries}/{MAX_STALL_RETRIES}, \
-             resuming at offset {}",
-            start + dec_pos as u64
+             resuming at offset {curr_pos}"
         ));
         tokio::time::sleep(backoff(retries)).await;
     }
@@ -947,7 +1087,6 @@ mod tests {
         let size = 10 * 1024 * 1024; // 5 blocks
         let info = mock_info(size);
         let footer = Footer::new(&info);
-        let mut footer_bytes = footer.to_bytes();
 
         let validate = |bytes: &[u8]| {
             let parsed = read_part(size, bytes, &info)
@@ -957,25 +1096,24 @@ mod tests {
         };
 
         // First run: completes blocks 0 and 1, plus out-of-order final block 4 with 11-byte padding
-        {
-            let mut tracker = StateTracker {
-                footer,
-                footer_buf: footer_bytes.as_mut_slice(),
-            };
-            tracker.on_bytes_decrypted(0, 0, 1024 * 1024);
-            assert!(!tracker.footer.blocks.get(0));
-
-            tracker.on_bytes_decrypted(0, 1024 * 1024, BLOCK_SIZE);
-            assert!(tracker.footer.blocks.get(0));
-
-            tracker.on_bytes_decrypted(BLOCK_SIZE as u64, 0, BLOCK_SIZE);
-            assert!(tracker.footer.blocks.get(1));
-
-            tracker.on_bytes_decrypted(4 * BLOCK_SIZE as u64, 0, BLOCK_SIZE - 11);
-            assert!(!tracker.footer.blocks.get(4));
-            tracker.on_eof_reached(11);
-            assert!(tracker.footer.blocks.get(4));
-        }
+        let mut tracker = StateTracker::new(footer);
+        assert!(tracker.on_bytes_written(0, 1024 * 1024).is_none());
+        assert!(
+            tracker
+                .on_bytes_written(1024 * 1024, BLOCK_SIZE - 1024 * 1024)
+                .is_some()
+        );
+        assert!(
+            tracker
+                .on_bytes_written(BLOCK_SIZE as u64, BLOCK_SIZE)
+                .is_some()
+        );
+        assert!(
+            tracker
+                .on_bytes_written(4 * BLOCK_SIZE as u64, BLOCK_SIZE - 11)
+                .is_none()
+        );
+        let footer_bytes = tracker.on_eof_reached(11).to_vec();
 
         assert_eq!(
             validate(&footer_bytes),
@@ -991,14 +1129,13 @@ mod tests {
 
         // Second run: resumes from disk bytes and completes block 2; persisted padding (11) remains intact
         let resumed = read_part(size, &footer_bytes, &info).unwrap();
-        StateTracker {
-            footer: resumed,
-            footer_buf: footer_bytes.as_mut_slice(),
-        }
-        .on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE);
+        let mut tracker = StateTracker::new(resumed);
+        let footer_bytes = tracker
+            .on_bytes_written(2 * BLOCK_SIZE as u64, BLOCK_SIZE)
+            .unwrap();
 
         assert_eq!(
-            validate(&footer_bytes),
+            validate(footer_bytes),
             (
                 vec![0b10111],
                 11,
