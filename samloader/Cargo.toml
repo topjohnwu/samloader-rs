@@ -12,6 +12,7 @@ keywords = ["samsung", "firmware"]
 samloader-fus = { workspace = true }
 samloader-pit = { workspace = true }
 samloader-odin = { workspace = true }
+binrw = { workspace = true }
 clap = { workspace = true }
 indicatif = { workspace = true }
 cfg-if = { workspace = true }
