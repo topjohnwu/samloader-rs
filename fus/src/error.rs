@@ -18,10 +18,11 @@ use thiserror::Error;
 
 /// Error types for samloader-fus.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
-    /// A network error occurred while communicating with the FUS server.
-    #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
+    /// An HTTP transport or status error occurred while communicating with the FUS server.
+    #[error(transparent)]
+    Http(#[from] HttpError),
 
     /// The FUS server returned a non-success status code in its XML response.
     #[error("FUS server error status: {status}")]
@@ -33,6 +34,25 @@ pub enum Error {
     /// The server returned malformed XML or was missing expected metadata.
     #[error("Invalid server response: {0}")]
     InvalidResponse(String),
+}
+
+/// An error from the underlying HTTP transport or an unexpected HTTP status code.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum HttpError {
+    /// The server returned an unexpected HTTP status code.
+    #[error("HTTP status {0}")]
+    Status(u16),
+
+    /// The underlying HTTP client backend reported an error.
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl HttpError {
+    pub(crate) fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(err))
+    }
 }
 
 /// A specialized Result type for samloader-fus operations.

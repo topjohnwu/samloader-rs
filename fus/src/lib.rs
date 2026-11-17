@@ -20,22 +20,22 @@
 mod auth;
 mod error;
 mod fusclient;
+mod http;
 mod xml;
 
-pub use error::{Error, Result};
+pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient};
 pub use xml::{BinaryInform, VersionInfo};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
 pub use futures;
-pub use reqwest;
 
-use std::time::Duration;
+use http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
 
 /// Queries and fetches the standard firmware `version.xml` document for the specified
 /// device model and region.
 async fn fetch_version_xml(
-    client: &reqwest::Client,
+    client: &impl HttpClient,
     model: &str,
     region: &str,
 ) -> Result<VersionInfo> {
@@ -43,13 +43,17 @@ async fn fetch_version_xml(
         "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
         region, model
     );
+    let headers = [("User-Agent", "Kies2.0_FUS")];
     let version_xml = client
-        .get(&version_url)
-        .header(reqwest::header::USER_AGENT, "Kies2.0_FUS")
-        .send()
+        .send(HttpRequest {
+            method: HttpMethod::Get,
+            url: &version_url,
+            headers: &headers,
+            body: None,
+        })
         .await?
-        .error_for_status()?
-        .text()
+        .ensure_success()?
+        .into_text()
         .await?;
 
     xml::parse_version_xml(&version_xml)
@@ -58,7 +62,7 @@ async fn fetch_version_xml(
 /// Fetches the historical list of released firmware versions for the target model and region
 /// through the `SmartHistory.do` endpoint.
 async fn fetch_smart_history(
-    client: &reqwest::Client,
+    client: &impl HttpClient,
     model: &str,
     region: &str,
 ) -> Result<VersionInfo> {
@@ -67,16 +71,22 @@ async fn fetch_smart_history(
         "FUS nonce=\"{nonce}\", signature=\"{signature}\", \
          nc=\"00000001\", type=\"auth\", realm=\"interface\"",
     );
+    let req_xml = xml::history_req_xml(model, region);
+    let headers = [
+        ("Authorization", auth_val.as_str()),
+        ("User-Agent", "SMART 2.0"),
+    ];
 
     let xml = client
-        .post("https://neofussvr.sslcs.cdngc.net/SmartHistory.do")
-        .header(reqwest::header::AUTHORIZATION, auth_val)
-        .header(reqwest::header::USER_AGENT, "SMART 2.0")
-        .body(xml::history_req_xml(model, region))
-        .send()
+        .send(HttpRequest {
+            method: HttpMethod::Post,
+            url: "https://neofussvr.sslcs.cdngc.net/SmartHistory.do",
+            headers: &headers,
+            body: Some(req_xml.as_bytes()),
+        })
         .await?
-        .error_for_status()?
-        .text()
+        .ensure_success()?
+        .into_text()
         .await?;
 
     xml::parse_history_xml(&xml)
@@ -84,10 +94,7 @@ async fn fetch_smart_history(
 
 /// Fetches the historical list of released firmware versions for the target model and region.
 pub async fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(15))
-        .build()?;
+    let client = PlatformClient::new()?;
     match fetch_smart_history(&client, model, region).await {
         Ok(info) => Ok(info),
         Err(_) => fetch_version_xml(&client, model, region).await,

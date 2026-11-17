@@ -12,20 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Result;
+use crate::error::{HttpError, Result};
+use crate::http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
 use crate::{auth, xml};
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockModeDecrypt, KeyInit};
 use futures::io::AsyncRead;
 use futures::lock::Mutex as AsyncMutex;
-use futures::stream::TryStreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE, USER_AGENT};
-use reqwest::{Client, Response};
 use std::io;
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
-use std::time::Duration;
 use xml::BinaryInform;
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
@@ -42,26 +39,27 @@ struct AuthState {
     encnonce: String,
 }
 
+impl AuthState {
+    fn auth_header(&self) -> String {
+        format!(
+            "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
+            self.encnonce, self.auth
+        )
+    }
+}
+
 /// Client coordinating API communication and security authentication
 /// with the Samsung Firmware Update Server (FUS).
 pub struct FusClient {
-    client: Client,
+    client: PlatformClient,
     auth_state: Mutex<AuthState>,
 }
 
 impl FusClient {
     /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
     pub async fn new() -> Result<Self> {
-        let client = Client::builder()
-            .cookie_store(true)
-            // `read_timeout` resets on every body chunk read rather than capping
-            // the total download duration, flagging stalled connections after 30s
-            // so the caller's retry loop can resume.
-            .read_timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(15))
-            .build()?;
         let fus = FusClient {
-            client,
+            client: PlatformClient::new()?,
             auth_state: Mutex::new(AuthState::default()),
         };
 
@@ -89,63 +87,48 @@ impl FusClient {
         let xml = self
             .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
             .await?
-            .text()
+            .into_text()
             .await?;
 
         BinaryInform::parse(&xml)
     }
 
-    fn make_headers(&self) -> HeaderMap {
-        let (encnonce, auth) = {
-            let state = self.auth_state.lock().unwrap();
-            (state.encnonce.clone(), state.auth.clone())
-        };
-        let auth_val = format!(
-            "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-            encnonce, auth
-        );
+    async fn make_req(
+        &self,
+        path: &str,
+        data: &str,
+    ) -> std::result::Result<impl HttpResponse + use<>, HttpError> {
+        let url = format!("https://neofussvr.sslcs.cdngc.net/{path}");
+        let auth_val = self.auth_state.lock().unwrap().auth_header();
+        let headers = [
+            ("Authorization", auth_val.as_str()),
+            ("User-Agent", "SMART 2.0"),
+        ];
 
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_val).unwrap());
-        headers.insert(USER_AGENT, HeaderValue::from_static("SMART 2.0"));
-        headers
-    }
-
-    async fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
-        let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
-        // Hyper omits `Content-Length` on empty POST bodies unless set explicitly,
-        // which FUS rejects with `411 Length Required` during nonce generation.
         let resp = self
             .client
-            .post(&url)
-            .headers(self.make_headers())
-            .header(CONTENT_LENGTH, data.len())
-            .body(data.to_string())
-            .send()
+            .send(HttpRequest {
+                method: HttpMethod::Post,
+                url: &url,
+                headers: &headers,
+                body: Some(data.as_bytes()),
+            })
             .await?
-            .error_for_status()?;
+            .ensure_success()?;
 
-        if let Some(nonce) = resp
-            .headers()
-            .get("NONCE")
-            .or_else(|| resp.headers().get("nonce"))
-            .and_then(|n| n.to_str().ok())
-        {
-            let nonce_str = nonce.to_string();
-            if !nonce_str.is_empty() {
-                let mut state = self.auth_state.lock().unwrap();
-                if nonce_str != state.encnonce {
-                    state.encnonce = nonce_str;
-                    state.nonce = state.encnonce.clone();
-                    state.auth = auth::decrypt_nonce(&state.encnonce);
-                }
+        if let Some(nonce) = resp.header("nonce").filter(|n| !n.is_empty()) {
+            let mut state = self.auth_state.lock().unwrap();
+            if nonce != state.encnonce {
+                state.encnonce = nonce.to_string();
+                state.nonce = state.encnonce.clone();
+                state.auth = auth::decrypt_nonce(&state.encnonce);
             }
         }
 
         Ok(resp)
     }
 
-    async fn generate_nonce(&self) -> reqwest::Result<()> {
+    async fn generate_nonce(&self) -> std::result::Result<(), HttpError> {
         self.make_req("NF_SmartDownloadGenerateNonce.do", "")
             .await?;
         Ok(())
@@ -163,7 +146,7 @@ impl FusClient {
         let xml = self
             .make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)
             .await?
-            .text()
+            .into_text()
             .await?;
         xml::check_xml_status(&xml)
     }
@@ -229,7 +212,7 @@ impl DownloadSession {
             .fetch_range_once(aligned.http_start, aligned.http_end)
             .await
         {
-            Err(e) if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) => {
+            Err(HttpError::Status(401)) => {
                 // The download token expired mid-transfer. Refresh it (at most
                 // once per expiry across all tasks) and retry the request once
                 // with the new token. If it still fails, the caller's retry loop
@@ -241,9 +224,8 @@ impl DownloadSession {
             other => other?,
         };
 
-        let stream = resp.bytes_stream().map_err(io::Error::other);
         Ok(DecryptReader::new(
-            stream.into_async_read(),
+            resp.into_reader(),
             self.get_decryptor(),
             aligned,
         ))
@@ -253,22 +235,25 @@ impl DownloadSession {
         &self,
         start: Option<u64>,
         end: Option<u64>,
-    ) -> reqwest::Result<Response> {
-        let mut headers = self.client.make_headers();
-        match (start, end) {
-            (Some(s), Some(e)) => headers.insert(
-                RANGE,
-                HeaderValue::from_str(&format!("bytes={}-{}", s, e)).unwrap(),
-            ),
-            (None, Some(e)) => headers.insert(
-                RANGE,
-                HeaderValue::from_str(&format!("bytes=0-{}", e)).unwrap(),
-            ),
-            (Some(s), None) => headers.insert(
-                RANGE,
-                HeaderValue::from_str(&format!("bytes={}-", s)).unwrap(),
-            ),
-            _ => None,
+    ) -> std::result::Result<impl HttpResponse + use<>, HttpError> {
+        let auth_val = self.client.auth_state.lock().unwrap().auth_header();
+        let range_val = match (start, end) {
+            (Some(s), Some(e)) => Some(format!("bytes={s}-{e}")),
+            (None, Some(e)) => Some(format!("bytes=0-{e}")),
+            (Some(s), None) => Some(format!("bytes={s}-")),
+            (None, None) => None,
+        };
+
+        let mut headers = [
+            ("Authorization", auth_val.as_str()),
+            ("User-Agent", "SMART 2.0"),
+            ("Range", ""),
+        ];
+        let headers = if let Some(range) = &range_val {
+            headers[2].1 = range.as_str();
+            &headers[..]
+        } else {
+            &headers[..2]
         };
 
         let url = format!(
@@ -277,11 +262,14 @@ impl DownloadSession {
         );
         self.client
             .client
-            .get(url)
-            .headers(headers)
-            .send()
+            .send(HttpRequest {
+                method: HttpMethod::Get,
+                url: &url,
+                headers,
+                body: None,
+            })
             .await?
-            .error_for_status()
+            .ensure_success()
     }
 
     /// Re-establish the session after the auth token expired (HTTP 401),
