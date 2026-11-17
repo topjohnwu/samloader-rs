@@ -172,7 +172,7 @@ where
                     crate::progress::on_event(crate::progress::FlashEvent::WaitingForDevice);
                     waiting = true;
                 }
-                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                crate::compat::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => return Err(e),
         }

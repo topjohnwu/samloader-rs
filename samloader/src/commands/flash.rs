@@ -18,8 +18,7 @@ use crate::cli::FlashArgs;
 use crate::progress;
 use crate::readahead::ReadaheadFile;
 use samloader_odin::{
-    FlashError, FlashRequest, OdinConnection, UsbBackendOption, create_backend,
-    futures::executor::block_on, verify_md5_footer,
+    FlashError, FlashRequest, OdinConnection, UsbBackendOption, create_backend, verify_md5_footer,
 };
 use std::error::Error;
 use std::fs::File;
@@ -54,7 +53,7 @@ fn open(path: &str) -> Result<ReadaheadFile, String> {
 }
 
 /// Flashes firmware packages and partition images to the connected device.
-pub(crate) fn run(
+pub(crate) async fn run(
     args: FlashArgs,
     usb_backend: UsbBackendOption,
     verbose: bool,
@@ -96,7 +95,8 @@ pub(crate) fn run(
     if !args.skip_md5 {
         for (pkg, reader) in &mut opened_packages {
             if pkg.to_lowercase().ends_with(".md5") {
-                block_on(verify_md5_footer(reader, pkg))
+                verify_md5_footer(reader, pkg)
+                    .await
                     .map_err(|e| format!("MD5 verification failed for \"{}\": {}", pkg, e))?;
             }
         }
@@ -118,7 +118,7 @@ pub(crate) fn run(
     }
 
     // Validate and index the inputs before connecting to the device
-    let prepared = block_on(request.prepare())?;
+    let prepared = request.prepare().await?;
 
     if !args.force && prepared.flashes_userdata() {
         if !io::stdin().is_terminal() {
@@ -133,17 +133,15 @@ pub(crate) fn run(
         }
     }
 
-    block_on(async {
-        let transport = create_backend(usb_backend, args.odin.wait).await?;
-        let mut session = OdinConnection::open(transport).begin_session().await?;
-        if let Err(err) = prepared.execute(&mut session).await {
-            return match err {
-                FlashError::PartitionTooSmall(_) => {
-                    Err(format!("{err}. Use --skip-size-check to flash anyways.").into())
-                }
-                other => Err(other.into()),
-            };
-        }
-        Ok(())
-    })
+    let transport = create_backend(usb_backend, args.odin.wait).await?;
+    let mut session = OdinConnection::open(transport).begin_session().await?;
+    if let Err(err) = prepared.execute(&mut session).await {
+        return match err {
+            FlashError::PartitionTooSmall(_) => {
+                Err(format!("{err}. Use --skip-size-check to flash anyways.").into())
+            }
+            other => Err(other.into()),
+        };
+    }
+    Ok(())
 }

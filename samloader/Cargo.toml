@@ -18,6 +18,7 @@ indicatif = { workspace = true }
 cfg-if = { workspace = true }
 memmap2 = { workspace = true }
 fast-md5 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

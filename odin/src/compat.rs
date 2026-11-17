@@ -51,3 +51,41 @@ impl<T: ?Sized + Sync> MaybeSync for T {}
 pub trait MaybeSync: sealed::SyncSealed {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSync for T {}
+
+/// Cross-target async timer future backed by `tokio::time` on native targets
+/// and `futures-timer` on WebAssembly.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Sleep(Option<std::pin::Pin<Box<tokio::time::Sleep>>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Sleep {
+    pub(crate) fn new(duration: std::time::Duration) -> Self {
+        // Skip registering a Tokio timer for zero-length test delays so unit
+        // tests using `futures::executor::block_on` do not require a Tokio reactor.
+        Self((!duration.is_zero()).then(|| Box::pin(tokio::time::sleep(duration))))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::future::Future for Sleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if let Some(sleep) = &mut self.0 {
+            std::task::ready!(sleep.as_mut().poll(cx));
+            self.0 = None;
+        }
+        std::task::Poll::Ready(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use futures_timer::Delay as Sleep;
+
+/// Sleeps for `duration`.
+pub(crate) fn sleep(duration: std::time::Duration) -> Sleep {
+    Sleep::new(duration)
+}

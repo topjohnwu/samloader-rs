@@ -48,8 +48,8 @@ type Chunk = io::Result<Vec<u8>>;
 /// for sequential reads.
 ///
 /// Small reads that are not part of a sequential run are performed directly,
-/// blocking the caller. This is fine with `block_on`, which only drives the
-/// flash itself.
+/// blocking the caller. This is fine because `flash` and `verify-md5` run as a
+/// single root future with no concurrent tasks.
 pub(crate) struct ReadaheadFile {
     file: Arc<File>,
     len: u64,

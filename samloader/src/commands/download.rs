@@ -16,17 +16,20 @@ use crate::cli::DownloadArgs;
 use binrw::{BinRead, BinWrite, binrw};
 use fast_md5::Md5;
 use indicatif::{ProgressBar, ProgressStyle};
-use memmap2::MmapMut;
-use samloader_fus::{BinaryInform, DownloadSession, FusClient, fetch_history};
+use mmap::MmapBuf;
+use samloader_fus::{
+    BinaryInform, DownloadSession, FusClient, fetch_history, futures::io::AsyncReadExt,
+};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 const PROGRESS_TEMPLATE: &str =
     "[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
@@ -41,12 +44,13 @@ const FOOTER_VERSION: u32 = 3;
 const MAX_STALL_RETRIES: u32 = 4;
 const MAX_DEAD_STALLS: u32 = 4;
 
-struct Reporter<'a> {
-    pb: &'a ProgressBar,
+#[derive(Clone)]
+struct Reporter {
+    pb: ProgressBar,
     verbose: bool,
 }
 
-impl Reporter<'_> {
+impl Reporter {
     fn log_verbose(&self, msg: fmt::Arguments<'_>) {
         if self.verbose {
             self.pb.println(msg.to_string());
@@ -253,12 +257,74 @@ fn partition_ranges_for_threads(ranges: &[ByteRange], threads: u64) -> Vec<ByteR
     result
 }
 
-struct StateTracker<'a> {
-    footer: &'a mut Footer,
-    footer_map: &'a mut [u8],
+mod mmap {
+    use memmap2::MmapRaw;
+    use std::fs::File;
+    use std::io;
+    use std::sync::Arc;
+
+    pub(super) struct MmapBuf {
+        map: Arc<MmapRaw>,
+        offset: usize,
+        len: usize,
+    }
+
+    impl MmapBuf {
+        /// Maps `file` into memory as a single root buffer covering its current length.
+        ///
+        /// # Safety
+        ///
+        /// The backing file must not be truncated or externally mutated until this
+        /// `MmapBuf` and all slices split from it have been dropped.
+        pub(super) unsafe fn map(file: &File) -> io::Result<Self> {
+            let map = Arc::new(MmapRaw::map_raw(file)?);
+            let len = map.len();
+            Ok(Self {
+                map,
+                offset: 0,
+                len,
+            })
+        }
+
+        pub(super) fn split_at(self, mid: usize) -> (Self, Self) {
+            assert!(mid <= self.len);
+            let left = Self {
+                map: Arc::clone(&self.map),
+                offset: self.offset,
+                len: mid,
+            };
+            let right = Self {
+                map: self.map,
+                offset: self.offset + mid,
+                len: self.len - mid,
+            };
+            (left, right)
+        }
+
+        pub(super) fn flush_and_unmap(self) -> io::Result<()> {
+            let map = Arc::into_inner(self.map).expect("other MmapBuf slices still alive");
+            map.flush()
+        }
+    }
+
+    impl AsMut<[u8]> for MmapBuf {
+        fn as_mut(&mut self) -> &mut [u8] {
+            // SAFETY: `MmapBuf` is `!Clone`, constructed once per mapping via `map`,
+            // and only divided into disjoint ranges via `split_at`; the caller of
+            // `map` upholds that the backing file's size stays fixed until unmapped.
+            unsafe {
+                std::slice::from_raw_parts_mut(self.map.as_mut_ptr().add(self.offset), self.len)
+            }
+        }
+    }
 }
 
-impl StateTracker<'_> {
+struct StateTracker<B = MmapBuf> {
+    footer: Footer,
+    footer_buf: B,
+}
+
+impl<B: AsMut<[u8]>> StateTracker<B> {
     fn on_bytes_decrypted(&mut self, start: u64, prev_dec: usize, new_dec: usize) {
         let prev_pos = start + prev_dec as u64;
         let curr_pos = start + new_dec as u64;
@@ -279,7 +345,7 @@ impl StateTracker<'_> {
             }
         }
         if changed {
-            self.footer.write_to_slice(self.footer_map);
+            self.footer.write_to_slice(self.footer_buf.as_mut());
         }
     }
 
@@ -289,23 +355,23 @@ impl StateTracker<'_> {
         if total_blocks > 0 {
             self.footer.blocks.set(total_blocks - 1);
         }
-        self.footer.write_to_slice(self.footer_map);
+        self.footer.write_to_slice(self.footer_buf.as_mut());
     }
 }
 
-struct Chunk<'a> {
-    buf: &'a mut [u8],
+struct Chunk {
+    buf: MmapBuf,
     start: u64,
     end: Option<u64>,
 }
 
-struct Pool<'a> {
-    inner: Mutex<PoolInner<'a>>,
-    available: Condvar,
+struct Pool {
+    inner: Mutex<PoolInner>,
+    available: Notify,
 }
 
-struct PoolInner<'a> {
-    queue: VecDeque<Chunk<'a>>,
+struct PoolInner {
+    queue: VecDeque<Chunk>,
     in_flight: usize,
     live: usize,
     error: Option<io::Error>,
@@ -316,16 +382,16 @@ enum ChunkOutcome {
     Stalled { decrypted: usize },
 }
 
-fn download_firmware(
-    session: &DownloadSession,
+async fn download_firmware(
+    session: &Arc<DownloadSession>,
     final_path: &Path,
     threads: u64,
     force: bool,
-    progress: &Reporter<'_>,
+    reporter: &Reporter,
 ) -> io::Result<()> {
     let info = session.info();
     let threads = threads.max(1);
-    let pb = progress.pb;
+    let pb = &reporter.pb;
 
     if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -361,7 +427,7 @@ fn download_firmware(
         .truncate(existing_footer.is_none())
         .open(&part_path)?;
 
-    let mut footer = if let Some(footer) = existing_footer {
+    let footer = if let Some(footer) = existing_footer {
         let effective_total = footer.effective_size(info.size);
         let completed_bytes = footer.completed_bytes(info.size);
         pb.println(format!(
@@ -397,25 +463,24 @@ fn download_firmware(
     pb.enable_steady_tick(Duration::from_secs(1));
 
     let uncompleted = footer.blocks.uncompleted_ranges(info.size);
-    let mut map = unsafe { MmapMut::map_mut(&file)? };
     let download_chunks = partition_ranges_for_threads(&uncompleted, threads);
 
-    if !download_chunks.is_empty() {
-        let (payload_map, footer_map) = map.split_at_mut(info.size as usize);
-        let tracker = Mutex::new(StateTracker {
-            footer: &mut footer,
-            footer_map,
-        });
+    let padding = if !download_chunks.is_empty() {
+        // SAFETY: `file` is not truncated or externally modified until `flush_and_unmap`
+        // drops the mapping below.
+        let root_buf = unsafe { MmapBuf::map(&file)? };
+        let (payload_buf, footer_buf) = root_buf.split_at(info.size as usize);
+        let tracker = Arc::new(Mutex::new(StateTracker { footer, footer_buf }));
 
         let mut queue = VecDeque::new();
-        let mut rest = payload_map;
+        let mut rest = payload_buf;
         let mut current_offset = 0_u64;
 
         for range in &download_chunks {
             let skip = (range.start - current_offset) as usize;
-            let (_, tail) = rest.split_at_mut(skip);
+            let (_, tail) = rest.split_at(skip);
             let len = (range.end - range.start) as usize;
-            let (buf, next_rest) = tail.split_at_mut(len);
+            let (buf, next_rest) = tail.split_at(len);
             current_offset = range.end;
             rest = next_rest;
 
@@ -429,40 +494,64 @@ fn download_firmware(
                 },
             });
         }
+        drop(rest);
 
         let n_workers = queue.len().min(threads as usize);
-        let pool = Pool {
+        let pool = Arc::new(Pool {
             inner: Mutex::new(PoolInner {
                 queue,
                 in_flight: 0,
-                live: n_workers,
+                live: 0,
                 error: None,
             }),
-            available: Condvar::new(),
-        };
-
-        thread::scope(|s| {
-            let pool = &pool;
-            let tracker = &tracker;
-            for _ in 0..n_workers {
-                s.spawn(move || run_worker(pool, session, progress, tracker));
-                thread::sleep(Duration::from_millis(100));
-            }
+            available: Notify::new(),
         });
+
+        let mut workers = JoinSet::new();
+        for i in 0..n_workers {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            {
+                let mut state = pool.inner.lock().unwrap();
+                if state.error.is_some() || state.queue.is_empty() {
+                    break;
+                }
+                state.live += 1;
+            }
+            let (pool_ref, session, reporter, tracker) = (
+                Arc::clone(&pool),
+                Arc::clone(session),
+                reporter.clone(),
+                Arc::clone(&tracker),
+            );
+            workers.spawn(async move {
+                run_worker(&pool_ref, &session, &reporter, &tracker).await;
+            });
+        }
+        while let Some(res) = workers.join_next().await {
+            res.expect("download worker task panicked");
+        }
 
         let pool_error = pool.inner.lock().unwrap().error.take();
         drop(pool);
 
+        let tracker = Arc::into_inner(tracker)
+            .expect("all workers have exited")
+            .into_inner()
+            .unwrap();
+        let padding = tracker.footer.padding;
+        tracker.footer_buf.flush_and_unmap()?;
+
         if let Some(err) = pool_error {
-            map.flush()?;
             return Err(err);
         }
-    }
+        padding
+    } else {
+        footer.padding
+    };
 
-    map.flush()?;
-    drop(map);
-
-    file.set_len(info.size.saturating_sub(footer.padding as u64))?;
+    file.set_len(info.size.saturating_sub(padding as u64))?;
     drop(file);
 
     if final_path.exists() {
@@ -473,22 +562,27 @@ fn download_firmware(
     Ok(())
 }
 
-fn run_worker(
-    pool: &Pool<'_>,
+async fn run_worker(
+    pool: &Pool,
     session: &DownloadSession,
-    progress: &Reporter<'_>,
-    tracker: &Mutex<StateTracker<'_>>,
+    reporter: &Reporter,
+    tracker: &Mutex<StateTracker>,
 ) {
-    let mut last_progress = progress.pb.position();
+    let mut last_progress = reporter.pb.position();
     let mut dead_stalls = 0_u32;
 
     loop {
-        let chunk = {
-            let mut state = pool.inner.lock().unwrap();
-            loop {
+        let mut chunk = loop {
+            let notified = pool.available.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            {
+                let mut state = pool.inner.lock().unwrap();
                 if state.error.is_some() {
                     state.live -= 1;
-                    pool.available.notify_all();
+                    drop(state);
+                    pool.available.notify_waiters();
                     return;
                 }
                 if let Some(chunk) = state.queue.pop_front() {
@@ -497,33 +591,37 @@ fn run_worker(
                 }
                 if state.in_flight == 0 {
                     state.live -= 1;
-                    pool.available.notify_all();
+                    drop(state);
+                    pool.available.notify_waiters();
                     return;
                 }
-                state = pool.available.wait(state).unwrap();
             }
+
+            notified.await;
         };
 
         let outcome = download_chunk(
             session,
-            &mut chunk.buf[..],
+            chunk.buf.as_mut(),
             chunk.start,
             chunk.end,
-            progress,
+            reporter,
             tracker,
-        );
+        )
+        .await;
 
         match outcome {
             ChunkOutcome::Done => {
                 dead_stalls = 0;
                 let mut state = pool.inner.lock().unwrap();
                 state.in_flight -= 1;
-                pool.available.notify_all();
+                drop(state);
+                pool.available.notify_waiters();
             }
             ChunkOutcome::Stalled { decrypted } => {
                 let stall_off = chunk.start + decrypted as u64;
                 let Chunk { buf, end, .. } = chunk;
-                let (_done, rest) = buf.split_at_mut(decrypted);
+                let (_done, rest) = buf.split_at(decrypted);
                 let remainder = Chunk {
                     buf: rest,
                     start: stall_off,
@@ -535,7 +633,8 @@ fn run_worker(
                 if state.error.is_some() {
                     state.in_flight -= 1;
                     state.live -= 1;
-                    pool.available.notify_all();
+                    drop(state);
+                    pool.available.notify_waiters();
                     return;
                 }
 
@@ -545,19 +644,19 @@ fn run_worker(
                 if state.live > 1 {
                     state.live -= 1;
                     let remaining = state.live;
-                    pool.available.notify_all();
                     drop(state);
-                    progress.log_verbose(format_args!(
+                    pool.available.notify_waiters();
+                    reporter.log_verbose(format_args!(
                         "Connection throttled at offset {stall_off}; \
                          reducing to {remaining} connection(s)"
                     ));
                     return;
                 }
 
-                pool.available.notify_all();
                 drop(state);
+                pool.available.notify_waiters();
 
-                let pos = progress.pb.position();
+                let pos = reporter.pb.position();
                 if pos > last_progress {
                     last_progress = pos;
                     dead_stalls = 0;
@@ -572,7 +671,8 @@ fn run_worker(
                             ),
                         ));
                         state.live -= 1;
-                        pool.available.notify_all();
+                        drop(state);
+                        pool.available.notify_waiters();
                         return;
                     }
                 }
@@ -581,30 +681,30 @@ fn run_worker(
     }
 }
 
-fn download_chunk(
+async fn download_chunk(
     session: &DownloadSession,
     chunk: &mut [u8],
     start: u64,
     end: Option<u64>,
-    progress: &Reporter<'_>,
-    tracker: &Mutex<StateTracker<'_>>,
+    reporter: &Reporter,
+    tracker: &Mutex<StateTracker>,
 ) -> ChunkOutcome {
     let mut dec_pos = 0_usize;
     let mut retries = 0_u32;
 
     loop {
-        let mut reader = match session.fetch_range(Some(start + dec_pos as u64), end) {
+        let mut reader = match session.fetch_range(Some(start + dec_pos as u64), end).await {
             Ok(reader) => reader,
             Err(e) => {
                 retries += 1;
                 if retries > MAX_STALL_RETRIES {
                     return ChunkOutcome::Stalled { decrypted: dec_pos };
                 }
-                progress.log_verbose(format_args!(
+                reporter.log_verbose(format_args!(
                     "Request error ({e}); retry {retries}/{MAX_STALL_RETRIES} at offset {}",
                     start + dec_pos as u64
                 ));
-                thread::sleep(backoff(retries));
+                tokio::time::sleep(backoff(retries)).await;
                 continue;
             }
         };
@@ -612,15 +712,15 @@ fn download_chunk(
         let resume_from = dec_pos;
 
         let stall = loop {
-            match reader.read(&mut chunk[dec_pos..]) {
+            match reader.read(&mut chunk[dec_pos..]).await {
                 Ok(0) => {
                     if end.is_none() && chunk.len() - dec_pos <= 16 {
                         let pad = (chunk.len() - dec_pos) as u8;
                         tracker.lock().unwrap().on_eof_reached(pad);
                         if pad > 0
-                            && let Some(len) = progress.pb.length()
+                            && let Some(len) = reporter.pb.length()
                         {
-                            progress.pb.set_length(len.saturating_sub(pad as u64));
+                            reporter.pb.set_length(len.saturating_sub(pad as u64));
                         }
                         return ChunkOutcome::Done;
                     }
@@ -632,7 +732,7 @@ fn download_chunk(
                 Ok(n) => {
                     let prev_dec = dec_pos;
                     dec_pos += n;
-                    progress.pb.inc(n as u64);
+                    reporter.pb.inc(n as u64);
 
                     let mut guard = tracker.lock().unwrap();
                     guard.on_bytes_decrypted(start, prev_dec, dec_pos);
@@ -655,12 +755,12 @@ fn download_chunk(
         if retries > MAX_STALL_RETRIES {
             return ChunkOutcome::Stalled { decrypted: dec_pos };
         }
-        progress.log_verbose(format_args!(
+        reporter.log_verbose(format_args!(
             "Download error ({stall}); retry {retries}/{MAX_STALL_RETRIES}, \
              resuming at offset {}",
             start + dec_pos as u64
         ));
-        thread::sleep(backoff(retries));
+        tokio::time::sleep(backoff(retries)).await;
     }
 }
 
@@ -669,19 +769,23 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 /// Downloads and decrypts a firmware from Samsung's update servers.
-pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error>> {
+pub(crate) async fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error>> {
     let version = match &args.version {
         Some(v) => v.clone(),
         None => {
             let version_info = fetch_history(&args.fus.model, &args.fus.region)
+                .await
                 .map_err(|e| format!("Failed to fetch version info: {e}"))?;
             version_info.latest
         }
     };
 
-    let client = FusClient::new().map_err(|e| format!("Unable to establish FusClient: {e}"))?;
+    let client = FusClient::new()
+        .await
+        .map_err(|e| format!("Unable to establish FusClient: {e}"))?;
     let info = client
         .fetch_binary_info(&args.fus.model, &args.fus.region, &version)
+        .await
         .map_err(|e| format!("Failed to fetch binary info: {e}"))?;
 
     println!("Firmware Version: {}", info.version);
@@ -712,25 +816,29 @@ pub(crate) fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error
 
     println!("Downloading {} to {}", info.filename, final_path.display());
 
-    let session = client
-        .init_download(info)
-        .map_err(|e| format!("Failed to initialize download: {e}"))?;
+    let session = Arc::new(
+        client
+            .init_download(info)
+            .await
+            .map_err(|e| format!("Failed to initialize download: {e}"))?,
+    );
 
-    let progress = ProgressBar::no_length()
-        .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap());
     let reporter = Reporter {
-        pb: &progress,
+        pb: ProgressBar::no_length()
+            .with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).unwrap()),
         verbose,
     };
 
-    if let Err(e) = download_firmware(&session, &final_path, args.threads, args.force, &reporter) {
-        progress.abandon();
+    if let Err(e) =
+        download_firmware(&session, &final_path, args.threads, args.force, &reporter).await
+    {
+        reporter.pb.abandon();
         // Keep the error apart from the abandoned progress bar
         eprintln!();
         return Err(format!("Download failed: {e}").into());
     }
 
-    progress.finish();
+    reporter.pb.finish();
     Ok(())
 }
 
@@ -838,7 +946,7 @@ mod tests {
     fn test_state_tracker_interruption_and_resume() {
         let size = 10 * 1024 * 1024; // 5 blocks
         let info = mock_info(size);
-        let mut footer = Footer::new(&info);
+        let footer = Footer::new(&info);
         let mut footer_bytes = footer.to_bytes();
 
         let validate = |bytes: &[u8]| {
@@ -851,8 +959,8 @@ mod tests {
         // First run: completes blocks 0 and 1, plus out-of-order final block 4 with 11-byte padding
         {
             let mut tracker = StateTracker {
-                footer: &mut footer,
-                footer_map: &mut footer_bytes,
+                footer,
+                footer_buf: footer_bytes.as_mut_slice(),
             };
             tracker.on_bytes_decrypted(0, 0, 1024 * 1024);
             assert!(!tracker.footer.blocks.get(0));
@@ -882,10 +990,10 @@ mod tests {
         );
 
         // Second run: resumes from disk bytes and completes block 2; persisted padding (11) remains intact
-        let mut resumed = read_part(size, &footer_bytes, &info).unwrap();
+        let resumed = read_part(size, &footer_bytes, &info).unwrap();
         StateTracker {
-            footer: &mut resumed,
-            footer_map: &mut footer_bytes,
+            footer: resumed,
+            footer_buf: footer_bytes.as_mut_slice(),
         }
         .on_bytes_decrypted(2 * BLOCK_SIZE as u64, 0, BLOCK_SIZE);
 

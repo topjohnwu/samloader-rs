@@ -15,10 +15,7 @@
 
 use crate::cli::DetectArgs;
 use crate::progress;
-use samloader_odin::{
-    DeviceInfo, OdinConnection, UsbBackendOption, create_backend, detect_device,
-    futures::executor::block_on,
-};
+use samloader_odin::{DeviceInfo, OdinConnection, UsbBackendOption, create_backend, detect_device};
 use std::error::Error;
 use std::fmt::Write;
 
@@ -53,34 +50,35 @@ fn format_device_info_json(info: Option<&DeviceInfo>) -> String {
 }
 
 /// Reports whether a device in Download Mode is connected, and its details.
-pub(crate) fn run(args: DetectArgs, usb_backend: UsbBackendOption) -> Result<(), Box<dyn Error>> {
+pub(crate) async fn run(
+    args: DetectArgs,
+    usb_backend: UsbBackendOption,
+) -> Result<(), Box<dyn Error>> {
     let DetectArgs { wait, json } = args;
     if !json {
         progress::init(false);
     }
-    block_on(async {
-        if !detect_device(usb_backend, wait).await {
-            return Err("Failed to detect compatible download-mode device.".into());
-        }
+    if !detect_device(usb_backend, wait).await {
+        return Err("Failed to detect compatible download-mode device.".into());
+    }
 
-        let info = if let Ok(transport) = create_backend(usb_backend, false).await {
-            OdinConnection::open(transport)
-                .query_device_info()
-                .await
-                .ok()
-        } else {
-            None
-        };
-        if json {
-            println!("{}", format_device_info_json(info.as_ref()));
-        } else {
-            println!("Device detected (Download mode)");
-            if let Some(info) = info {
-                print!("{}", info);
-            }
+    let info = if let Ok(transport) = create_backend(usb_backend, false).await {
+        OdinConnection::open(transport)
+            .query_device_info()
+            .await
+            .ok()
+    } else {
+        None
+    };
+    if json {
+        println!("{}", format_device_info_json(info.as_ref()));
+    } else {
+        println!("Device detected (Download mode)");
+        if let Some(info) = info {
+            print!("{}", info);
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 #[cfg(test)]

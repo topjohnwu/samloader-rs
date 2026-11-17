@@ -22,12 +22,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::compat::Sleep;
 use ::nusb::transfer::{Buffer, BulkOrInterrupt, Completion, EndpointDirection};
-use futures_timer::Delay;
 
 struct TransferFuture<'a, EpType: BulkOrInterrupt, Dir: EndpointDirection> {
     ep: &'a mut ::nusb::Endpoint<EpType, Dir>,
-    delay: Delay,
+    delay: Sleep,
     #[cfg(not(target_arch = "wasm32"))]
     cancelled: bool,
     #[cfg(target_arch = "wasm32")]
@@ -88,7 +88,7 @@ async fn drain_pending<EpType: BulkOrInterrupt, Dir: EndpointDirection>(
 ) -> Result<(), ()> {
     ep.cancel_all();
     while ep.pending() > 0 {
-        let mut delay = Delay::new(Duration::from_secs(1));
+        let mut delay = Sleep::new(Duration::from_secs(1));
         let completed = futures::future::poll_fn(|cx| {
             if let Poll::Ready(_completion) = ep.poll_next_complete(cx) {
                 Poll::Ready(true)
@@ -114,7 +114,7 @@ async fn wait_pending<EpType: BulkOrInterrupt, Dir: EndpointDirection>(
 ) -> Completion {
     TransferFuture {
         ep,
-        delay: Delay::new(timeout),
+        delay: Sleep::new(timeout),
         pending_buf: None,
     }
     .await
@@ -137,7 +137,7 @@ async fn transfer_async<EpType: BulkOrInterrupt, Dir: EndpointDirection>(
         ep.submit(buf);
         TransferFuture {
             ep,
-            delay: Delay::new(timeout),
+            delay: Sleep::new(timeout),
             cancelled: false,
         }
         .await
@@ -151,7 +151,7 @@ async fn transfer_async<EpType: BulkOrInterrupt, Dir: EndpointDirection>(
         }
         TransferFuture {
             ep,
-            delay: Delay::new(timeout),
+            delay: Sleep::new(timeout),
             pending_buf,
         }
         .await

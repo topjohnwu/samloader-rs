@@ -19,9 +19,10 @@ use samloader_fus::fetch_history;
 use std::error::Error;
 
 /// Prints the firmware versions available for a model and region.
-pub(crate) fn run(args: CheckUpdateArgs) -> Result<(), Box<dyn Error>> {
-    let info =
-        fetch_history(&args.fus.model, &args.fus.region).expect("Failed to fetch version info");
+pub(crate) async fn run(args: CheckUpdateArgs) -> Result<(), Box<dyn Error>> {
+    let info = fetch_history(&args.fus.model, &args.fus.region)
+        .await
+        .map_err(|e| format!("Failed to fetch version info: {e}"))?;
 
     if args.all {
         println!("Latest Stable Version:");

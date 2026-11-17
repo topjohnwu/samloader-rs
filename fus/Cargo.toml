@@ -15,6 +15,7 @@ ecb = { workspace = true }
 fast-md5 = { workspace = true }
 roxmltree = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
 
 [target.'cfg(target_env = "musl")'.dependencies]
 reqwest = { workspace = true, features = ["native-tls-vendored"] }

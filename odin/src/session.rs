@@ -156,7 +156,7 @@ impl OdinConnection {
         };
 
         progress::on_event(FlashEvent::SessionSetup);
-        futures_timer::Delay::new(SESSION_SETUP_DELAY).await;
+        crate::compat::sleep(SESSION_SETUP_DELAY).await;
 
         if session.bootloader_protocol_version >= 2 {
             session.lz4_supported = (session_response & 0x8000) != 0;

@@ -14,13 +14,16 @@
 // limitations under the License.
 
 use crate::progress;
-use samloader_odin::{DownloadModeReboot, UsbBackendOption, futures::executor::block_on};
+use samloader_odin::{DownloadModeReboot, UsbBackendOption};
 use std::error::Error;
 
 /// Reboots the connected device from normal mode into Download Mode.
-pub(crate) fn run(usb_backend: UsbBackendOption, verbose: bool) -> Result<(), Box<dyn Error>> {
+pub(crate) async fn run(
+    usb_backend: UsbBackendOption,
+    verbose: bool,
+) -> Result<(), Box<dyn Error>> {
     progress::init(verbose);
-    if block_on(samloader_odin::reboot_download(usb_backend))?
+    if samloader_odin::reboot_download(usb_backend).await?
         == DownloadModeReboot::AlreadyInDownloadMode
     {
         println!("Device is already in Download Mode.");

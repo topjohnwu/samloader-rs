@@ -57,16 +57,30 @@ fn main() {
     } = Cli::parse();
 
     let result = match command {
-        Command::Download(args) => commands::download::run(args, verbose),
-        Command::CheckUpdate(args) => commands::check_update::run(args),
-        Command::Detect(args) => commands::detect::run(args, usb_backend),
-        Command::DumpPit(args) => commands::pit::dump(args, usb_backend, verbose),
-        Command::PrintPit(args) => commands::pit::print(args, usb_backend, verbose),
-        Command::Flash(args) => commands::flash::run(args, usb_backend, verbose),
-        Command::VerifyMd5(args) => commands::md5::run(args),
-        Command::RebootDownload => commands::reboot::run(usb_backend, verbose),
         #[cfg(target_os = "linux")]
         Command::FixUsb => commands::fix_usb::run(),
+        command => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to initialize Tokio runtime");
+            rt.block_on(async {
+                match command {
+                    Command::Download(args) => commands::download::run(args, verbose).await,
+                    Command::CheckUpdate(args) => commands::check_update::run(args).await,
+                    Command::Detect(args) => commands::detect::run(args, usb_backend).await,
+                    Command::DumpPit(args) => commands::pit::dump(args, usb_backend, verbose).await,
+                    Command::PrintPit(args) => {
+                        commands::pit::print(args, usb_backend, verbose).await
+                    }
+                    Command::Flash(args) => commands::flash::run(args, usb_backend, verbose).await,
+                    Command::VerifyMd5(args) => commands::md5::run(args).await,
+                    Command::RebootDownload => commands::reboot::run(usb_backend, verbose).await,
+                    #[cfg(target_os = "linux")]
+                    Command::FixUsb => unreachable!(),
+                }
+            })
+        }
     };
 
     if let Err(e) = result {

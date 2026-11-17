@@ -16,10 +16,15 @@ use crate::error::Result;
 use crate::{auth, xml};
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockModeDecrypt, KeyInit};
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RANGE, USER_AGENT};
-use std::io::{self, Read};
+use futures::io::AsyncRead;
+use futures::lock::Mutex as AsyncMutex;
+use futures::stream::TryStreamExt;
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE, USER_AGENT};
+use reqwest::{Client, Response};
+use std::io;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use xml::BinaryInform;
 
@@ -27,7 +32,7 @@ type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 /// Authentication token state. The download GET signs every request with
 /// `encnonce`/`auth`; these expire, so they live behind a lock and are shared
-/// by reference across all download threads (which only read them) and the
+/// by reference across all download tasks (which only read them) and the
 /// occasional reauthentication (which rewrites them). See [`FusClient`] and
 /// [`DownloadSession`].
 #[derive(Default)]
@@ -46,16 +51,13 @@ pub struct FusClient {
 
 impl FusClient {
     /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
-    pub fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let client = Client::builder()
             .cookie_store(true)
-            // For the blocking client, `timeout` is applied per I/O operation with
-            // a fresh deadline each call (see its `Read` impl) — so it flags a
-            // stalled transfer (no data for 30s) without capping total download
-            // time. This is the timeout that surfaces as `Decode/TimedOut`; the
-            // download loop now resumes on it instead of aborting. 30s is also the
-            // library default, made explicit here so it can be tuned.
-            .timeout(Duration::from_secs(30))
+            // `read_timeout` resets on every body chunk read rather than capping
+            // the total download duration, flagging stalled connections after 30s
+            // so the caller's retry loop can resume.
+            .read_timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(15))
             .build()?;
         let fus = FusClient {
@@ -64,13 +66,13 @@ impl FusClient {
         };
 
         // Initialize nonce
-        fus.generate_nonce()?;
+        fus.generate_nonce().await?;
 
         Ok(fus)
     }
 
     /// Queries the server for firmware binary metadata matching the requested model, region, and version.
-    pub fn fetch_binary_info(
+    pub async fn fetch_binary_info(
         &self,
         model: &str,
         region: &str,
@@ -85,8 +87,10 @@ impl FusClient {
         let req_xml = xml::binary_inform_req_xml(model, region, &fw, &nonce);
 
         let xml = self
-            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)?
-            .text()?;
+            .make_req("NF_SmartDownloadBinaryInform.do", &req_xml)
+            .await?
+            .text()
+            .await?;
 
         BinaryInform::parse(&xml)
     }
@@ -107,14 +111,18 @@ impl FusClient {
         headers
     }
 
-    fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
+    async fn make_req(&self, path: &str, data: &str) -> reqwest::Result<Response> {
         let url = format!("https://neofussvr.sslcs.cdngc.net/{}", path);
+        // Hyper omits `Content-Length` on empty POST bodies unless set explicitly,
+        // which FUS rejects with `411 Length Required` during nonce generation.
         let resp = self
             .client
             .post(&url)
             .headers(self.make_headers())
+            .header(CONTENT_LENGTH, data.len())
             .body(data.to_string())
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
         if let Some(nonce) = resp
@@ -137,12 +145,13 @@ impl FusClient {
         Ok(resp)
     }
 
-    fn generate_nonce(&self) -> reqwest::Result<()> {
-        self.make_req("NF_SmartDownloadGenerateNonce.do", "")?;
+    async fn generate_nonce(&self) -> reqwest::Result<()> {
+        self.make_req("NF_SmartDownloadGenerateNonce.do", "")
+            .await?;
         Ok(())
     }
 
-    fn send_init_download(&self, info: &BinaryInform) -> Result<()> {
+    async fn send_init_download(&self, info: &BinaryInform) -> Result<()> {
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
         let init_xml = xml::binary_init_req_xml(
             &info.filename,
@@ -152,19 +161,21 @@ impl FusClient {
             &info.region,
         );
         let xml = self
-            .make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)?
-            .text()?;
+            .make_req("NF_SmartDownloadBinaryInitForMass.do", &init_xml)
+            .await?
+            .text()
+            .await?;
         xml::check_xml_status(&xml)
     }
 
     /// Requests a download authorization ticket from FUS for `info` and consumes
     /// this client into an active [`DownloadSession`].
-    pub fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
-        self.send_init_download(&info)?;
+    pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
+        self.send_init_download(&info).await?;
         Ok(DownloadSession {
             client: self,
             info,
-            reauth_gen: Mutex::new(0),
+            reauth_gen: AsyncMutex::new(0),
         })
     }
 }
@@ -175,9 +186,9 @@ pub struct DownloadSession {
     client: FusClient,
     info: BinaryInform,
     /// Reauthentication generation counter. It also serves as the lock that
-    /// serializes reauth: a token expiry observed by many download threads at
+    /// serializes reauth: a token expiry observed by many download tasks at
     /// once triggers a single refresh, and the rest reuse its result.
-    reauth_gen: Mutex<u64>,
+    reauth_gen: AsyncMutex<u64>,
 }
 
 impl DownloadSession {
@@ -189,8 +200,8 @@ impl DownloadSession {
     /// Streams and transparently decrypts the entire firmware binary package,
     /// stripping trailing PKCS#7 padding and automatically handling re-authentication
     /// as needed.
-    pub fn fetch(&self) -> Result<impl Read + use<>> {
-        self.fetch_range(None, None)
+    pub async fn fetch(&self) -> Result<impl AsyncRead + Send + Unpin + use<>> {
+        self.fetch_range(None, None).await
     }
 
     /// Fetches a specific byte range or chunk of the firmware binary package, transparently
@@ -199,7 +210,11 @@ impl DownloadSession {
     /// Both `start` and the inclusive `end` are automatically expanded outward to the nearest
     /// 16-byte AES-128 block boundaries when fetching from the server, with any excess leading
     /// bytes, trailing bytes, or EOF PKCS#7 padding trimmed from the returned stream.
-    pub fn fetch_range(&self, start: Option<u64>, end: Option<u64>) -> Result<impl Read + use<>> {
+    pub async fn fetch_range(
+        &self,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> Result<impl AsyncRead + Send + Unpin + use<>> {
         let aligned = AlignedRange::new(start, end, self.info.size);
         if aligned.dec_remaining == 0 {
             return Ok(DecryptReader(None));
@@ -207,25 +222,38 @@ impl DownloadSession {
 
         // Capture the token generation backing this request. If the request is
         // rejected as unauthorized, this lets the refresh tell whether another
-        // thread has already rotated the token in the meantime.
-        let gen_used = *self.reauth_gen.lock().unwrap();
+        // task has already rotated the token in the meantime.
+        let gen_used = *self.reauth_gen.lock().await;
 
-        let resp = match self.fetch_range_once(aligned.http_start, aligned.http_end) {
+        let resp = match self
+            .fetch_range_once(aligned.http_start, aligned.http_end)
+            .await
+        {
             Err(e) if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) => {
                 // The download token expired mid-transfer. Refresh it (at most
-                // once per expiry across all threads) and retry the request once
+                // once per expiry across all tasks) and retry the request once
                 // with the new token. If it still fails, the caller's retry loop
                 // takes over.
-                self.reauthenticate(gen_used);
-                self.fetch_range_once(aligned.http_start, aligned.http_end)?
+                self.reauthenticate(gen_used).await;
+                self.fetch_range_once(aligned.http_start, aligned.http_end)
+                    .await?
             }
             other => other?,
         };
 
-        Ok(DecryptReader::new(resp, self.get_decryptor(), aligned))
+        let stream = resp.bytes_stream().map_err(io::Error::other);
+        Ok(DecryptReader::new(
+            stream.into_async_read(),
+            self.get_decryptor(),
+            aligned,
+        ))
     }
 
-    fn fetch_range_once(&self, start: Option<u64>, end: Option<u64>) -> reqwest::Result<Response> {
+    async fn fetch_range_once(
+        &self,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> reqwest::Result<Response> {
         let mut headers = self.client.make_headers();
         match (start, end) {
             (Some(s), Some(e)) => headers.insert(
@@ -251,7 +279,8 @@ impl DownloadSession {
             .client
             .get(url)
             .headers(headers)
-            .send()?
+            .send()
+            .await?
             .error_for_status()
     }
 
@@ -260,18 +289,18 @@ impl DownloadSession {
     ///
     /// `gen_seen` is the generation the failed request was signed with. Holding
     /// `reauth_gen` serializes refreshes, and the generation check makes the
-    /// refresh idempotent: the first thread to react to an expiry does the work
+    /// refresh idempotent: the first task to react to an expiry does the work
     /// and bumps the counter, so the others — which were waiting on the same
     /// lock with the same `gen_seen` — simply return and retry with the token
     /// that is now fresh. The new generation is published only on full success,
     /// so a failed refresh leaves the counter untouched and is retried.
-    fn reauthenticate(&self, gen_seen: u64) {
-        let mut generation = self.reauth_gen.lock().unwrap();
+    async fn reauthenticate(&self, gen_seen: u64) {
+        let mut generation = self.reauth_gen.lock().await;
         if *generation != gen_seen {
             return;
         }
-        if self.client.generate_nonce().is_ok()
-            && self.client.send_init_download(&self.info).is_ok()
+        if self.client.generate_nonce().await.is_ok()
+            && self.client.send_init_download(&self.info).await.is_ok()
         {
             *generation += 1;
         }
@@ -386,30 +415,40 @@ fn unpadded_block_len(block: &[u8; 16]) -> usize {
     }
 }
 
-fn read_at_least_16<R: Read>(resp: &mut R, dst: &mut [u8], total: &mut usize) -> io::Result<()> {
+fn poll_read_at_least_16<R: AsyncRead + Unpin>(
+    resp: &mut R,
+    cx: &mut Context<'_>,
+    dst: &mut [u8],
+    total: &mut usize,
+) -> Poll<io::Result<()>> {
     while *total < 16 {
-        match resp.read(&mut dst[*total..]) {
-            Ok(0) => {
-                return Err(io::Error::new(
+        match Pin::new(&mut *resp).poll_read(cx, &mut dst[*total..]) {
+            Poll::Ready(Ok(0)) => {
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "premature EOF in encrypted stream",
-                ));
+                )));
             }
-            Ok(n) => *total += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+            Poll::Ready(Ok(n)) => *total += n,
+            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
         }
     }
-    Ok(())
+    Poll::Ready(Ok(()))
 }
 
-impl<R: Read> Read for DecryptReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl<R: AsyncRead + Unpin> AsyncRead for DecryptReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
-            return Ok(0);
+            return Poll::Ready(Ok(0));
         }
         let Some(inner) = self.0.as_mut() else {
-            return Ok(0);
+            return Poll::Ready(Ok(0));
         };
 
         if inner.dec_pos < inner.dec_len {
@@ -417,7 +456,7 @@ impl<R: Read> Read for DecryptReader<R> {
             if inner.dec_remaining == 0 {
                 self.0 = None;
             }
-            return Ok(n);
+            return Poll::Ready(Ok(n));
         }
 
         let enc_fast_limit = if inner.unpad_tail {
@@ -437,10 +476,18 @@ impl<R: Read> Read for DecryptReader<R> {
             buf[..total].copy_from_slice(&inner.rem[..total]);
             inner.enc_len = 0;
 
-            if let Err(e) = read_at_least_16(&mut inner.resp, &mut buf[..max_aligned], &mut total) {
-                inner.rem[..total].copy_from_slice(&buf[..total]);
-                inner.enc_len = total;
-                return Err(e);
+            match poll_read_at_least_16(&mut inner.resp, cx, &mut buf[..max_aligned], &mut total) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => {
+                    inner.rem[..total].copy_from_slice(&buf[..total]);
+                    inner.enc_len = total;
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => {
+                    inner.rem[..total].copy_from_slice(&buf[..total]);
+                    inner.enc_len = total;
+                    return Poll::Pending;
+                }
             }
 
             let tail_len = total & 15;
@@ -456,7 +503,7 @@ impl<R: Read> Read for DecryptReader<R> {
             if inner.dec_remaining == 0 {
                 self.0 = None;
             }
-            return Ok(aligned);
+            return Poll::Ready(Ok(aligned));
         }
 
         // Staging path for unaligned prefix, small caller buffers (< 16),
@@ -464,9 +511,16 @@ impl<R: Read> Read for DecryptReader<R> {
         let mut total = inner.enc_len;
         inner.enc_len = 0;
 
-        if let Err(e) = read_at_least_16(&mut inner.resp, &mut inner.rem, &mut total) {
-            inner.enc_len = total;
-            return Err(e);
+        match poll_read_at_least_16(&mut inner.resp, cx, &mut inner.rem, &mut total) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => {
+                inner.enc_len = total;
+                return Poll::Ready(Err(e));
+            }
+            Poll::Pending => {
+                inner.enc_len = total;
+                return Poll::Pending;
+            }
         }
         inner.enc_remaining = inner.enc_remaining.saturating_sub(16);
 
@@ -493,7 +547,7 @@ impl<R: Read> Read for DecryptReader<R> {
         if inner.dec_remaining == 0 {
             self.0 = None;
         }
-        Ok(n)
+        Poll::Ready(Ok(n))
     }
 }
 
@@ -501,7 +555,8 @@ impl<R: Read> Read for DecryptReader<R> {
 mod tests {
     use super::*;
     use aes::cipher::BlockModeEncrypt;
-    use std::io::Cursor;
+    use futures::executor::block_on;
+    use futures::io::{AsyncReadExt, Cursor};
 
     const TEST_KEY: [u8; 16] = [0x13; 16];
 
@@ -528,16 +583,24 @@ mod tests {
         reads: usize,
     }
 
-    impl Read for TrickleReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    impl AsyncRead for TrickleReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
             self.reads += 1;
+            if self.reads.is_multiple_of(5) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             if self.reads.is_multiple_of(3) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "eintr"));
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "eintr")));
             }
             let n = (self.data.len() - self.pos).min(self.step).min(buf.len());
             buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
             self.pos += n;
-            Ok(n)
+            Poll::Ready(Ok(n))
         }
     }
 
@@ -569,20 +632,22 @@ mod tests {
                 step,
                 reads: 0,
             },
-            Aes128EcbDec::new_from_slice(&TEST_KEY).unwrap(),
+            Aes128EcbDec::new(&TEST_KEY.into()),
             aligned,
         );
 
-        let mut out = Vec::new();
-        let mut buf = vec![0u8; buf_len];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
+        block_on(async {
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; buf_len];
+            loop {
+                let n = reader.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
             }
-            out.extend_from_slice(&buf[..n]);
-        }
-        (http_range, out)
+            (http_range, out)
+        })
     }
 
     #[test]
@@ -671,10 +736,12 @@ mod tests {
                 Aes128EcbDec::new(&TEST_KEY.into()),
                 aligned,
             );
-            let mut out = [0u8; 64];
-            assert_eq!(reader.read(&mut out).unwrap(), 16);
-            let err = reader.read(&mut out[16..]).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+            block_on(async {
+                let mut out = [0u8; 64];
+                assert_eq!(reader.read(&mut out).await.unwrap(), 16);
+                let err = reader.read(&mut out[16..]).await.unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+            });
         }
     }
 
@@ -683,14 +750,24 @@ mod tests {
         struct FlakyReader {
             data: Vec<u8>,
             pos: usize,
+            reads: usize,
             fail_next: bool,
         }
 
-        impl Read for FlakyReader {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        impl AsyncRead for FlakyReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut [u8],
+            ) -> Poll<io::Result<usize>> {
                 if self.fail_next {
                     self.fail_next = false;
-                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                    self.reads += 1;
+                    if self.reads.is_multiple_of(2) {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::WouldBlock)));
                 }
                 let n = (self.data.len() - self.pos).min(7).min(buf.len());
                 if n > 0 {
@@ -698,7 +775,7 @@ mod tests {
                 }
                 buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
                 self.pos += n;
-                Ok(n)
+                Poll::Ready(Ok(n))
             }
         }
 
@@ -709,29 +786,32 @@ mod tests {
             FlakyReader {
                 data: ciphertext,
                 pos: 0,
+                reads: 0,
                 fail_next: false,
             },
             Aes128EcbDec::new(&TEST_KEY.into()),
             aligned,
         );
 
-        // Alternate between 64-byte (fast path) and 3-byte (staging path) buffers across WouldBlock
-        let mut out = Vec::new();
-        let mut use_large = true;
-        loop {
-            let mut buf = vec![0u8; if use_large { 64 } else { 3 }];
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    out.extend_from_slice(&buf[..n]);
-                    use_large = !use_large;
+        // Alternate between 64-byte (fast path) and 3-byte (staging path) buffers across WouldBlock and Poll::Pending
+        block_on(async {
+            let mut out = Vec::new();
+            let mut use_large = true;
+            loop {
+                let mut buf = vec![0u8; if use_large { 64 } else { 3 }];
+                match reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        out.extend_from_slice(&buf[..n]);
+                        use_large = !use_large;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        use_large = !use_large;
+                    }
+                    Err(e) => panic!("unexpected error: {e}"),
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    use_large = !use_large;
-                }
-                Err(e) => panic!("unexpected error: {e}"),
             }
-        }
-        assert_eq!(out, plaintext);
+            assert_eq!(out, plaintext);
+        });
     }
 }

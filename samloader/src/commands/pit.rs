@@ -15,16 +15,14 @@
 
 use crate::cli::{DumpPitArgs, OdinArgs, PrintPitArgs};
 use crate::progress;
-use samloader_odin::{
-    OdinConnection, UsbBackendOption, create_backend, futures::executor::block_on,
-};
+use samloader_odin::{OdinConnection, UsbBackendOption, create_backend};
 use samloader_pit::PitData;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 
 /// Saves the PIT of the connected device to a file.
-pub(crate) fn dump(
+pub(crate) async fn dump(
     args: DumpPitArgs,
     usb_backend: UsbBackendOption,
     verbose: bool,
@@ -44,10 +42,11 @@ pub(crate) fn dump(
             .map_err(|e| format!("Failed to write PIT data to output file: {}", e))?;
         Ok(())
     })
+    .await
 }
 
 /// Prints a PIT file, or the PIT of the connected device if no file is given.
-pub(crate) fn print(
+pub(crate) async fn print(
     args: PrintPitArgs,
     usb_backend: UsbBackendOption,
     verbose: bool,
@@ -70,13 +69,14 @@ pub(crate) fn print(
         println!("{}", pit_data);
         Ok(())
     })
+    .await
 }
 
 /// Downloads the PIT of the connected device and passes it to `handle`.
 ///
 /// The session is ended and the device rebooted as requested even if the
 /// PIT could not be downloaded or handled, and the first error is returned.
-fn with_device_pit(
+async fn with_device_pit(
     odin: &OdinArgs,
     usb_backend: UsbBackendOption,
     verbose: bool,
@@ -84,18 +84,16 @@ fn with_device_pit(
 ) -> Result<(), Box<dyn Error>> {
     progress::init(verbose);
 
-    block_on(async {
-        let transport = create_backend(usb_backend, odin.wait).await?;
-        let mut session = OdinConnection::open(transport).begin_session().await?;
+    let transport = create_backend(usb_backend, odin.wait).await?;
+    let mut session = OdinConnection::open(transport).begin_session().await?;
 
-        println!("Downloading device's PIT file");
-        let handled = match session.receive_pit_info().await {
-            Ok(pit) => handle(pit),
-            Err(e) => Err(e.into()),
-        };
+    println!("Downloading device's PIT file");
+    let handled = match session.receive_pit_info().await {
+        Ok(pit) => handle(pit),
+        Err(e) => Err(e.into()),
+    };
 
-        let finished = session.finish(odin.reboot_mode()).await;
-        handled?;
-        Ok(finished?)
-    })
+    let finished = session.finish(odin.reboot_mode()).await;
+    handled?;
+    Ok(finished?)
 }

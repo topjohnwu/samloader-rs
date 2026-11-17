@@ -14,32 +14,29 @@ This crate manages communication with Samsung devices in Download Mode (Odin pro
 
 ## Usage
 
+On native targets, USB operations and timers require an active Tokio runtime (for example via `tokio::runtime::Runtime`).
+
 ### Establishing a Session with a Connected Device
 
 ```rust,no_run
-use samloader_odin::{
-    OdinConnection, RebootMode, UsbBackendOption, create_backend,
-    futures::executor::block_on,
-};
+use samloader_odin::{OdinConnection, RebootMode, UsbBackendOption, create_backend};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    block_on(async {
-        // 1. Open a transport to a device in Download Mode, waiting for one to be connected
-        let transport = create_backend(UsbBackendOption::Nusb, true).await?;
-        let connection = OdinConnection::open(transport);
+async fn dump_pit() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Open a transport to a device in Download Mode, waiting for one to be connected
+    let transport = create_backend(UsbBackendOption::Nusb, true).await?;
+    let connection = OdinConnection::open(transport);
 
-        // 2. Perform the Loke handshake and initialize an active packet session
-        let mut session = connection.begin_session().await?;
+    // 2. Perform the Loke handshake and initialize an active packet session
+    let mut session = connection.begin_session().await?;
 
-        // 3. Download and print the device's PIT layout (packet I/O)
-        let pit_bytes = session.receive_pit_info().await?;
-        println!("PIT downloaded successfully ({} bytes).", pit_bytes.len());
+    // 3. Download and print the device's PIT layout (packet I/O)
+    let pit_bytes = session.receive_pit_info().await?;
+    println!("PIT downloaded successfully ({} bytes).", pit_bytes.len());
 
-        // 4. Safely end the session, leaving the device in Download Mode
-        session.finish(RebootMode::None).await?;
+    // 4. Safely end the session, leaving the device in Download Mode
+    session.finish(RebootMode::None).await?;
 
-        Ok(())
-    })
+    Ok(())
 }
 ```
 
@@ -49,30 +46,27 @@ Flashing happens in three phases: configuring a `FlashRequest` performs no I/O, 
 
 ```rust,no_run
 use samloader_odin::{
-    FlashRequest, OdinConnection, UsbBackendOption, create_backend,
-    futures::{executor::block_on, io::AllowStdIo},
+    FlashRequest, OdinConnection, UsbBackendOption, create_backend, futures::io::AllowStdIo,
 };
 use std::fs::File;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    block_on(async {
-        // 1. Configure the flash
-        let ap = AllowStdIo::new(File::open("AP.tar.md5")?);
-        let request = FlashRequest::new().packages([("AP.tar.md5", ap)]);
+async fn flash_firmware() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Configure the flash
+    let ap = AllowStdIo::new(File::open("AP.tar.md5")?);
+    let request = FlashRequest::new().packages([("AP.tar.md5", ap)]);
 
-        // 2. Verify and index the inputs before connecting to a device
-        let prepared = request.prepare().await?;
-        if prepared.flashes_userdata() {
-            println!("This will wipe the device's data.");
-        }
+    // 2. Verify and index the inputs before connecting to a device
+    let prepared = request.prepare().await?;
+    if prepared.flashes_userdata() {
+        println!("This will wipe the device's data.");
+    }
 
-        // 3. Connect to the device and flash
-        let transport = create_backend(UsbBackendOption::Nusb, true).await?;
-        let mut session = OdinConnection::open(transport).begin_session().await?;
-        prepared.execute(&mut session).await?;
+    // 3. Connect to the device and flash
+    let transport = create_backend(UsbBackendOption::Nusb, true).await?;
+    let mut session = OdinConnection::open(transport).begin_session().await?;
+    prepared.execute(&mut session).await?;
 
-        Ok(())
-    })
+    Ok(())
 }
 ```
 
