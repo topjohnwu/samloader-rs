@@ -1394,9 +1394,12 @@ dependencies = [
  "ecb",
  "fast-md5",
  "futures",
+ "futures-timer",
  "reqwest",
  "roxmltree",
  "thiserror",
+ "tokio",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ Callers must run on an active Tokio runtime (required by `reqwest` for async I/O
 
 ```rust,no_run
 use samloader_fus::{
-    FusClient, fetch_history,
+    DataSource, FusClient, fetch_history,
     futures::io::{AllowStdIo, copy},
 };
 use std::fs::File;
@@ -35,7 +35,7 @@ async fn download_firmware() -> Result<(), Box<dyn std::error::Error>> {
     println!("File name: {}, size: {}", info.filename, info.size);
     let session = client.init_download(info).await?;
 
-    // 3. Stream and decrypt the firmware package (or use `fetch_range` for parallel ranges)
+    // 3. Stream and decrypt the firmware package (or wrap in `ParallelDataSource`)
     let mut reader = session.fetch().await?;
     let mut file = AllowStdIo::new(File::create("firmware.zip")?);
     copy(&mut reader, &mut file).await?;

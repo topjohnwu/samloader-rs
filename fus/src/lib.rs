@@ -18,13 +18,19 @@
 #![deny(missing_docs)]
 
 mod auth;
+#[doc(hidden)]
+pub mod compat;
+mod data;
 mod error;
 mod fusclient;
 mod http;
+mod parallel;
 mod xml;
 
+pub use data::DataSource;
 pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient};
+pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
 pub use xml::{BinaryInform, VersionInfo};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
