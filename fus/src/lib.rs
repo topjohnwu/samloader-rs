@@ -21,19 +21,24 @@ mod auth;
 #[doc(hidden)]
 pub mod compat;
 mod data;
+mod decoder;
 mod error;
 mod fusclient;
 mod http;
 mod parallel;
 mod xml;
+mod zip;
 
 pub use data::DataSource;
+pub use decoder::{StreamCheckpoint, ZipEntryReader};
 pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient};
 pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
 pub use xml::{BinaryInform, VersionInfo};
+pub use zip::{OdinComponent, ZipArchive, ZipEntry, ZipEntrySession};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
+pub use binrw;
 pub use futures;
 
 use http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};

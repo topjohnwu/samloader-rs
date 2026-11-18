@@ -34,6 +34,14 @@ pub enum Error {
     /// The server returned malformed XML or was missing expected metadata.
     #[error("Invalid server response: {0}")]
     InvalidResponse(String),
+
+    /// The firmware archive is malformed or uses an unsupported ZIP feature.
+    #[error("Invalid firmware archive: {0}")]
+    InvalidArchive(String),
+
+    /// An I/O error occurred while reading from a [`DataSource`](crate::DataSource).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 /// An error from the underlying HTTP transport or an unexpected HTTP status code.

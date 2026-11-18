@@ -48,3 +48,6 @@ wasm-bindgen-cli-support = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = "0.3"
 anyhow = "1.0"
+rawzip = "0.5"
+zlib-rs = { version = "0.6", default-features = false, features = ["std", "rust-allocator"] }
+libz-rs-sys = { version = "0.6", default-features = false, features = ["std", "rust-allocator"] }

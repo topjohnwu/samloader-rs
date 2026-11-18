@@ -60,6 +60,14 @@ pub trait MaybeSync: sealed::SyncSealed {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSync for T {}
 
+/// Boxed [`AsyncRead`](futures::io::AsyncRead) trait object that is `Send` on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type BoxAsyncRead<'a> = Box<dyn futures::io::AsyncRead + Send + Unpin + 'a>;
+
+/// Boxed [`AsyncRead`](futures::io::AsyncRead) trait object on WebAssembly.
+#[cfg(target_arch = "wasm32")]
+pub(crate) type BoxAsyncRead<'a> = Box<dyn futures::io::AsyncRead + Unpin + 'a>;
+
 /// Cross-target async timer future backed by `tokio::time` on native targets
 /// and `futures-timer` on WebAssembly.
 #[cfg(not(target_arch = "wasm32"))]

@@ -10,11 +10,15 @@ keywords = ["samsung", "firmware"]
 
 [dependencies]
 aes = { workspace = true }
+binrw = { workspace = true }
 ecb = { workspace = true }
 fast-md5 = { workspace = true }
 roxmltree = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+rawzip = { workspace = true }
+zlib-rs = { workspace = true }
+libz-rs-sys = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { workspace = true, features = ["native-tls"] }

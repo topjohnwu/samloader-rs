@@ -127,13 +127,10 @@ impl<S: DataSource> ParallelDataSource<S> {
         }
     }
 
-    /// Returns a clone configured to report progress and warnings to `observer`.
-    pub fn with_observer(&self, observer: Arc<dyn TransferObserver>) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            concurrency: self.concurrency,
-            observer,
-        }
+    /// Configures this source to report progress and warnings to `observer`.
+    pub fn with_observer(mut self, observer: Arc<dyn TransferObserver>) -> Self {
+        self.observer = observer;
+        self
     }
 }
 

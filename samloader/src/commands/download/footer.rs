@@ -14,56 +14,69 @@
 
 use binrw::{BinRead, BinWrite, binrw};
 use fast_md5::Md5;
-use samloader_fus::BinaryInform;
+use samloader_fus::{BinaryInform, StreamCheckpoint, ZipEntry};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const FOOTER_VERSION: u32 = 4;
-pub(crate) const FOOTER_SIZE: usize = 36;
+
+#[binrw]
+#[brw(little)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FooterState {
+    #[brw(magic = 0u8)]
+    Fresh,
+    #[brw(magic = 1u8)]
+    Raw(u64),
+    #[brw(magic = 2u8)]
+    Entry(StreamCheckpoint),
+}
 
 #[binrw]
 #[brw(little, magic = b"SAMLOADR")]
-#[br(import(expected_checksum: [u8; 16], target_size: u64))]
+#[br(import(expected_checksum: [u8; 16]))]
 pub(crate) struct Footer {
     #[br(temp, assert(version == FOOTER_VERSION))]
     #[bw(calc = FOOTER_VERSION)]
     version: u32,
 
     #[br(assert(checksum == expected_checksum))]
-    pub checksum: [u8; 16],
+    checksum: [u8; 16],
 
-    #[br(assert(offset <= target_size))]
-    pub offset: u64,
+    pub(crate) state: FooterState,
 }
 
 impl Footer {
-    pub(crate) fn new(checksum: [u8; 16]) -> Self {
+    fn new(checksum: [u8; 16]) -> Self {
         Self {
             checksum,
-            offset: 0,
+            state: FooterState::Fresh,
         }
     }
 
-    pub(crate) fn write_to_slice(&self, dst: &mut [u8; FOOTER_SIZE]) {
-        let mut cursor = Cursor::new(&mut dst[..]);
+    pub(crate) fn write_to_vec(&self, dst: &mut Vec<u8>) {
+        dst.clear();
+        let mut cursor = Cursor::new(dst);
         self.write(&mut cursor)
             .expect("in-memory footer serialization cannot fail");
-        debug_assert_eq!(cursor.position() as usize, FOOTER_SIZE);
     }
 
-    pub(crate) fn read_from_part<R: Read + Seek>(
+    fn read_from_part<R: Read + Seek>(
         reader: &mut R,
         expected_checksum: [u8; 16],
         target_size: u64,
     ) -> Option<Self> {
         let file_len = reader.seek(SeekFrom::End(0)).ok()?;
-        let expected_len = target_size.checked_add(FOOTER_SIZE as u64)?;
-        if file_len != expected_len {
+        if file_len <= target_size {
             return None;
         }
         reader.seek(SeekFrom::Start(target_size)).ok()?;
-        Self::read_args(reader, (expected_checksum, target_size)).ok()
+        let footer = Self::read_args(reader, (expected_checksum,)).ok()?;
+        if reader.stream_position().ok()? != file_len {
+            return None;
+        }
+        Some(footer)
     }
 }
 
@@ -72,7 +85,7 @@ fn update_len_prefixed(hasher: &mut Md5, data: &[u8]) {
     hasher.update(data);
 }
 
-pub(crate) fn raw_checksum(info: &BinaryInform) -> [u8; 16] {
+pub(crate) fn binary_checksum(info: &BinaryInform) -> [u8; 16] {
     let mut hasher = Md5::new();
     update_len_prefixed(&mut hasher, info.version.as_bytes());
     update_len_prefixed(&mut hasher, info.filename.as_bytes());
@@ -115,6 +128,38 @@ pub(crate) fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::
     Ok(())
 }
 
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+    }
+}
+
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match read_at(file, buf, offset) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to read whole buffer",
+                ));
+            }
+            Ok(n) => {
+                let (_, rest) = buf.split_at_mut(n);
+                buf = rest;
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn set_sparse(file: &File, sparse: bool) {
     use std::os::windows::io::AsRawHandle;
@@ -142,19 +187,37 @@ fn set_sparse(file: &File, sparse: bool) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PartState {
+pub(crate) enum PartTarget {
+    Raw { target_size: u64 },
+    Entry(ZipEntry),
+}
+
+impl PartTarget {
+    fn target_size(&self) -> u64 {
+        match self {
+            Self::Raw { target_size } => *target_size,
+            Self::Entry(entry) => entry.uncompressed_size(),
+        }
+    }
+}
+
+pub(crate) enum PartResume {
     Fresh,
-    Resumed,
     Restarted,
+    Raw(u64),
+    Entry {
+        checkpoint: StreamCheckpoint,
+        dict: Vec<u8>,
+    },
 }
 
 pub(crate) fn prepare_part_file(
     final_path: &Path,
     expected_checksum: [u8; 16],
-    target_size: u64,
+    target: &PartTarget,
     force: bool,
-) -> io::Result<(File, PathBuf, Footer, PartState)> {
+) -> io::Result<(File, PathBuf, Footer, PartResume)> {
+    let target_size = target.target_size();
     let part_path = {
         let mut s = final_path.as_os_str().to_owned();
         s.push(".part");
@@ -182,34 +245,62 @@ pub(crate) fn prepare_part_file(
         && existing_len > 0
         && let Some(footer) = Footer::read_from_part(&mut file, expected_checksum, target_size)
     {
-        #[cfg(windows)]
-        set_sparse(&file, true);
-
-        let state = if footer.offset > 0 {
-            PartState::Resumed
-        } else {
-            PartState::Fresh
+        let validated = match (target, footer.state) {
+            (_, FooterState::Fresh) => Some(PartResume::Fresh),
+            (PartTarget::Raw { target_size }, FooterState::Raw(offset))
+                if offset > 0 && offset <= *target_size =>
+            {
+                Some(PartResume::Raw(offset))
+            }
+            (PartTarget::Entry(entry), FooterState::Entry(cp)) => {
+                if let Some(dict_len) = entry.resume_dict_len(&cp) {
+                    if cp.compressed_offset() > 0 {
+                        let mut dict = vec![0u8; dict_len];
+                        if dict_len > 0 {
+                            read_exact_at(
+                                &file,
+                                &mut dict,
+                                cp.uncompressed_offset() - dict_len as u64,
+                            )?;
+                        }
+                        Some(PartResume::Entry {
+                            checkpoint: cp,
+                            dict,
+                        })
+                    } else {
+                        Some(PartResume::Fresh)
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
-        return Ok((file, part_path, footer, state));
+
+        if let Some(resume) = validated {
+            #[cfg(windows)]
+            set_sparse(&file, true);
+            return Ok((file, part_path, footer, resume));
+        }
     }
 
-    let state = if !force && existing_len > 0 {
+    let resume = if !force && existing_len > 0 {
         file.set_len(0)?;
-        PartState::Restarted
+        PartResume::Restarted
     } else {
-        PartState::Fresh
+        PartResume::Fresh
     };
 
     #[cfg(windows)]
     set_sparse(&file, true);
 
     let footer = Footer::new(expected_checksum);
-    let mut footer_buf = [0u8; FOOTER_SIZE];
-    footer.write_to_slice(&mut footer_buf);
+    let mut footer_buf = Vec::new();
+    footer.write_to_vec(&mut footer_buf);
     write_all_at(&file, &footer_buf, target_size)?;
     file.sync_data()?;
 
-    Ok((file, part_path, footer, state))
+    Ok((file, part_path, footer, resume))
 }
 
 pub(crate) fn finalize_part_file(
@@ -224,6 +315,7 @@ pub(crate) fn finalize_part_file(
     file.sync_data()?;
     drop(file);
 
+    #[cfg(windows)]
     if final_path.exists() {
         let _ = std::fs::remove_file(final_path);
     }
@@ -254,29 +346,41 @@ mod tests {
 
     #[test]
     fn test_footer_v4_round_trip_and_rejection() {
-        let info = mock_info();
-        let checksum = raw_checksum(&info);
+        let checksum = binary_checksum(&mock_info());
+        let other_checksum = [0x99; 16];
         let target_size = 4096_u64;
 
-        let mut footer = Footer::new(checksum);
-        footer.offset = 3072;
+        let mut cp_bytes = [0u8; 22];
+        cp_bytes[0..8].copy_from_slice(&1024u64.to_le_bytes());
+        cp_bytes[8..16].copy_from_slice(&3072u64.to_le_bytes());
+        cp_bytes[16..20].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        cp_bytes[20] = 5;
+        cp_bytes[21] = 0x1A;
+        let cp = StreamCheckpoint::read(&mut Cursor::new(&cp_bytes)).unwrap();
 
-        let mut buf = [0u8; FOOTER_SIZE];
-        footer.write_to_slice(&mut buf);
-        assert_eq!(buf.len(), 36);
+        let mut buf = Vec::new();
+        for state in [
+            FooterState::Fresh,
+            FooterState::Raw(2048),
+            FooterState::Entry(cp),
+        ] {
+            let mut footer = Footer::new(checksum);
+            footer.state = state;
+            footer.write_to_vec(&mut buf);
 
-        let parsed = read_part(target_size, &buf, checksum).unwrap();
-        assert_eq!(parsed.offset, 3072);
+            let parsed = read_part(target_size, &buf, checksum).unwrap();
+            assert_eq!(parsed.state, state);
+        }
 
         // Truncated / overlong part files must be rejected
-        assert!(read_part(target_size, &buf[..FOOTER_SIZE - 1], checksum).is_none());
-        let mut overlong = buf.to_vec();
+        assert!(read_part(target_size, &buf[..buf.len() - 1], checksum).is_none());
+        let mut overlong = buf.clone();
         overlong.push(0);
         assert!(read_part(target_size, &overlong, checksum).is_none());
 
-        // Corrupt magic (0), version (8), and checksum (12)
-        for &(off, val) in &[(0, 0xFF), (8, 0x03), (12, 0xFF)] {
-            let mut tampered = buf;
+        // Corrupt magic (0), version (8), checksum (12), and unknown state tag (28)
+        for &(off, val) in &[(0, 0xFF), (8, 0x03), (12, 0xFF), (28, 0x09)] {
+            let mut tampered = buf.clone();
             tampered[off] = val;
             assert!(
                 read_part(target_size, &tampered, checksum).is_none(),
@@ -285,14 +389,6 @@ mod tests {
         }
 
         // Checksum mismatch
-        let mut other = mock_info();
-        other.version.push('X');
-        assert!(read_part(target_size, &buf, raw_checksum(&other)).is_none());
-
-        // Bounds failure: offset > target_size
-        let mut bad_offset = Footer::new(checksum);
-        bad_offset.offset = target_size + 1;
-        bad_offset.write_to_slice(&mut buf);
-        assert!(read_part(target_size, &buf, checksum).is_none());
+        assert!(read_part(target_size, &buf, other_checksum).is_none());
     }
 }

@@ -16,8 +16,9 @@
 
 //! Command line interface definition.
 
-use clap::builder::{PossibleValuesParser, TypedValueParser};
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
+use samloader_fus::OdinComponent;
 use samloader_odin::{PartitionTarget, RebootMode, UsbBackendOption};
 
 // On Windows, the default USB backend is set to VCOM rather than libusb/nusb.
@@ -40,6 +41,53 @@ cfg_if::cfg_if! {
 fn usb_backend_parser() -> impl TypedValueParser<Value = UsbBackendOption> {
     PossibleValuesParser::new(UsbBackendOption::ALL.iter().map(|b| b.to_str()))
         .map(|name| UsbBackendOption::try_from(name.as_str()).expect("enabled backend"))
+}
+
+/// All recognized Samsung Odin firmware components in canonical CLI order.
+pub(crate) const ALL_COMPONENTS: &[OdinComponent] = &[
+    OdinComponent::Bl,
+    OdinComponent::Ap,
+    OdinComponent::Cp,
+    OdinComponent::Csc,
+    OdinComponent::HomeCsc,
+    OdinComponent::Userdata,
+];
+
+/// Canonical lowercase CLI key for an [`OdinComponent`].
+pub(crate) const fn component_key(component: OdinComponent) -> &'static str {
+    match component {
+        OdinComponent::Bl => "bl",
+        OdinComponent::Ap => "ap",
+        OdinComponent::Cp => "cp",
+        OdinComponent::Csc => "csc",
+        OdinComponent::HomeCsc => "home_csc",
+        OdinComponent::Userdata => "userdata",
+    }
+}
+
+fn parse_component_key(s: &str) -> Option<OdinComponent> {
+    match s.to_ascii_lowercase().as_str() {
+        "bl" => Some(OdinComponent::Bl),
+        "ap" => Some(OdinComponent::Ap),
+        "cp" => Some(OdinComponent::Cp),
+        "csc" => Some(OdinComponent::Csc),
+        "home_csc" | "home-csc" => Some(OdinComponent::HomeCsc),
+        "userdata" => Some(OdinComponent::Userdata),
+        _ => None,
+    }
+}
+
+/// Accepts recognized Samsung Odin firmware component keys.
+fn odin_component_parser() -> impl TypedValueParser<Value = OdinComponent> {
+    PossibleValuesParser::new(ALL_COMPONENTS.iter().map(|&c| {
+        let pv = PossibleValue::new(component_key(c));
+        if c == OdinComponent::HomeCsc {
+            pv.alias("home-csc")
+        } else {
+            pv
+        }
+    }))
+    .map(|s| parse_component_key(&s).expect("valid Odin component"))
 }
 
 /// Download and flash firmware for Samsung devices
@@ -158,12 +206,27 @@ pub(crate) struct DownloadArgs {
     #[arg(short = 'j', long, default_value_t = 8)]
     pub(crate) threads: u64,
 
-    /// Output directory
+    /// Do not extract the firmware archive; save the decrypted .zip file directly
+    #[arg(long, conflicts_with = "select")]
+    pub(crate) no_extract: bool,
+
+    /// Comma-separated firmware components to extract (bl, ap, cp, csc, home_csc, userdata)
+    #[arg(
+        short,
+        long,
+        value_delimiter = ',',
+        value_name = "KEYS",
+        ignore_case = true,
+        value_parser = odin_component_parser()
+    )]
+    pub(crate) select: Vec<OdinComponent>,
+
+    /// Output directory (defaults to <archive_name>/ when extracting, or current directory with --no-extract)
     #[arg(short = 'd', long)]
     pub(crate) out_dir: Option<String>,
 
-    /// Output file path
-    #[arg(short, long)]
+    /// Output file path (only valid with --no-extract)
+    #[arg(short, long, requires = "no_extract")]
     pub(crate) out_file: Option<String>,
 
     /// Overwrite existing files and discard any partial download
