@@ -133,6 +133,7 @@ mod mock {
 
     pub(crate) struct MockResponse {
         status: u16,
+        headers: Vec<(String, String)>,
         reader: Pin<Box<dyn AsyncRead + Send + Unpin>>,
     }
 
@@ -143,12 +144,22 @@ mod mock {
         ) -> Self {
             Self {
                 status,
+                headers: Vec::new(),
                 reader: Box::pin(reader),
             }
         }
 
         pub(crate) fn ok_bytes(bytes: Vec<u8>) -> Self {
             Self::from_reader(200, Cursor::new(bytes))
+        }
+
+        pub(crate) fn with_header(
+            mut self,
+            name: impl Into<String>,
+            value: impl Into<String>,
+        ) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
         }
     }
 
@@ -157,8 +168,11 @@ mod mock {
             self.status
         }
 
-        fn header(&self, _name: &str) -> Option<&str> {
-            None
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
         }
 
         async fn into_text(mut self) -> Result<String, HttpError> {

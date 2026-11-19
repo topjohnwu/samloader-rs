@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transport- and concurrency-agnostic byte source abstraction.
+//! Transport- and concurrency-agnostic random-access byte source abstraction.
 
 use crate::compat::{MaybeSend, MaybeSync};
 use futures::io::{AsyncRead, AsyncReadExt};
@@ -43,12 +43,8 @@ pub(crate) fn resolve_range_bounds(range: impl RangeBounds<u64>) -> Option<(u64,
 
 /// Concurrency- and transport-agnostic random-access byte source.
 pub trait DataSource: MaybeSend + MaybeSync {
-    /// Inclusive `(min_size, max_size)` byte length bounds of the source.
-    ///
-    /// Exact-size sources return `(len, len)`. Encrypted FUS streams whose trailing
-    /// `1..=16` PKCS#7 padding bytes are stripped at EOF return
-    /// `(enc_size.saturating_sub(16), enc_size)`.
-    fn size_bounds(&self) -> (u64, u64);
+    /// Exact byte length of the source.
+    fn size(&self) -> u64;
 
     /// Opens an async sequential reader over `range`.
     fn fetch_range(
@@ -91,9 +87,8 @@ pub trait DataSource: MaybeSend + MaybeSync {
 }
 
 impl DataSource for [u8] {
-    fn size_bounds(&self) -> (u64, u64) {
-        let len = self.len() as u64;
-        (len, len)
+    fn size(&self) -> u64 {
+        self.len() as u64
     }
 
     async fn fetch_range(
@@ -113,11 +108,11 @@ impl DataSource for [u8] {
 }
 
 macro_rules! impl_deref_data_source {
-    ($($({$($generics:tt)+})? $ty:ty => $target:ty),+ $(,)?) => {
+    ($($({$($generics:tt)+})? $ty:ty),+ $(,)?) => {
         $(
             impl$(<$($generics)+>)? DataSource for $ty {
-                fn size_bounds(&self) -> (u64, u64) {
-                    (**self).size_bounds()
+                fn size(&self) -> u64 {
+                    (**self).size()
                 }
 
                 fn fetch_range(
@@ -140,10 +135,10 @@ macro_rules! impl_deref_data_source {
 }
 
 impl_deref_data_source!(
-    Vec<u8> => [u8],
-    {D: DataSource + ?Sized} &D => D,
-    {D: DataSource + ?Sized} Arc<D> => D,
-    {D: DataSource + ?Sized} Box<D> => D,
+    Vec<u8>,
+    {D: DataSource + ?Sized} &D,
+    {D: DataSource + ?Sized} Arc<D>,
+    {D: DataSource + ?Sized} Box<D>,
 );
 
 #[cfg(test)]
@@ -185,10 +180,10 @@ mod tests {
         let arc: Arc<[u8]> = Arc::from(slice);
         let boxed: Box<[u8]> = slice.into();
 
-        assert_eq!(slice.size_bounds(), (64, 64));
-        assert_eq!(data.size_bounds(), (64, 64));
-        assert_eq!(arc.size_bounds(), (64, 64));
-        assert_eq!(boxed.size_bounds(), (64, 64));
+        assert_eq!(slice.size(), 64);
+        assert_eq!(data.size(), 64);
+        assert_eq!(arc.size(), 64);
+        assert_eq!(boxed.size(), 64);
 
         block_on(async {
             // fetch()

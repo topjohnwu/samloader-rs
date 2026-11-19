@@ -40,7 +40,7 @@ pub struct VersionInfo {
     pub beta: Vec<String>,
 }
 
-fn normalize_version(v: &str) -> String {
+pub(crate) fn normalize_version(v: &str) -> String {
     let mut parts: Vec<&str> = v.split('/').collect();
     if parts.len() == 3 {
         parts.push(parts[0]);
@@ -130,11 +130,12 @@ pub(crate) fn binary_init_req_xml(
     model_type: &str,
     region: &str,
 ) -> String {
-    let start = filename.len().saturating_sub(25);
-    let end = filename.len().saturating_sub(9);
-    let checkinp = &filename[start..end];
+    let char_count = filename.chars().count();
+    let start = char_count.saturating_sub(25);
+    let end = char_count.saturating_sub(9);
+    let checkinp: String = filename.chars().skip(start).take(end - start).collect();
 
-    let logic_check = get_logic_check(checkinp, nonce);
+    let logic_check = get_logic_check(&checkinp, nonce);
 
     format!(
         r#"<FUSMsg>
@@ -231,6 +232,26 @@ pub struct BinaryInform {
 }
 
 impl BinaryInform {
+    /// Returns the firmware file name with any trailing `.enc4` or `.enc2` suffix stripped.
+    pub fn decrypted_filename(&self) -> &str {
+        self.filename
+            .strip_suffix(".enc4")
+            .or_else(|| self.filename.strip_suffix(".enc2"))
+            .unwrap_or(&self.filename)
+    }
+
+    /// Inclusive `(min_size, max_size)` byte length bounds of the decrypted payload.
+    ///
+    /// Encrypted FUS files may include up to 16 trailing PKCS#7 padding bytes stripped
+    /// at EOF, so non-empty packages have bounds `(size.saturating_sub(16), size)`.
+    pub const fn decrypted_size_bounds(&self) -> (u64, u64) {
+        if self.size == 0 {
+            (0, 0)
+        } else {
+            (self.size.saturating_sub(16), self.size)
+        }
+    }
+
     pub(crate) fn parse(xml: &str) -> crate::Result<BinaryInform> {
         let missing = |field: &str| Error::InvalidResponse(format!("missing {field}"));
         let mut kv = parse_xml_data(xml)?;
@@ -295,7 +316,7 @@ struct BinaryInfo {
 }
 
 impl BinaryInfo {
-    pub(crate) fn parse(mut kv: HashMap<String, String>) -> Option<Self> {
+    fn parse(mut kv: HashMap<String, String>) -> Option<Self> {
         Some(Self {
             sw_version: kv.remove("BINARY_SW_VERSION")?,
             index: kv.remove("BINARY_INDEX")?,
@@ -464,7 +485,12 @@ mod tests {
             info.filename,
             "GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip.enc2"
         );
+        assert_eq!(
+            info.decrypted_filename(),
+            "GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip"
+        );
         assert_eq!(info.size, 1029656336);
+        assert_eq!(info.decrypted_size_bounds(), (1029656320, 1029656336));
         assert_eq!(info.region, "XSP");
         assert_eq!(info.model_type, "9");
         assert_eq!(info.path, "/neofus/9/");
@@ -497,7 +523,12 @@ mod tests {
             info.filename,
             "SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4"
         );
+        assert_eq!(
+            info.decrypted_filename(),
+            "SM-S931U1_1_20240101000000_abcdefghij_fac.zip"
+        );
         assert_eq!(info.size, 5000000000);
+        assert_eq!(info.decrypted_size_bounds(), (4999999984, 5000000000));
         assert_eq!(info.region, "XAA");
         assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U"));
     }

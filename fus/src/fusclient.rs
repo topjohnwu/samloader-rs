@@ -14,12 +14,12 @@
 
 use crate::compat::MaybeSend;
 use crate::data::{DataSource, resolve_range_bounds};
-use crate::error::{HttpError, Result};
+use crate::error::{Error, HttpError, Result};
 use crate::http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
 use crate::{auth, xml};
 use aes::cipher::inout::InOutBuf;
 use aes::cipher::{BlockModeDecrypt, KeyInit};
-use futures::io::AsyncRead;
+use futures::io::{AsyncRead, AsyncReadExt};
 use futures::lock::Mutex as AsyncMutex;
 use std::io;
 use std::ops::RangeBounds;
@@ -31,7 +31,7 @@ use xml::BinaryInform;
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
 /// Authentication token state. The download GET signs every request with
-/// `encnonce`/`auth`; these expire, so they live behind a lock and are shared
+/// `nonce`/`auth`; these expire, so they live behind a lock and are shared
 /// by reference across all download tasks (which only read them) and the
 /// occasional reauthentication (which rewrites them). See [`FusClient`] and
 /// [`DownloadSession`].
@@ -39,14 +39,13 @@ type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 struct AuthState {
     auth: String,
     nonce: String,
-    encnonce: String,
 }
 
 impl AuthState {
     fn auth_header(&self) -> String {
         format!(
             "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-            self.encnonce, self.auth
+            self.nonce, self.auth
         )
     }
 }
@@ -79,11 +78,7 @@ impl FusClient {
         region: &str,
         version: &str,
     ) -> Result<BinaryInform> {
-        let mut parts: Vec<&str> = version.split('/').collect();
-        if parts.len() == 3 {
-            parts.push(parts[0]);
-        }
-        let fw = parts.join("/");
+        let fw = xml::normalize_version(version);
         let nonce = self.auth_state.lock().unwrap().nonce.clone();
         let req_xml = xml::binary_inform_req_xml(model, region, &fw, &nonce);
 
@@ -121,10 +116,9 @@ impl FusClient {
 
         if let Some(nonce) = resp.header("nonce").filter(|n| !n.is_empty()) {
             let mut state = self.auth_state.lock().unwrap();
-            if nonce != state.encnonce {
-                state.encnonce = nonce.to_string();
-                state.nonce = state.encnonce.clone();
-                state.auth = auth::decrypt_nonce(&state.encnonce);
+            if nonce != state.nonce {
+                state.nonce = nonce.to_string();
+                state.auth = auth::decrypt_nonce(&state.nonce);
             }
         }
 
@@ -154,15 +148,19 @@ impl FusClient {
         xml::check_xml_status(&xml)
     }
 
-    /// Requests a download authorization ticket from FUS for `info` and consumes
+    /// Requests a download authorization ticket from FUS for `info`, probes the
+    /// final AES block to determine the exact unpadded payload length, and consumes
     /// this client into an active [`DownloadSession`].
     pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
         self.send_init_download(&info).await?;
-        Ok(DownloadSession {
+        let mut session = DownloadSession {
             client: self,
             info,
+            decrypted_size: 0,
             reauth_gen: AsyncMutex::new(0),
-        })
+        };
+        session.decrypted_size = session.probe_decrypted_size().await?;
+        Ok(session)
     }
 }
 
@@ -171,6 +169,7 @@ impl FusClient {
 pub struct DownloadSession {
     client: FusClient,
     info: BinaryInform,
+    decrypted_size: u64,
     /// Reauthentication generation counter. It also serves as the lock that
     /// serializes reauth: a token expiry observed by many download tasks at
     /// once triggers a single refresh, and the rest reuse its result.
@@ -179,20 +178,48 @@ pub struct DownloadSession {
 
 impl DownloadSession {
     #[cfg(all(not(target_arch = "wasm32"), test))]
-    pub(crate) fn from_mock(client: crate::http::MockClient, info: BinaryInform) -> Self {
-        Self {
+    async fn from_mock(client: crate::http::MockClient, info: BinaryInform) -> Result<Self> {
+        let mut session = Self {
             client: FusClient {
                 client,
                 auth_state: Mutex::new(AuthState::default()),
             },
             info,
+            decrypted_size: 0,
             reauth_gen: AsyncMutex::new(0),
-        }
+        };
+        session.decrypted_size = session.probe_decrypted_size().await?;
+        Ok(session)
     }
 
     /// Returns the firmware binary metadata associated with this download session.
     pub fn info(&self) -> &BinaryInform {
         &self.info
+    }
+
+    async fn probe_decrypted_size(&self) -> Result<u64> {
+        let enc_size = self.info.size;
+        if enc_size == 0 {
+            return Ok(0);
+        }
+        if !enc_size.is_multiple_of(16) {
+            return Err(Error::InvalidResponse(format!(
+                "encrypted binary size ({enc_size}) is not a multiple of 16 bytes"
+            )));
+        }
+
+        let resp = self
+            .fetch_range_once(Some(enc_size - 16), Some(enc_size - 1))
+            .await?;
+        let mut block = [0u8; 16];
+        resp.into_reader().read_exact(&mut block).await?;
+
+        let mut dec = self.get_decryptor();
+        let (blocks, _) = InOutBuf::from(&mut block[..]).into_chunks();
+        dec.decrypt_blocks_inout(blocks);
+
+        let pad = 16 - unpadded_block_len(&block);
+        Ok(enc_size - pad as u64)
     }
 
     async fn fetch_range_once(
@@ -237,7 +264,7 @@ impl DownloadSession {
     }
 
     /// Re-establish the session after the auth token expired (HTTP 401),
-    /// rewriting the shared `nonce`/`encnonce`/`auth`.
+    /// rewriting the shared `nonce`/`auth`.
     ///
     /// `gen_seen` is the generation the failed request was signed with. Holding
     /// `reauth_gen` serializes refreshes, and the generation check makes the
@@ -264,19 +291,15 @@ impl DownloadSession {
 }
 
 impl DataSource for DownloadSession {
-    fn size_bounds(&self) -> (u64, u64) {
-        if self.info.size == 0 {
-            (0, 0)
-        } else {
-            (self.info.size.saturating_sub(16), self.info.size)
-        }
+    fn size(&self) -> u64 {
+        self.decrypted_size
     }
 
     async fn fetch_range(
         &self,
         range: impl RangeBounds<u64> + Send,
     ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-        let aligned = AlignedRange::new(range, self.info.size);
+        let aligned = AlignedRange::new(range, self.decrypted_size, self.info.size);
         if aligned.dec_remaining == 0 {
             return Ok(DecryptReader(None));
         }
@@ -317,48 +340,45 @@ struct AlignedRange {
     skip_start: usize,
     dec_remaining: u64,
     enc_remaining: u64,
-    unpad_tail: bool,
 }
 
 impl AlignedRange {
-    fn new(range: impl RangeBounds<u64>, file_size: u64) -> Self {
+    fn new(range: impl RangeBounds<u64>, decrypted_size: u64, enc_size: u64) -> Self {
         let empty = Self {
             http_start: None,
             http_end: None,
             skip_start: 0,
             dec_remaining: 0,
             enc_remaining: 0,
-            unpad_tail: false,
         };
         let Some((req_start, end_opt)) = resolve_range_bounds(range) else {
             return empty;
         };
-        if file_size == 0 || req_start >= file_size {
+        if decrypted_size == 0 || req_start >= decrypted_size {
             return empty;
         }
 
-        let max_end = file_size - 1;
-        let end_excl = end_opt.map_or(file_size, |e| e.min(file_size));
+        let max_enc_end = enc_size - 1;
+        let end_excl = end_opt.map_or(decrypted_size, |e| e.min(decrypted_size));
         let req_end = end_excl - 1;
         let aligned_start = req_start & !15;
-        let aligned_end = (req_end | 15).min(max_end);
+        let aligned_end = (req_end | 15).min(max_enc_end);
         let dec_remaining = end_excl - req_start;
         let enc_remaining = aligned_end - aligned_start + 1;
 
         Self {
-            http_start: (req_start > 0).then_some(aligned_start),
-            http_end: end_opt.map(|_| aligned_end),
+            http_start: (aligned_start > 0).then_some(aligned_start),
+            http_end: (end_opt.is_some() || aligned_end < max_enc_end).then_some(aligned_end),
             skip_start: (req_start - aligned_start) as usize,
             dec_remaining,
             enc_remaining,
-            unpad_tail: file_size >= 16 && file_size.is_multiple_of(16) && aligned_end == max_end,
         }
     }
 }
 
 /// Async reader transparently decrypting an AES-128-ECB FUS byte range and trimming
-/// unaligned boundaries and trailing PKCS#7 padding.
-pub(crate) struct DecryptReader<R>(Option<DecryptInner<R>>);
+/// unaligned boundaries.
+struct DecryptReader<R>(Option<DecryptInner<R>>);
 
 struct DecryptInner<R> {
     resp: R,
@@ -370,7 +390,6 @@ struct DecryptInner<R> {
     skip_start: usize,
     dec_remaining: u64,
     enc_remaining: u64,
-    unpad_tail: bool,
 }
 
 impl<R> DecryptReader<R> {
@@ -388,7 +407,6 @@ impl<R> DecryptReader<R> {
             skip_start: aligned.skip_start,
             dec_remaining: aligned.dec_remaining,
             enc_remaining: aligned.enc_remaining,
-            unpad_tail: aligned.unpad_tail,
         }))
     }
 }
@@ -456,18 +474,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for DecryptReader<R> {
             return Poll::Ready(Ok(n));
         }
 
-        let enc_fast_limit = if inner.unpad_tail {
-            inner.enc_remaining.saturating_sub(16)
-        } else {
-            inner.enc_remaining
-        };
         let fast_cap = buf
             .len()
             .min(inner.dec_remaining.min(usize::MAX as u64) as usize)
-            .min(enc_fast_limit.min(usize::MAX as u64) as usize);
+            .min(inner.enc_remaining.min(usize::MAX as u64) as usize);
         let max_aligned = fast_cap & !15;
 
-        // Zero-copy fast path: aligned start and >= 16 non-final bytes requested and available.
+        // Zero-copy fast path: aligned start and >= 16 bytes requested and available.
         if inner.skip_start == 0 && max_aligned >= 16 {
             let mut total = inner.enc_len;
             buf[..total].copy_from_slice(&inner.rem[..total]);
@@ -504,7 +517,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for DecryptReader<R> {
         }
 
         // Staging path for unaligned prefix, small caller buffers (< 16),
-        // unaligned range end (< 16 remaining), or the final PKCS#7-padded block.
+        // or unaligned range end (< 16 remaining).
         let mut total = inner.enc_len;
         inner.enc_len = 0;
 
@@ -524,21 +537,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for DecryptReader<R> {
         let (blocks, _) = InOutBuf::from(&mut inner.rem[..]).into_chunks();
         inner.dec.decrypt_blocks_inout(blocks);
 
-        let block_plain_len = if inner.unpad_tail && inner.enc_remaining == 0 {
-            unpadded_block_len(&inner.rem)
-        } else {
-            16
-        };
-
-        let start_in_block = inner.skip_start.min(block_plain_len);
+        let start_in_block = inner.skip_start;
         inner.skip_start = 0;
         let max_avail = inner.dec_remaining.min(16) as usize;
-        let avail = (block_plain_len - start_in_block).min(max_avail);
+        let avail = (16 - start_in_block).min(max_avail);
         inner.dec_pos = start_in_block;
         inner.dec_len = start_in_block + avail;
-        if inner.enc_remaining == 0 {
-            inner.dec_remaining = avail as u64;
-        }
 
         let n = inner.drain_dec_rem(buf);
         if inner.dec_remaining == 0 {
@@ -553,7 +557,7 @@ mod tests {
     use super::*;
     use aes::cipher::BlockModeEncrypt;
     use futures::executor::block_on;
-    use futures::io::{AsyncReadExt, Cursor};
+    use futures::io::Cursor;
 
     const TEST_KEY: [u8; 16] = [0x13; 16];
 
@@ -603,12 +607,12 @@ mod tests {
 
     fn read_range(
         ciphertext: &[u8],
+        decrypted_size: u64,
         range: impl RangeBounds<u64>,
         step: usize,
         buf_len: usize,
     ) -> ((Option<u64>, Option<u64>), Vec<u8>) {
-        let file_size = ciphertext.len() as u64;
-        let aligned = AlignedRange::new(range, file_size);
+        let aligned = AlignedRange::new(range, decrypted_size, ciphertext.len() as u64);
         let http_range = (aligned.http_start, aligned.http_end);
 
         let slice = if aligned.dec_remaining == 0 {
@@ -656,7 +660,13 @@ mod tests {
             buf_len: usize,
             expected: &[u8],
         ) {
-            let (http_range, out) = read_range(ciphertext, range.clone(), step, buf_len);
+            let (http_range, out) = read_range(
+                ciphertext,
+                ciphertext.len() as u64,
+                range.clone(),
+                step,
+                buf_len,
+            );
             assert_eq!(http_range, exp_range, "range={range:?}");
             assert_eq!(out, expected, "range={range:?}");
         }
@@ -676,11 +686,12 @@ mod tests {
         check(
             &ciphertext,
             5..=73,
-            (Some(0), Some(79)),
+            (None, Some(79)),
             3,
             7,
             &plaintext[5..=73],
         );
+        check(&ciphertext, 5.., (None, None), 7, 32, &plaintext[5..]);
         check(
             &ciphertext,
             19..,
@@ -700,12 +711,13 @@ mod tests {
         for plain_len in [15_usize, 43, 48] {
             let plaintext: Vec<u8> = (0..plain_len).map(|i| (i as u8).wrapping_mul(3)).collect();
             let ciphertext = encrypt_pkcs7(&plaintext);
+            let dec_size = plain_len as u64;
 
             for (step, buf_len) in [(5, 7), (64, 64)] {
-                let (_, full) = read_range(&ciphertext, .., step, buf_len);
+                let (_, full) = read_range(&ciphertext, dec_size, .., step, buf_len);
                 assert_eq!(full, plaintext, "plain_len={plain_len}");
 
-                let (_, tail) = read_range(&ciphertext, 10.., step, buf_len);
+                let (_, tail) = read_range(&ciphertext, dec_size, 10.., step, buf_len);
                 assert_eq!(tail, &plaintext[10..], "plain_len={plain_len}");
             }
         }
@@ -716,18 +728,18 @@ mod tests {
         assert_eq!(ciphertext.len(), 48);
 
         // Straddling plaintext/padding boundary (40..=46 -> only 40..43 are real plaintext)
-        let (_, straddle) = read_range(&ciphertext, 40..=46, 7, 32);
+        let (_, straddle) = read_range(&ciphertext, 43, 40..=46, 7, 32);
         assert_eq!(straddle, &plaintext[40..43]);
 
         // Entirely inside the 5-byte padding region
-        let (_, only_pad) = read_range(&ciphertext, 43..=47, 16, 32);
+        let (_, only_pad) = read_range(&ciphertext, 43, 43..=47, 16, 32);
         assert!(only_pad.is_empty());
 
         // Starting at the full 16-byte PKCS#7 block (48 plain + 16 pad = 64 encrypted)
         let aligned_plain: Vec<u8> = (0..48_u8).map(|i| i + 20).collect();
         let aligned_cipher = encrypt_pkcs7(&aligned_plain);
         assert_eq!(aligned_cipher.len(), 64);
-        let (_, pad_block) = read_range(&aligned_cipher, 48.., 16, 64);
+        let (_, pad_block) = read_range(&aligned_cipher, 48, 48.., 16, 64);
         assert!(pad_block.is_empty());
     }
 
@@ -738,7 +750,7 @@ mod tests {
 
         // Truncated mid-block (25 of 32 bytes) and on a block boundary (16 of 32 bytes)
         for trunc_len in [25_usize, 16] {
-            let aligned = AlignedRange::new(.., 32);
+            let aligned = AlignedRange::new(.., 32, 32);
             let mut reader = DecryptReader::new(
                 Cursor::new(ciphertext[..trunc_len].to_vec()),
                 Aes128EcbDec::new(&TEST_KEY.into()),
@@ -789,7 +801,7 @@ mod tests {
 
         let plaintext: Vec<u8> = (0..37_u8).map(|i| i ^ 0x5A).collect();
         let ciphertext = encrypt_pkcs7(&plaintext);
-        let aligned = AlignedRange::new(.., ciphertext.len() as u64);
+        let aligned = AlignedRange::new(.., plaintext.len() as u64, ciphertext.len() as u64);
         let mut reader = DecryptReader::new(
             FlakyReader {
                 data: ciphertext,
@@ -827,6 +839,37 @@ mod tests {
     fn test_download_session_data_source() {
         use crate::http::{MockClient, MockResponse};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn range_mock(
+            ciphertext: Arc<Vec<u8>>,
+            requests: Arc<Mutex<Vec<Option<String>>>>,
+        ) -> MockClient {
+            MockClient::from_handler(move |req| {
+                let data = Arc::clone(&ciphertext);
+                let range_hdr = req
+                    .headers
+                    .iter()
+                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Range"))
+                    .map(|&(_, v)| v.to_string());
+                requests.lock().unwrap().push(range_hdr.clone());
+                let (s, e) = match range_hdr.as_deref() {
+                    None => (0, data.len()),
+                    Some(spec) => {
+                        let spec = spec.strip_prefix("bytes=").unwrap();
+                        let (s, e) = spec.split_once('-').unwrap();
+                        let start = s.parse::<usize>().unwrap();
+                        let end = if e.is_empty() {
+                            data.len()
+                        } else {
+                            (e.parse::<usize>().unwrap() + 1).min(data.len())
+                        };
+                        (start, end)
+                    }
+                };
+                Box::pin(async move { Ok(MockResponse::ok_bytes(data[s..e].to_vec())) })
+            })
+        }
 
         let plaintext: Vec<u8> = (0..75_u8).map(|i| i.wrapping_mul(5)).collect();
         let ciphertext = Arc::new(encrypt_pkcs7(&plaintext));
@@ -843,50 +886,64 @@ mod tests {
         };
 
         let requests = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
-        let req_log = Arc::clone(&requests);
-        let data_ref = Arc::clone(&ciphertext);
-        let client = MockClient::from_handler(move |req| {
-            let data = Arc::clone(&data_ref);
-            let range_hdr = req
-                .headers
-                .iter()
-                .find(|&&(k, _)| k.eq_ignore_ascii_case("Range"))
-                .map(|&(_, v)| v.to_string());
-            req_log.lock().unwrap().push(range_hdr.clone());
-            let (s, e) = match range_hdr.as_deref() {
-                None => (0, data.len()),
-                Some(spec) => {
-                    let spec = spec.strip_prefix("bytes=").unwrap();
-                    let (s, e) = spec.split_once('-').unwrap();
-                    let start = s.parse::<usize>().unwrap();
-                    let end = if e.is_empty() {
-                        data.len()
-                    } else {
-                        (e.parse::<usize>().unwrap() + 1).min(data.len())
-                    };
-                    (start, end)
-                }
-            };
-            Box::pin(async move { Ok(MockResponse::ok_bytes(data[s..e].to_vec())) })
-        });
-
-        let session = DownloadSession::from_mock(client, info);
-        assert_eq!(session.size_bounds(), (64, 80));
-
-        let empty_info = BinaryInform {
-            size: 0,
-            ..session.info().clone()
-        };
-        let empty_session = DownloadSession::from_mock(
-            MockClient::from_handler(|_| {
-                Box::pin(async { unreachable!("must not issue HTTP request") })
-            }),
-            empty_info,
-        );
-        assert_eq!(empty_session.size_bounds(), (0, 0));
+        let client = range_mock(Arc::clone(&ciphertext), Arc::clone(&requests));
 
         block_on(async {
-            // Empty/out-of-bounds ranges make zero HTTP requests
+            // Probing the last 16 bytes resolves exact unpadded length (75 of 80)
+            let session = DownloadSession::from_mock(client, info).await.unwrap();
+            assert_eq!(session.size(), 75);
+            assert_eq!(
+                requests.lock().unwrap().as_slice(),
+                &[Some("bytes=64-79".to_string())]
+            );
+            requests.lock().unwrap().clear();
+
+            // Full 16-byte PKCS#7 padding block (48 plain + 16 pad = 64 encrypted)
+            let aligned_plain: Vec<u8> = (0..48_u8).map(|i| i + 20).collect();
+            let aligned_cipher = Arc::new(encrypt_pkcs7(&aligned_plain));
+            let aligned_reqs = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+            let aligned_info = BinaryInform {
+                size: aligned_cipher.len() as u64,
+                ..session.info().clone()
+            };
+            let aligned_session = DownloadSession::from_mock(
+                range_mock(aligned_cipher, Arc::clone(&aligned_reqs)),
+                aligned_info,
+            )
+            .await
+            .unwrap();
+            assert_eq!(aligned_session.size(), 48);
+            aligned_reqs.lock().unwrap().clear();
+            let mut aligned_out = Vec::new();
+            aligned_session
+                .fetch()
+                .await
+                .unwrap()
+                .read_to_end(&mut aligned_out)
+                .await
+                .unwrap();
+            assert_eq!(aligned_out, aligned_plain);
+            assert_eq!(
+                aligned_reqs.lock().unwrap().as_slice(),
+                &[Some("bytes=0-47".to_string())]
+            );
+
+            // Empty session makes zero HTTP requests even during probe
+            let empty_info = BinaryInform {
+                size: 0,
+                ..session.info().clone()
+            };
+            let empty_session = DownloadSession::from_mock(
+                MockClient::from_handler(|_| {
+                    Box::pin(async { unreachable!("must not issue HTTP request") })
+                }),
+                empty_info,
+            )
+            .await
+            .unwrap();
+            assert_eq!(empty_session.size(), 0);
+
+            // Empty/out-of-bounds ranges (including inside PKCS#7 padding) make zero HTTP requests
             let mut empty_out = Vec::new();
             session
                 .fetch_range(0..0)
@@ -896,7 +953,7 @@ mod tests {
                 .await
                 .unwrap();
             session
-                .fetch_range(80..)
+                .fetch_range(75..)
                 .await
                 .unwrap()
                 .read_to_end(&mut empty_out)
@@ -914,7 +971,7 @@ mod tests {
                 &[Some("bytes=16-63".to_string())]
             );
 
-            // Straddling PKCS#7 tail via read_at
+            // Straddling tail via read_at returns exact remaining plaintext
             let mut tail = [0u8; 32];
             assert_eq!(session.read_at(&mut tail, 64).await.unwrap(), 11);
             assert_eq!(&tail[..11], &plaintext[64..]);
@@ -932,13 +989,134 @@ mod tests {
             assert_eq!(full, plaintext);
             assert_eq!(requests.lock().unwrap().as_slice(), &[None]);
 
-            // Error mapping via io::Error::other
+            // Error mapping via io::Error::other (probe succeeds, subsequent fetch returns 503)
+            let probed = Arc::new(AtomicBool::new(false));
+            let tail_block = ciphertext[64..80].to_vec();
             let err_session = DownloadSession::from_mock(
-                MockClient::from_handler(|_| Box::pin(async { Err(HttpError::Status(503)) })),
+                MockClient::from_handler(move |_| {
+                    if !probed.swap(true, Ordering::Relaxed) {
+                        let b = tail_block.clone();
+                        Box::pin(async move { Ok(MockResponse::ok_bytes(b)) })
+                    } else {
+                        Box::pin(async { Err(HttpError::Status(503)) })
+                    }
+                }),
                 session.info().clone(),
-            );
+            )
+            .await
+            .unwrap();
             let err = err_session.fetch().await.err().unwrap();
             assert_eq!(err.kind(), io::ErrorKind::Other);
+        });
+    }
+
+    #[test]
+    fn test_download_session_401_reauth_and_invalid_size() {
+        use crate::http::{MockClient, MockResponse};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let plaintext: Vec<u8> = (0..43_u8).map(|i| i.wrapping_mul(7)).collect();
+        let ciphertext = Arc::new(encrypt_pkcs7(&plaintext));
+        let base_info = BinaryInform {
+            version: "T/T/T/T".into(),
+            filename: "SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4".into(),
+            path: "/t/".into(),
+            size: ciphertext.len() as u64,
+            key: TEST_KEY,
+            model_type: "SM-TEST".into(),
+            region: "XAA".into(),
+        };
+
+        block_on(async {
+            // Non-multiple-of-16 encrypted size is rejected during probe
+            let bad_info = BinaryInform {
+                size: 17,
+                ..base_info.clone()
+            };
+            let err = DownloadSession::from_mock(
+                MockClient::from_handler(|_| {
+                    Box::pin(async { unreachable!("must reject invalid size before HTTP") })
+                }),
+                bad_info,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(matches!(err, Error::InvalidResponse(_)));
+
+            // Mid-download HTTP 401 rotates nonce via GenerateNonce + BinaryInitForMass
+            // once across concurrent tasks and retries with the refreshed Authorization header.
+            let fresh_nonce = "NEWNONCE12345678";
+            let expected_auth_hdr = format!(
+                "FUS nonce=\"{fresh_nonce}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
+                auth::decrypt_nonce(fresh_nonce)
+            );
+            let nonce_calls = Arc::new(AtomicUsize::new(0));
+            let init_calls = Arc::new(AtomicUsize::new(0));
+            let probe_done = Arc::new(AtomicUsize::new(0));
+            let data = Arc::clone(&ciphertext);
+            let exp_auth = expected_auth_hdr.clone();
+            let nc = Arc::clone(&nonce_calls);
+            let ic = Arc::clone(&init_calls);
+            let pd = Arc::clone(&probe_done);
+
+            let client = MockClient::from_handler(move |req| {
+                if req.url.contains("NF_SmartDownloadGenerateNonce.do") {
+                    nc.fetch_add(1, Ordering::SeqCst);
+                    return Box::pin(async move {
+                        Ok(MockResponse::ok_bytes(Vec::new()).with_header("nonce", fresh_nonce))
+                    });
+                }
+                if req.url.contains("NF_SmartDownloadBinaryInitForMass.do") {
+                    ic.fetch_add(1, Ordering::SeqCst);
+                    let ok_xml = b"<FUSMsg><FUSBody><Results><Status>200</Status></Results></FUSBody></FUSMsg>".to_vec();
+                    return Box::pin(async move { Ok(MockResponse::ok_bytes(ok_xml)) });
+                }
+
+                let auth_hdr = req
+                    .headers
+                    .iter()
+                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Authorization"))
+                    .map(|&(_, v)| v.to_string())
+                    .unwrap_or_default();
+                let is_probe = pd.fetch_add(1, Ordering::SeqCst) == 0;
+                if !is_probe && auth_hdr != exp_auth {
+                    return Box::pin(async { Err(HttpError::Status(401)) });
+                }
+
+                let range_hdr = req
+                    .headers
+                    .iter()
+                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Range"))
+                    .map(|&(_, v)| v.to_string());
+                let bytes = match range_hdr.as_deref() {
+                    None => data.as_ref().clone(),
+                    Some(spec) => {
+                        let spec = spec.strip_prefix("bytes=").unwrap();
+                        let (s, e) = spec.split_once('-').unwrap();
+                        let s = s.parse::<usize>().unwrap();
+                        let e = (e.parse::<usize>().unwrap() + 1).min(data.len());
+                        data[s..e].to_vec()
+                    }
+                };
+                Box::pin(async move { Ok(MockResponse::ok_bytes(bytes)) })
+            });
+
+            let session = DownloadSession::from_mock(client, base_info).await.unwrap();
+            assert_eq!(session.size(), 43);
+
+            // Issue two concurrent fetches that both observe 401 on generation 0;
+            // reauth_gen serializes and deduplicates them into a single refresh.
+            let (r1, r2) = futures::join!(session.fetch_range(0..20), session.fetch_range(20..43));
+            let mut out1 = Vec::new();
+            let mut out2 = Vec::new();
+            r1.unwrap().read_to_end(&mut out1).await.unwrap();
+            r2.unwrap().read_to_end(&mut out2).await.unwrap();
+            assert_eq!(out1, &plaintext[..20]);
+            assert_eq!(out2, &plaintext[20..]);
+            assert_eq!(nonce_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(init_calls.load(Ordering::SeqCst), 1);
         });
     }
 }

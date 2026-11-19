@@ -26,14 +26,19 @@ mod error;
 mod fusclient;
 mod http;
 mod parallel;
+mod stream;
 mod xml;
 mod zip;
 
+// General-purpose data & streaming building blocks
 pub use data::DataSource;
-pub use decoder::{StreamCheckpoint, ZipEntryReader};
+pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
+pub use stream::{Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream};
+
+// Domain implementers
+pub use decoder::ZipCheckpoint;
 pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient};
-pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
 pub use xml::{BinaryInform, VersionInfo};
 pub use zip::{OdinComponent, ZipArchive, ZipEntry, ZipEntrySession};
 

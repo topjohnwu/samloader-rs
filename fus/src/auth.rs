@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
+use std::fmt::Write as _;
 
 // This auth key is provided by @henr1kas and @ducthoe
 const AUTH_AES_KEY: [u8; 16] = [
@@ -20,14 +21,10 @@ const AUTH_AES_KEY: [u8; 16] = [
 ];
 
 fn authenticate_block(in_block: &[u8; 16]) -> [u8; 16] {
-    let cipher = aes::Aes128::new_from_slice(&AUTH_AES_KEY).unwrap();
-    let mut block = Block::<aes::Aes128>::default();
-    block.copy_from_slice(in_block);
+    let cipher = aes::Aes128::new(&AUTH_AES_KEY.into());
+    let mut block = (*in_block).into();
     cipher.encrypt_block(&mut block);
-
-    let mut out_block = [0u8; 16];
-    out_block.copy_from_slice(&block);
-    out_block
+    block.into()
 }
 
 pub(crate) fn decrypt_nonce(inp: &str) -> String {
@@ -37,20 +34,28 @@ pub(crate) fn decrypt_nonce(inp: &str) -> String {
     block[..len].copy_from_slice(&bytes[..len]);
 
     let authenticated = authenticate_block(&block);
+    to_hex_string(&authenticated)
+}
 
-    let mut hex = String::with_capacity(32);
-    for b in authenticated {
-        hex.push_str(&format!("{:02x}", b));
+fn client_nonce_seed() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::SystemTime;
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(42) as u64
     }
-    hex
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 fn generate_client_nonce() -> String {
-    use std::time::SystemTime;
-    let mut seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(42) as u64;
+    let mut seed = client_nonce_seed();
 
     let mut nonce = String::with_capacity(16);
     let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -65,7 +70,11 @@ fn generate_client_nonce() -> String {
 }
 
 fn to_hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
 }
 
 pub(crate) fn compute_history_headers(model: &str) -> (String, String) {

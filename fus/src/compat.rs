@@ -22,51 +22,29 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 
-mod sealed {
-    pub trait SendSealed {}
-    #[cfg(not(target_arch = "wasm32"))]
-    impl<T: ?Sized + Send> SendSealed for T {}
-    #[cfg(target_arch = "wasm32")]
-    impl<T: ?Sized> SendSealed for T {}
-
-    pub trait SyncSealed {}
-    #[cfg(not(target_arch = "wasm32"))]
-    impl<T: ?Sized + Sync> SyncSealed for T {}
-    #[cfg(target_arch = "wasm32")]
-    impl<T: ?Sized> SyncSealed for T {}
-}
-
 /// Helper trait representing `Send` on non-WASM targets and unbounded on WASM.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSend: sealed::SendSealed + Send {}
+pub trait MaybeSend: Send {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: ?Sized + Send> MaybeSend for T {}
 
 /// Helper trait representing `Send` on non-WASM targets and unbounded on WASM.
 #[cfg(target_arch = "wasm32")]
-pub trait MaybeSend: sealed::SendSealed {}
+pub trait MaybeSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSend for T {}
 
 /// Helper trait representing `Sync` on non-WASM targets and unbounded on WASM.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSync: sealed::SyncSealed + Sync {}
+pub trait MaybeSync: Sync {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: ?Sized + Sync> MaybeSync for T {}
 
 /// Helper trait representing `Sync` on non-WASM targets and unbounded on WASM.
 #[cfg(target_arch = "wasm32")]
-pub trait MaybeSync: sealed::SyncSealed {}
+pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSync for T {}
-
-/// Boxed [`AsyncRead`](futures::io::AsyncRead) trait object that is `Send` on native targets.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) type BoxAsyncRead<'a> = Box<dyn futures::io::AsyncRead + Send + Unpin + 'a>;
-
-/// Boxed [`AsyncRead`](futures::io::AsyncRead) trait object on WebAssembly.
-#[cfg(target_arch = "wasm32")]
-pub(crate) type BoxAsyncRead<'a> = Box<dyn futures::io::AsyncRead + Unpin + 'a>;
 
 /// Cross-target async timer future backed by `tokio::time` on native targets
 /// and `futures-timer` on WebAssembly.

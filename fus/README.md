@@ -7,7 +7,9 @@ A pure-Rust client library for interacting with the Samsung Firmware Update Serv
 - Negotiates secure FUS handshakes, rotates nonces, and automatically refreshes expired download tokens.
 - Fetches stable, previous, and beta firmware versions for any model and CSC.
 - Resolves binary sizes, file paths, and decryption keys.
-- Streams arbitrary byte ranges with transparent, zero-copy AES-128-ECB decryption and PKCS#7 unpadding of `.enc2`/`.enc4` payloads.
+- Streams arbitrary byte ranges via `DataSource` with transparent, zero-copy AES-128-ECB decryption and exact PKCS#7 unpadding of `.enc2`/`.enc4` payloads.
+- Accelerates downloads with `ParallelDataSource` (sliding-window multi-connection range fetching, retries, work-stealing, and head-of-line hedging).
+- Parses ZIP / ZIP64 Central Directories directly over any `DataSource` via `ZipArchive` and streams individual entries with CRC-32 verification and mid-stream `ResumableStream` checkpoints (`OffsetCheckpoint` and `ZipCheckpoint`).
 
 ## Usage
 

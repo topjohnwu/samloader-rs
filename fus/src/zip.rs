@@ -15,8 +15,9 @@
 //! Streaming ZIP / ZIP64 Central Directory indexing and entry access over any [`DataSource`].
 
 use crate::data::DataSource;
-use crate::decoder::{StreamCheckpoint, StreamDecoder, ZipEntryReader};
+use crate::decoder::{ZipCheckpoint, ZipDecoder};
 use crate::error::{Error, Result};
+use crate::stream::{Checkpoint, ResumableAsyncRead, ResumableStream};
 use rawzip::{CompressionMethod, ReaderAt, ZipArchiveEntryWayfinder, ZipLocator};
 use std::io;
 use std::ops::Range;
@@ -101,18 +102,9 @@ impl ZipEntry {
         self.wayfinder.uncompressed_size_hint()
     }
 
-    /// Validates `checkpoint` against this entry and returns the number of trailing
-    /// uncompressed bytes (ending at `checkpoint.uncompressed_offset()`) required as
-    /// the decompression dictionary for [`ZipEntrySession::resume`].
-    ///
-    /// Returns `None` if `checkpoint` is out of bounds or incompatible with this
-    /// entry's compression method.
-    pub fn resume_dict_len(&self, checkpoint: &StreamCheckpoint) -> Option<usize> {
-        checkpoint.resume_dict_len(
-            self.compression,
-            self.compressed_size(),
-            self.uncompressed_size(),
-        )
+    /// Classifies this entry as a recognized Samsung Odin firmware component, if any.
+    pub fn component(&self) -> Option<OdinComponent> {
+        OdinComponent::from_entry_name(&self.name)
     }
 }
 
@@ -150,15 +142,15 @@ pub struct ZipArchive<S: DataSource> {
 impl<S: DataSource> ZipArchive<S> {
     /// Reads and parses the trailing ZIP / ZIP64 Central Directory from `source`.
     pub async fn open(source: S) -> Result<Self> {
-        let max_size = source.size_bounds().1;
-        let tail_start = max_size.saturating_sub(TAIL_FETCH_BYTES);
-        let max_tail = (max_size - tail_start) as usize;
+        let archive_len = source.size();
+        let tail_start = archive_len.saturating_sub(TAIL_FETCH_BYTES);
+        let tail_len = (archive_len - tail_start) as usize;
 
-        let mut tail = vec![0u8; max_tail];
-        let n = source.read_at(&mut tail, tail_start).await?;
-        tail.truncate(n);
+        let mut tail = vec![0u8; tail_len];
+        if source.read_at(&mut tail, tail_start).await? != tail_len {
+            return Err(Error::InvalidArchive("truncated ZIP archive tail".into()));
+        }
 
-        let archive_len = tail_start + tail.len() as u64;
         let locator = ZipLocator::new().max_search_space(TAIL_FETCH_BYTES);
         let mut scratch = vec![0u8; rawzip::MAX_CENTRAL_DIRECTORY_RECORD_SIZE];
 
@@ -355,29 +347,48 @@ impl<'a, S: DataSource> ZipEntrySession<'a, S> {
         let clamped = comp_offset.min(compressed_size);
         self.data_offset + clamped..self.data_offset + compressed_size
     }
+}
 
-    /// Transparently streams, decompresses, and CRC-verifies the entire entry over `S`.
-    pub async fn fetch(&self) -> io::Result<ZipEntryReader<'a>> {
-        let decoder = StreamDecoder::new(
+impl<'s, S: DataSource> ResumableStream for ZipEntrySession<'s, S> {
+    type Checkpoint = ZipCheckpoint;
+
+    fn output_size(&self) -> u64 {
+        self.entry.uncompressed_size()
+    }
+
+    fn source_size(&self) -> u64 {
+        self.entry.compressed_size()
+    }
+
+    fn resume_dict_len(&self, checkpoint: &ZipCheckpoint) -> Option<usize> {
+        checkpoint.resume_dict_len(
+            self.entry.compression,
+            self.entry.compressed_size(),
+            self.entry.uncompressed_size(),
+        )
+    }
+
+    async fn open<'a>(
+        &'a self,
+    ) -> io::Result<impl ResumableAsyncRead<Checkpoint = ZipCheckpoint> + use<'a, 's, S>> {
+        let decoder = ZipDecoder::new(
             self.entry.compression,
             self.entry.crc32,
             self.entry.uncompressed_size(),
         )?;
-        let source: &'a S = self.source;
-        let reader = source.fetch_range(self.compressed_range_from(0)).await?;
-        Ok(decoder.into_reader(Box::new(reader)))
+        let reader = self
+            .source
+            .fetch_range(self.compressed_range_from(0))
+            .await?;
+        Ok(decoder.into_reader(reader))
     }
 
-    /// Resumes streaming, decompressing, and CRC-verifying this entry from `checkpoint`.
-    ///
-    /// `dict` must contain at least `entry.resume_dict_len(checkpoint)` trailing
-    /// uncompressed bytes ending at `checkpoint.uncompressed_offset()`.
-    pub async fn resume(
-        &self,
-        checkpoint: &StreamCheckpoint,
+    async fn resume<'a>(
+        &'a self,
+        checkpoint: &ZipCheckpoint,
         dict: &[u8],
-    ) -> io::Result<ZipEntryReader<'a>> {
-        let decoder = StreamDecoder::resume(
+    ) -> io::Result<impl ResumableAsyncRead<Checkpoint = ZipCheckpoint> + use<'a, 's, S>> {
+        let decoder = ZipDecoder::resume(
             self.entry.compression,
             self.entry.crc32,
             self.entry.compressed_size(),
@@ -385,17 +396,18 @@ impl<'a, S: DataSource> ZipEntrySession<'a, S> {
             *checkpoint,
             dict,
         )?;
-        let source: &'a S = self.source;
-        let reader = source
-            .fetch_range(self.compressed_range_from(checkpoint.compressed_offset()))
+        let reader = self
+            .source
+            .fetch_range(self.compressed_range_from(checkpoint.source_offset()))
             .await?;
-        Ok(decoder.into_reader(Box::new(reader)))
+        Ok(decoder.into_reader(reader))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decoder::tests::compress_multi_block;
     use crate::parallel::ParallelDataSource;
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
@@ -403,35 +415,6 @@ mod tests {
     use rawzip::path::EntryPath;
     use rawzip::{Header, ZipArchiveWriter};
     use std::io::Write;
-    use zlib_rs::{Deflate, DeflateFlush, Status};
-
-    fn raw_deflate_multi_block(data: &[u8]) -> Vec<u8> {
-        let mut def = Deflate::new(6, false, 15);
-        let mut out = vec![0u8; zlib_rs::compress_bound(data.len()) + 512];
-        let mut in_off = 0usize;
-        let mut out_off = 0usize;
-        while in_off < data.len() {
-            let chunk = (16 * 1024).min(data.len() - in_off);
-            let is_last = in_off + chunk == data.len();
-            let prev_in = def.total_in();
-            let prev_out = def.total_out();
-            let flush = if is_last {
-                DeflateFlush::Finish
-            } else {
-                DeflateFlush::Block
-            };
-            let status = def
-                .compress(&data[in_off..in_off + chunk], &mut out[out_off..], flush)
-                .unwrap();
-            in_off += (def.total_in() - prev_in) as usize;
-            out_off += (def.total_out() - prev_out) as usize;
-            if is_last {
-                assert_eq!(status, Status::StreamEnd);
-            }
-        }
-        out.truncate(out_off);
-        out
-    }
 
     #[test]
     fn test_odin_component_classification() {
@@ -473,7 +456,7 @@ mod tests {
 
         let bl_data = b"bootloader raw stored payload";
         let ap_data: Vec<u8> = (0..96_000).map(|i| (i * 31) as u8).collect();
-        let ap_deflated = raw_deflate_multi_block(&ap_data);
+        let ap_deflated = compress_multi_block(&ap_data, &[16 * 1024]);
 
         let mut zip_bytes = Vec::new();
         let mut writer = ZipArchiveWriter::new(&mut zip_bytes);
@@ -518,22 +501,18 @@ mod tests {
             let source = ParallelDataSource::new(zip_bytes, 4);
             let archive = ZipArchive::open(&source).await.unwrap();
             assert_eq!(archive.entries().len(), 2);
-            assert_eq!(
-                OdinComponent::from_entry_name(archive.entries()[0].name()),
-                Some(OdinComponent::Bl)
-            );
-            assert_eq!(
-                OdinComponent::from_entry_name(archive.entries()[1].name()),
-                Some(OdinComponent::Ap)
-            );
+            assert_eq!(archive.entries()[0].component(), Some(OdinComponent::Bl));
+            assert_eq!(archive.entries()[1].component(), Some(OdinComponent::Ap));
 
             let bl_sess = archive.open_entry(&archive.entries()[0]).await.unwrap();
             let ap_sess = archive.open_entry(&archive.entries()[1]).await.unwrap();
+            assert_eq!(ap_sess.output_size(), ap_data.len() as u64);
+            assert_eq!(ap_sess.source_size(), ap_deflated.len() as u64);
 
-            // Full AsyncRead via fetch()
+            // Full AsyncRead via open()
             let mut out = Vec::new();
             ap_sess
-                .fetch()
+                .open()
                 .await
                 .unwrap()
                 .read_to_end(&mut out)
@@ -542,12 +521,14 @@ mod tests {
             assert_eq!(out, ap_data);
 
             // Mid-entry checkpoint + resume() for Stored entry
-            let mut bl_reader = bl_sess.fetch().await.unwrap();
+            let mut bl_reader = bl_sess.open().await.unwrap();
             let mut head = [0u8; 10];
-            let (n, cp) = bl_reader.read_chunk(&mut head, true).await.unwrap();
+            let n = bl_reader.read(&mut head).await.unwrap();
             assert_eq!(n, 10);
-            let cp = cp.expect("Stored read_chunk returns checkpoint");
-            assert_eq!(bl_sess.entry().resume_dict_len(&cp), Some(0));
+            let cp = bl_reader
+                .checkpoint()
+                .expect("Stored reader exposes checkpoint");
+            assert_eq!(bl_sess.resume_dict_len(&cp), Some(0));
             let mut resumed_bl = head[..n].to_vec();
             bl_sess
                 .resume(&cp, &[])
@@ -559,19 +540,19 @@ mod tests {
             assert_eq!(resumed_bl, bl_data);
 
             // Mid-entry checkpoint + resume() for Deflate entry
-            let mut ap_reader = ap_sess.fetch().await.unwrap();
+            let mut ap_reader = ap_sess.open().await.unwrap();
             let mut partial = Vec::new();
             let mut buf = vec![0u8; 8192];
             let cp = loop {
-                let (n, cp) = ap_reader.read_chunk(&mut buf, true).await.unwrap();
+                let n = ap_reader.read(&mut buf).await.unwrap();
                 assert!(n > 0);
                 partial.extend_from_slice(&buf[..n]);
-                if let Some(cp) = cp {
+                if let Some(cp) = ap_reader.checkpoint() {
                     break cp;
                 }
             };
-            let uncomp = cp.uncompressed_offset() as usize;
-            let dict_len = ap_sess.entry().resume_dict_len(&cp).unwrap();
+            let uncomp = cp.output_offset() as usize;
+            let dict_len = ap_sess.resume_dict_len(&cp).unwrap();
             let mut resumed_ap = partial[..uncomp].to_vec();
             ap_sess
                 .resume(&cp, &partial[uncomp - dict_len..uncomp])
