@@ -66,7 +66,7 @@ pub trait ResumableAsyncRead: AsyncRead + MaybeSend + Unpin {
 /// Resumable, checkpointable sequential stream.
 ///
 /// Implemented by [`DataStream`] (wrapping any random-access [`DataSource`] with
-/// [`OffsetCheckpoint`]) and [`ZipEntrySession`](crate::ZipEntrySession) (streaming
+/// [`OffsetCheckpoint`]) and [`ZipEntryStream`](crate::ZipEntryStream) (streaming
 /// decompressed, CRC-verified archive entries with [`ZipCheckpoint`](crate::ZipCheckpoint)).
 pub trait ResumableStream: MaybeSend + MaybeSync {
     /// Mid-stream checkpoint type for this stream.

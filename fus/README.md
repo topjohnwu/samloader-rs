@@ -9,7 +9,7 @@ A pure-Rust client library for interacting with the Samsung Firmware Update Serv
 - Resolves binary sizes, file paths, and decryption keys.
 - Streams arbitrary byte ranges via `DataSource` with transparent, zero-copy AES-128-ECB decryption and exact PKCS#7 unpadding of `.enc2`/`.enc4` payloads.
 - Accelerates downloads with `ParallelDataSource` (sliding-window multi-connection range fetching, retries, work-stealing, and head-of-line hedging).
-- Parses ZIP / ZIP64 Central Directories directly over any `DataSource` via `ZipArchive` and streams individual entries with CRC-32 verification and mid-stream `ResumableStream` checkpoints (`DataStream`/`OffsetCheckpoint` and `ZipEntrySession`/`ZipCheckpoint`).
+- Parses ZIP / ZIP64 Central Directories directly over any `DataSource` via `ZipArchive` and streams individual entries with CRC-32 verification and mid-stream `ResumableStream` checkpoints (`DataStream`/`OffsetCheckpoint` and `ZipEntryStream`/`ZipCheckpoint`).
 
 ## Usage
 

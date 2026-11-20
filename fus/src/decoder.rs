@@ -44,8 +44,8 @@ enum ZipCheckpointKind {
     },
 }
 
-/// Opaque, serializable mid-stream [`Checkpoint`] for [`ZipEntrySession`](crate::ZipEntrySession)
-/// streams (`Stored` or `Deflate`).
+/// Opaque, serializable mid-stream [`Checkpoint`] for [`ZipEntryStream`](crate::ZipEntryStream)
+/// transfers (`Stored` or `Deflate`).
 ///
 /// Serialize with [`write_to`](Self::write_to) and deserialize with
 /// [`read_from`](Self::read_from), then pass to

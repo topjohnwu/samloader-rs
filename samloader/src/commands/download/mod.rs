@@ -217,11 +217,11 @@ async fn download_archive(
             );
             continue;
         }
-        let sess = archive
+        let stream = archive
             .open_entry(entry)
             .await
             .map_err(|e| format!("Failed to open archive entry '{}': {e}", entry.name()))?;
-        pending.push((sess, final_path));
+        pending.push((stream, final_path));
     }
 
     if pending.is_empty() {
@@ -234,14 +234,14 @@ async fn download_archive(
         out_dir.display()
     );
 
-    for (index, (session, final_path)) in pending.into_iter().enumerate() {
+    for (index, (stream, final_path)) in pending.into_iter().enumerate() {
         let label = FileLabel {
-            name: session.entry().name(),
+            name: stream.entry().name(),
             index,
             total,
         };
         transfer_file(
-            &session,
+            &stream,
             final_path,
             checksum,
             args.force,

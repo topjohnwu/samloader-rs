@@ -164,8 +164,8 @@ impl<S: DataSource> ZipArchive<S> {
     }
 
     /// Reads the 30-byte Local File Header for `entry` to resolve its exact payload offset
-    /// and returns a [`ZipEntrySession`].
-    pub async fn open_entry<'a>(&'a self, entry: &'a ZipEntry) -> Result<ZipEntrySession<'a, S>> {
+    /// and returns a [`ZipEntryStream`].
+    pub async fn open_entry<'a>(&'a self, entry: &'a ZipEntry) -> Result<ZipEntryStream<'a, S>> {
         if entry.archive_id != self.id {
             return Err(Error::InvalidArchive(format!(
                 "ZIP entry '{}' does not belong to this archive",
@@ -213,7 +213,7 @@ impl<S: DataSource> ZipArchive<S> {
             )));
         }
 
-        Ok(ZipEntrySession {
+        Ok(ZipEntryStream {
             source: &self.source,
             entry,
             data_offset,
@@ -291,13 +291,13 @@ fn parse_entries(
 
 /// Handle to a resolved entry inside a [`ZipArchive`], providing transparent and
 /// resumable async streaming over the underlying [`DataSource`].
-pub struct ZipEntrySession<'a, S: DataSource> {
+pub struct ZipEntryStream<'a, S: DataSource> {
     source: &'a S,
     entry: &'a ZipEntry,
     data_offset: u64,
 }
 
-impl<'a, S: DataSource> ZipEntrySession<'a, S> {
+impl<'a, S: DataSource> ZipEntryStream<'a, S> {
     /// Metadata of the opened ZIP entry.
     pub fn entry(&self) -> &'a ZipEntry {
         self.entry
@@ -310,7 +310,7 @@ impl<'a, S: DataSource> ZipEntrySession<'a, S> {
     }
 }
 
-impl<'s, S: DataSource> ResumableStream for ZipEntrySession<'s, S> {
+impl<'s, S: DataSource> ResumableStream for ZipEntryStream<'s, S> {
     type Checkpoint = ZipCheckpoint;
 
     fn output_size(&self) -> u64 {
@@ -437,14 +437,14 @@ mod tests {
             assert_eq!(archive.entries()[0].name(), "BL_test.tar.md5");
             assert_eq!(archive.entries()[1].name(), "AP_test.tar.md5");
 
-            let bl_sess = archive.open_entry(&archive.entries()[0]).await.unwrap();
-            let ap_sess = archive.open_entry(&archive.entries()[1]).await.unwrap();
-            assert_eq!(ap_sess.output_size(), ap_data.len() as u64);
-            assert_eq!(ap_sess.source_size(), ap_deflated.len() as u64);
+            let bl_stream = archive.open_entry(&archive.entries()[0]).await.unwrap();
+            let ap_stream = archive.open_entry(&archive.entries()[1]).await.unwrap();
+            assert_eq!(ap_stream.output_size(), ap_data.len() as u64);
+            assert_eq!(ap_stream.source_size(), ap_deflated.len() as u64);
 
             // Full AsyncRead via open()
             let mut out = Vec::new();
-            ap_sess
+            ap_stream
                 .open()
                 .await
                 .unwrap()
@@ -454,16 +454,16 @@ mod tests {
             assert_eq!(out, ap_data);
 
             // Mid-entry checkpoint + resume() for Stored entry
-            let mut bl_reader = bl_sess.open().await.unwrap();
+            let mut bl_reader = bl_stream.open().await.unwrap();
             let mut head = [0u8; 10];
             let n = bl_reader.read(&mut head).await.unwrap();
             assert_eq!(n, 10);
             let cp = bl_reader
                 .checkpoint()
                 .expect("Stored reader exposes checkpoint");
-            assert_eq!(bl_sess.resume_dict_len(&cp), Some(0));
+            assert_eq!(bl_stream.resume_dict_len(&cp), Some(0));
             let mut resumed_bl = head[..n].to_vec();
-            bl_sess
+            bl_stream
                 .resume(&cp, &[])
                 .await
                 .unwrap()
@@ -473,7 +473,7 @@ mod tests {
             assert_eq!(resumed_bl, bl_data);
 
             // Mid-entry checkpoint + resume() for Deflate entry
-            let mut ap_reader = ap_sess.open().await.unwrap();
+            let mut ap_reader = ap_stream.open().await.unwrap();
             let mut partial = Vec::new();
             let mut buf = vec![0u8; 8192];
             let cp = loop {
@@ -485,9 +485,9 @@ mod tests {
                 }
             };
             let uncomp = cp.output_offset() as usize;
-            let dict_len = ap_sess.resume_dict_len(&cp).unwrap();
+            let dict_len = ap_stream.resume_dict_len(&cp).unwrap();
             let mut resumed_ap = partial[..uncomp].to_vec();
-            ap_sess
+            ap_stream
                 .resume(&cp, &partial[uncomp - dict_len..uncomp])
                 .await
                 .unwrap()
