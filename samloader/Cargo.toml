@@ -16,7 +16,7 @@ binrw = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 indicatif = { workspace = true }
 cfg-if = { workspace = true }
-tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "signal", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

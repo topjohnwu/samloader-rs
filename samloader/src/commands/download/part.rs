@@ -16,6 +16,7 @@
 //! ring-buffered background disk writing.
 
 use binrw::{BinRead, BinResult, BinWrite, Endian, binrw};
+use samloader_fus::futures::future::{self, Either};
 use samloader_fus::futures::io::AsyncReadExt;
 use samloader_fus::{
     Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream, ZipCheckpoint,
@@ -23,13 +24,16 @@ use samloader_fus::{
 use std::fs::{File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
+use std::pin::pin;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const FOOTER_VERSION: u32 = 4;
 const FOOTER_SIZE: usize = 64;
 const CHECKPOINT_INTERVAL: u64 = 32 * 1024 * 1024;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
 const RING_SLOTS: usize = 16;
+const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
 
 fn read_offset_cp<R: Read + Seek>(
     reader: &mut R,
@@ -267,10 +271,17 @@ fn set_sparse(file: &File, sparse: bool) {
     }
 }
 
-fn part_path_for(final_path: &Path) -> PathBuf {
+pub(crate) fn part_path_for(final_path: &Path) -> PathBuf {
     let mut s = final_path.as_os_str().to_owned();
     s.push(".part");
     PathBuf::from(s)
+}
+
+fn io_with_path(path: &Path, action: &str, err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!("failed to {action} '{}': {err}", path.display()),
+    )
 }
 
 fn open_and_read_footer(
@@ -281,11 +292,12 @@ fn open_and_read_footer(
     force: bool,
 ) -> io::Result<(File, u64, Option<Footer>)> {
     if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| io_with_path(parent, "create directory", e))?;
     }
 
     if force {
-        let _ = std::fs::remove_file(final_path);
+        // Keep any existing `final_path` intact until the replacement download finishes
+        // cleanly and replaces it atomically in `finalize_part_file`.
         let _ = std::fs::remove_file(part_path);
     }
 
@@ -294,9 +306,12 @@ fn open_and_read_footer(
         .write(true)
         .create(true)
         .truncate(force)
-        .open(part_path)?;
+        .open(part_path)
+        .map_err(|e| io_with_path(part_path, "open", e))?;
 
-    let existing_len = file.seek(SeekFrom::End(0))?;
+    let existing_len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| io_with_path(part_path, "seek", e))?;
     let footer = if !force && existing_len > 0 {
         Footer::read_from_part(&mut file, expected_checksum, target_size)
     } else {
@@ -306,23 +321,71 @@ fn open_and_read_footer(
     Ok((file, existing_len, footer))
 }
 
+fn persist_checkpoint(
+    file: &File,
+    part_path: &Path,
+    checksum: [u8; 16],
+    target_size: u64,
+    state: FooterState,
+    sync_footer: bool,
+) -> io::Result<()> {
+    // Flush data blocks before advancing the persisted footer so power loss cannot
+    // leave a newer checkpoint pointing past unwritten data.
+    let result = (|| {
+        file.sync_data()?;
+        let footer = Footer::with_state(checksum, state);
+        write_all_at(file, &footer.to_bytes(), target_size)?;
+        if sync_footer {
+            file.sync_data()?;
+        }
+        Ok(())
+    })();
+    result.map_err(|e| io_with_path(part_path, "persist checkpoint for", e))
+}
+
 fn finalize_part_file(
     file: File,
     part_path: &Path,
     final_path: &Path,
     final_size: u64,
 ) -> io::Result<()> {
-    file.set_len(final_size)?;
+    file.set_len(final_size)
+        .map_err(|e| io_with_path(part_path, "truncate", e))?;
     #[cfg(windows)]
     set_sparse(&file, false);
-    file.sync_data()?;
+    file.sync_data()
+        .map_err(|e| io_with_path(part_path, "sync", e))?;
     drop(file);
 
-    #[cfg(windows)]
-    if final_path.exists() {
-        let _ = std::fs::remove_file(final_path);
+    // `std::fs::rename` replaces existing files atomically on both Unix and Windows
+    // (`SetFileInformationByHandle` / `MoveFileExW` with replace-if-exists).
+    std::fs::rename(part_path, final_path).map_err(|e| io_with_path(final_path, "finalize", e))
+}
+
+/// Resolves once `cancel_rx` becomes `true`, staying pending forever if the sender is dropped.
+pub(crate) async fn wait_cancelled(cancel_rx: &mut watch::Receiver<bool>) {
+    if cancel_rx.wait_for(|&cancelled| cancelled).await.is_err() {
+        std::future::pending::<()>().await;
     }
-    std::fs::rename(part_path, final_path)
+}
+
+enum StopReason {
+    WriterDead,
+    Cancelled,
+}
+
+async fn wait_stop(
+    writer_dead_rx: &mut oneshot::Receiver<()>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> StopReason {
+    match future::select(writer_dead_rx, pin!(wait_cancelled(cancel_rx))).await {
+        Either::Left(_) => StopReason::WriterDead,
+        Either::Right(_) => StopReason::Cancelled,
+    }
+}
+
+fn cancelled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "download interrupted")
 }
 
 /// Resume state resolved when opening a [`PartFile`].
@@ -334,6 +397,7 @@ pub(crate) enum ResumeState<C: Checkpoint> {
 
 enum WriteMsg {
     Data(Vec<u8>, usize, Option<FooterState>),
+    Checkpoint(FooterState),
     Eof,
 }
 
@@ -356,12 +420,14 @@ enum SetupAction {
 
 fn finish_part_setup(
     file: File,
+    part_path: &Path,
     action: SetupAction,
     checksum: [u8; 16],
     target_size: u64,
 ) -> io::Result<(File, Vec<u8>)> {
     if matches!(action, SetupAction::InitFresh { restarted: true }) {
-        file.set_len(0)?;
+        file.set_len(0)
+            .map_err(|e| io_with_path(part_path, "truncate", e))?;
     }
     #[cfg(windows)]
     set_sparse(&file, true);
@@ -374,13 +440,16 @@ fn finish_part_setup(
         } => {
             let mut dict = vec![0u8; dict_len];
             if dict_len > 0 {
-                read_exact_at(&file, &mut dict, start_pos - dict_len as u64)?;
+                read_exact_at(&file, &mut dict, start_pos - dict_len as u64)
+                    .map_err(|e| io_with_path(part_path, "read resume dictionary from", e))?;
             }
             dict
         }
         SetupAction::InitFresh { .. } => {
-            write_all_at(&file, &Footer::new(checksum).to_bytes(), target_size)?;
-            file.sync_data()?;
+            write_all_at(&file, &Footer::new(checksum).to_bytes(), target_size)
+                .map_err(|e| io_with_path(part_path, "initialize", e))?;
+            file.sync_data()
+                .map_err(|e| io_with_path(part_path, "sync", e))?;
             Vec::new()
         }
     };
@@ -446,13 +515,14 @@ impl PartFile {
             };
 
         let (file, dict) = if needs_blocking {
+            let setup_part = part_path.clone();
             tokio::task::spawn_blocking(move || {
-                finish_part_setup(file, action, checksum, target_size)
+                finish_part_setup(file, &setup_part, action, checksum, target_size)
             })
             .await
             .expect("part setup task panicked")?
         } else {
-            finish_part_setup(file, action, checksum, target_size)?
+            finish_part_setup(file, &part_path, action, checksum, target_size)?
         };
 
         let (resume, start_pos) = match resume_cp {
@@ -480,13 +550,14 @@ impl PartFile {
     pub(crate) async fn write_from<R>(
         self,
         reader: R,
+        cancel_rx: watch::Receiver<bool>,
         on_written: impl Fn(u64) + Send + 'static,
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
         R::Checkpoint: Into<FooterState>,
     {
-        self.write_from_with_interval(reader, CHECKPOINT_INTERVAL, on_written)
+        self.write_from_with_interval(reader, CHECKPOINT_INTERVAL, cancel_rx, on_written)
             .await
     }
 
@@ -494,6 +565,7 @@ impl PartFile {
         self,
         mut reader: R,
         checkpoint_interval: u64,
+        mut cancel_rx: watch::Receiver<bool>,
         on_written: impl Fn(u64) + Send + 'static,
     ) -> io::Result<()>
     where
@@ -509,6 +581,7 @@ impl PartFile {
         let slots = (remaining.div_ceil(buf_size as u64) as usize).clamp(1, RING_SLOTS);
         let (data_tx, mut data_rx) = mpsc::channel::<WriteMsg>(slots);
         let (free_tx, mut free_rx) = mpsc::channel::<Vec<u8>>(slots);
+        let (writer_alive_tx, mut writer_dead_rx) = oneshot::channel::<()>();
         for _ in 0..slots {
             free_tx
                 .try_send(vec![0u8; buf_size])
@@ -516,6 +589,7 @@ impl PartFile {
         }
 
         let writer_handle = tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let _writer_alive = writer_alive_tx;
             let mut write_pos = self.start_pos;
 
             while let Some(msg) = data_rx.blocking_recv() {
@@ -531,16 +605,33 @@ impl PartFile {
                                     "stream exceeded declared target size",
                                 )
                             })?;
-                        write_all_at(&self.file, &buf[..n], write_pos)?;
+                        write_all_at(&self.file, &buf[..n], write_pos)
+                            .map_err(|e| io_with_path(&self.part_path, "write", e))?;
                         write_pos = end_pos;
 
                         let _ = free_tx.blocking_send(buf);
                         on_written(blk_len);
 
                         if let Some(state) = state {
-                            let footer = Footer::with_state(self.checksum, state);
-                            write_all_at(&self.file, &footer.to_bytes(), self.target_size)?;
+                            persist_checkpoint(
+                                &self.file,
+                                &self.part_path,
+                                self.checksum,
+                                self.target_size,
+                                state,
+                                false,
+                            )?;
                         }
+                    }
+                    WriteMsg::Checkpoint(state) => {
+                        persist_checkpoint(
+                            &self.file,
+                            &self.part_path,
+                            self.checksum,
+                            self.target_size,
+                            state,
+                            true,
+                        )?;
                     }
                     WriteMsg::Eof => {
                         if write_pos != self.target_size {
@@ -566,33 +657,111 @@ impl PartFile {
         });
 
         let read_res: io::Result<()> = async {
-            let mut last_checkpoint_offset = start_pos;
+            let mut last_persisted_offset = start_pos;
+            let mut latest_cp: Option<R::Checkpoint> = None;
             let min_delta = checkpoint_interval.max(1);
-            loop {
-                let Some(mut buf) = free_rx.recv().await else {
-                    break;
+            let mut pending_flush: Option<(Vec<u8>, usize)> = None;
+            let mut flush_cp = false;
+
+            let loop_res: io::Result<()> = 'outer: loop {
+                let mut buf = match future::select(
+                    pin!(wait_stop(&mut writer_dead_rx, &mut cancel_rx)),
+                    pin!(free_rx.recv()),
+                )
+                .await
+                {
+                    Either::Left((StopReason::WriterDead, _)) | Either::Right((None, _)) => {
+                        break 'outer Ok(());
+                    }
+                    Either::Left((StopReason::Cancelled, _)) => {
+                        flush_cp = true;
+                        break 'outer Err(cancelled_error());
+                    }
+                    Either::Right((Some(buf), _)) => buf,
                 };
-                let n = reader.read(&mut buf).await?;
-                if n == 0 {
+
+                let mut filled = 0;
+                let mut hit_eof = false;
+                let mut pending_state: Option<FooterState> = None;
+                let fill_start = Instant::now();
+
+                while filled < buf.len() {
+                    let read_step = match future::select(
+                        pin!(wait_stop(&mut writer_dead_rx, &mut cancel_rx)),
+                        pin!(reader.read(&mut buf[filled..])),
+                    )
+                    .await
+                    {
+                        Either::Left((StopReason::WriterDead, _)) => break 'outer Ok(()),
+                        Either::Left((StopReason::Cancelled, _)) => {
+                            if filled > 0 {
+                                pending_flush = Some((buf, filled));
+                            }
+                            flush_cp = true;
+                            break 'outer Err(cancelled_error());
+                        }
+                        Either::Right((res, _)) => res,
+                    };
+
+                    match read_step {
+                        Ok(0) => {
+                            hit_eof = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            filled += n;
+                            if let Some(cp) = reader
+                                .checkpoint()
+                                .filter(|cp| cp.output_offset() < target_size)
+                            {
+                                let cp_offset = cp.output_offset();
+                                if cp_offset >= last_persisted_offset.saturating_add(min_delta) {
+                                    last_persisted_offset = cp_offset;
+                                    latest_cp = None;
+                                    pending_state = Some(cp.into());
+                                    break;
+                                }
+                                latest_cp = Some(cp);
+                            }
+                            if fill_start.elapsed() >= COALESCE_MAX_WAIT {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            if e.kind() != io::ErrorKind::InvalidData {
+                                if filled > 0 {
+                                    pending_flush = Some((buf, filled));
+                                }
+                                flush_cp = true;
+                            }
+                            break 'outer Err(e);
+                        }
+                    }
+                }
+
+                if filled > 0
+                    && data_tx
+                        .send(WriteMsg::Data(buf, filled, pending_state))
+                        .await
+                        .is_err()
+                {
+                    break 'outer Ok(());
+                }
+                if hit_eof {
                     let _ = data_tx.send(WriteMsg::Eof).await;
-                    break;
+                    break 'outer Ok(());
                 }
-                let state = reader
-                    .checkpoint()
-                    .filter(|cp| {
-                        cp.output_offset() < target_size
-                            && cp.output_offset()
-                                >= last_checkpoint_offset.saturating_add(min_delta)
-                    })
-                    .map(|cp| {
-                        last_checkpoint_offset = cp.output_offset();
-                        cp.into()
-                    });
-                if data_tx.send(WriteMsg::Data(buf, n, state)).await.is_err() {
-                    break;
-                }
+            };
+
+            if let Some((buf, filled)) = pending_flush {
+                let _ = data_tx.send(WriteMsg::Data(buf, filled, None)).await;
             }
-            Ok(())
+            if flush_cp
+                && let Some(cp) = latest_cp.filter(|cp| cp.output_offset() > last_persisted_offset)
+            {
+                let _ = data_tx.send(WriteMsg::Checkpoint(cp.into())).await;
+            }
+            loop_res
         }
         .await;
 
@@ -804,6 +973,8 @@ mod tests {
         let payload: Vec<u8> = (0..128_000).map(|i| ((i * 29) ^ (i >> 5)) as u8).collect();
 
         rt.block_on(async {
+            let never_cancel = || watch::channel(false).1;
+
             // 1. First attempt fails after 64 KiB, leaving a valid checkpoint in .part
             let flaky = DataStream::new(ChunkedFailSource {
                 data: payload.clone(),
@@ -815,7 +986,7 @@ mod tests {
             assert!(matches!(resume, ResumeState::Fresh));
             let reader = flaky.open().await.unwrap();
             let err = part
-                .write_from_with_interval(reader, 16 * 1024, |_| {})
+                .write_from_with_interval(reader, 16 * 1024, never_cancel(), |_| {})
                 .await
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
@@ -840,7 +1011,7 @@ mod tests {
             let written = Arc::new(AtomicU64::new(0));
             let written_cb = Arc::clone(&written);
             let reader = healthy.resume(&cp, &dict).await.unwrap();
-            part.write_from_with_interval(reader, 16 * 1024, move |n| {
+            part.write_from_with_interval(reader, 16 * 1024, never_cancel(), move |n| {
                 written_cb.fetch_add(n, Ordering::Relaxed);
             })
             .await
@@ -852,18 +1023,208 @@ mod tests {
             assert!(!part_path_for(&final_path).exists());
             assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 
-            // 3. Corrupt .part file triggers Restarted; force=true starts Fresh
+            // 3. Corrupt .part file triggers Restarted; force=true starts Fresh while keeping final_path
             let corrupt_target = dir.0.join("corrupt.bin");
+            std::fs::write(&corrupt_target, b"existing good file").unwrap();
             std::fs::write(part_path_for(&corrupt_target), b"corrupt data").unwrap();
             let (_, resume) = PartFile::open(corrupt_target.clone(), checksum, &healthy, false)
                 .await
                 .unwrap();
             assert!(matches!(resume, ResumeState::Restarted));
 
-            let (_, resume) = PartFile::open(corrupt_target, checksum, &healthy, true)
+            let (_, resume) = PartFile::open(corrupt_target.clone(), checksum, &healthy, true)
                 .await
                 .unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
+            assert_eq!(
+                std::fs::read(&corrupt_target).unwrap(),
+                b"existing good file"
+            );
+
+            // 4. Coalescing + final checkpoint flush on transient error even when interval > written bytes
+            let coalesce_target = dir.0.join("coalesce.bin");
+            let write_calls = Arc::new(AtomicU64::new(0));
+            let write_calls_cb = Arc::clone(&write_calls);
+            let (part, _) = PartFile::open(coalesce_target.clone(), checksum, &healthy, false)
+                .await
+                .unwrap();
+            let reader = healthy.open().await.unwrap();
+            part.write_from_with_interval(reader, 1024 * 1024, never_cancel(), move |_| {
+                write_calls_cb.fetch_add(1, Ordering::Relaxed);
+            })
+            .await
+            .unwrap();
+            // 128_000 bytes delivered in 16 KiB chunks coalesces into a single disk write.
+            assert_eq!(write_calls.load(Ordering::Relaxed), 1);
+
+            let flush_target = dir.0.join("flush_on_err.bin");
+            let (part, _) = PartFile::open(flush_target.clone(), checksum, &flaky, false)
+                .await
+                .unwrap();
+            let reader = flaky.open().await.unwrap();
+            let err = part
+                .write_from_with_interval(reader, 1024 * 1024, never_cancel(), |_| {})
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+            let (_, resume) = PartFile::open(flush_target, checksum, &healthy, false)
+                .await
+                .unwrap();
+            match resume {
+                ResumeState::Resumed { checkpoint, .. } => {
+                    assert_eq!(checkpoint.output_offset(), 64 * 1024);
+                }
+                _ => panic!("expected final checkpoint flushed on transient error"),
+            }
+
+            // 5. Cancellation saves checkpoint; InvalidData does not advance checkpoint
+            enum AfterFirstRead {
+                Cancel(watch::Sender<bool>),
+                InvalidData,
+            }
+            struct OneShotReader {
+                data: Vec<u8>,
+                pos: usize,
+                after: Option<AfterFirstRead>,
+            }
+            impl AsyncRead for OneShotReader {
+                fn poll_read(
+                    mut self: Pin<&mut Self>,
+                    _cx: &mut Context<'_>,
+                    buf: &mut [u8],
+                ) -> Poll<io::Result<usize>> {
+                    if self.pos == 0 {
+                        let n = (32 * 1024).min(self.data.len()).min(buf.len());
+                        buf[..n].copy_from_slice(&self.data[..n]);
+                        self.pos = n;
+                        if matches!(self.after, Some(AfterFirstRead::Cancel(_)))
+                            && let Some(AfterFirstRead::Cancel(tx)) = self.after.take()
+                        {
+                            let _ = tx.send(true);
+                        }
+                        return Poll::Ready(Ok(n));
+                    }
+                    match self.after.take() {
+                        Some(AfterFirstRead::InvalidData) => Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "simulated stream corruption",
+                        ))),
+                        _ => Poll::Pending,
+                    }
+                }
+            }
+            impl ResumableAsyncRead for OneShotReader {
+                type Checkpoint = OffsetCheckpoint;
+                fn checkpoint(&self) -> Option<OffsetCheckpoint> {
+                    (self.pos > 0 && self.pos < self.data.len())
+                        .then_some(OffsetCheckpoint::new(self.pos as u64))
+                }
+            }
+
+            let cancel_target = dir.0.join("cancelled.bin");
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let (part, _) = PartFile::open(cancel_target.clone(), checksum, &healthy, false)
+                .await
+                .unwrap();
+            let err = part
+                .write_from_with_interval(
+                    OneShotReader {
+                        data: payload.clone(),
+                        pos: 0,
+                        after: Some(AfterFirstRead::Cancel(cancel_tx)),
+                    },
+                    1024 * 1024,
+                    cancel_rx,
+                    |_| {},
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+            let (_, resume) = PartFile::open(cancel_target, checksum, &healthy, false)
+                .await
+                .unwrap();
+            match resume {
+                ResumeState::Resumed { checkpoint, .. } => {
+                    assert_eq!(checkpoint.output_offset(), 32 * 1024);
+                }
+                _ => panic!("expected checkpoint saved on cancellation"),
+            }
+
+            let invalid_target = dir.0.join("invalid_data.bin");
+            let (part, _) = PartFile::open(invalid_target.clone(), checksum, &healthy, false)
+                .await
+                .unwrap();
+            let err = part
+                .write_from_with_interval(
+                    OneShotReader {
+                        data: payload.clone(),
+                        pos: 0,
+                        after: Some(AfterFirstRead::InvalidData),
+                    },
+                    1024 * 1024,
+                    never_cancel(),
+                    |_| {},
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            let (_, resume) = PartFile::open(invalid_target, checksum, &healthy, false)
+                .await
+                .unwrap();
+            assert!(matches!(resume, ResumeState::Fresh));
+
+            // 6. Writer error fails fast even if the reader stalls indefinitely on the next read
+            let overflow_target = dir.0.join("overflow.bin");
+            let big_source = DataStream::new(vec![0u8; 4 * 1024 * 1024]);
+            struct OverflowThenHang {
+                step: usize,
+            }
+            impl AsyncRead for OverflowThenHang {
+                fn poll_read(
+                    mut self: Pin<&mut Self>,
+                    _cx: &mut Context<'_>,
+                    buf: &mut [u8],
+                ) -> Poll<io::Result<usize>> {
+                    match self.step {
+                        0 | 1 => {
+                            self.step += 1;
+                            buf.fill(0xAA);
+                            Poll::Ready(Ok(buf.len()))
+                        }
+                        2 => {
+                            // Exceeds 4 MiB target_size; fill the slot so it flushes to the
+                            // writer while the reader grabs the second slot and hangs on step 3.
+                            self.step += 1;
+                            buf.fill(0xBB);
+                            Poll::Ready(Ok(buf.len()))
+                        }
+                        _ => Poll::Pending,
+                    }
+                }
+            }
+            impl ResumableAsyncRead for OverflowThenHang {
+                type Checkpoint = OffsetCheckpoint;
+                fn checkpoint(&self) -> Option<OffsetCheckpoint> {
+                    None
+                }
+            }
+
+            let (part, _) = PartFile::open(overflow_target, checksum, &big_source, false)
+                .await
+                .unwrap();
+            let err = tokio::time::timeout(
+                Duration::from_secs(2),
+                part.write_from_with_interval(
+                    OverflowThenHang { step: 0 },
+                    CHECKPOINT_INTERVAL,
+                    never_cancel(),
+                    |_| {},
+                ),
+            )
+            .await
+            .expect("writer failure must wake stalled reader without timing out")
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         });
     }
 
@@ -992,7 +1353,9 @@ mod tests {
                 .unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
             let reader = empty_src.open().await.unwrap();
-            part.write_from(reader, |_| {}).await.unwrap();
+            part.write_from(reader, watch::channel(false).1, |_| {})
+                .await
+                .unwrap();
             assert_eq!(std::fs::read(&empty_path).unwrap(), b"");
         });
     }

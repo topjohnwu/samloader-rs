@@ -16,20 +16,76 @@ mod part;
 mod progress;
 
 use crate::cli::{ALL_COMPONENTS, DownloadArgs, OdinComponent, component_key};
-use part::{FooterState, PartFile, ResumeState};
+use part::{FooterState, PartFile, ResumeState, part_path_for, wait_cancelled};
 use progress::{CliObserver, FileLabel};
+use samloader_fus::futures::future::{self, Either, try_join_all};
 use samloader_fus::{
-    BinaryInform, Checkpoint, DataStream, FusClient, ParallelDataSource, ResumableStream,
-    ZipArchive, ZipEntry,
+    BinaryInform, Checkpoint, DataStream, DownloadSession, FusClient, ParallelDataSource,
+    ResumableStream, ZipArchive, ZipEntry,
 };
 use std::error::Error;
+use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 fn is_complete(path: &Path, size_bounds: (u64, u64)) -> bool {
     let (min_size, max_size) = size_bounds;
-    path.metadata()
-        .is_ok_and(|meta| meta.is_file() && (min_size..=max_size).contains(&meta.len()))
+    !part_path_for(path).exists()
+        && path
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && (min_size..=max_size).contains(&meta.len()))
+}
+
+struct CancelGuard {
+    rx: watch::Receiver<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CancelGuard {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = tx.send(true);
+            }
+        });
+        Self { rx, task }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn cancellable_io<T>(
+    cancel_rx: &mut watch::Receiver<bool>,
+    fut: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    match future::select(pin!(wait_cancelled(cancel_rx)), pin!(fut)).await {
+        Either::Left(_) => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "download interrupted",
+        )),
+        Either::Right((res, _)) => res,
+    }
+}
+
+async fn init_parallel_source(
+    client: FusClient,
+    info: BinaryInform,
+    concurrency: usize,
+    observer: &Arc<CliObserver>,
+) -> Result<ParallelDataSource<DownloadSession>, Box<dyn Error>> {
+    let session = client
+        .init_download(info)
+        .await
+        .map_err(|e| format!("Failed to initialize download: {e}"))?;
+    Ok(ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(observer)))
 }
 
 fn select_entries<'a>(
@@ -83,11 +139,16 @@ async fn transfer_file<S>(
     force: bool,
     observer: &CliObserver,
     label: Option<FileLabel<'_>>,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>>
 where
     S: ResumableStream,
     S::Checkpoint: Into<FooterState> + TryFrom<FooterState>,
 {
+    if *cancel_rx.borrow() {
+        return Err("Download interrupted".into());
+    }
+
     let target_size = source.output_size();
     let (part, resume) = PartFile::open(final_path, checksum, source, force).await?;
 
@@ -106,16 +167,19 @@ where
         matches!(resume, ResumeState::Restarted),
     );
 
+    let write_cancel = cancel_rx.clone();
     let res = async {
         match resume {
             ResumeState::Resumed { checkpoint, dict } => {
-                let reader = source.resume(&checkpoint, &dict).await?;
+                let reader = cancellable_io(cancel_rx, source.resume(&checkpoint, &dict)).await?;
                 drop(dict);
-                part.write_from(reader, progress.on_written()).await
+                part.write_from(reader, write_cancel, progress.on_written())
+                    .await
             }
             ResumeState::Fresh | ResumeState::Restarted => {
-                let reader = source.open().await?;
-                part.write_from(reader, progress.on_written()).await
+                let reader = cancellable_io(cancel_rx, source.open()).await?;
+                part.write_from(reader, write_cancel, progress.on_written())
+                    .await
             }
         }
     }
@@ -125,6 +189,10 @@ where
         Ok(()) => {
             progress.finish();
             Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::Interrupted && *cancel_rx.borrow() => {
+            progress.interrupt();
+            Err("Download interrupted".into())
         }
         Err(e) => {
             progress.abandon();
@@ -162,15 +230,20 @@ async fn download_raw(
         final_path.display()
     );
 
-    let session = client
-        .init_download(info)
-        .await
-        .map_err(|e| format!("Failed to initialize download: {e}"))?;
-    let parallel =
-        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer));
+    let parallel = init_parallel_source(client, info, concurrency, &observer).await?;
     let stream = DataStream::new(parallel);
+    let mut cancel = CancelGuard::new();
 
-    transfer_file(&stream, final_path, checksum, args.force, &observer, None).await
+    transfer_file(
+        &stream,
+        final_path,
+        checksum,
+        args.force,
+        &observer,
+        None,
+        &mut cancel.rx,
+    )
+    .await
 }
 
 async fn download_archive(
@@ -194,19 +267,14 @@ async fn download_archive(
     };
 
     let filename = info.filename().to_owned();
-    let session = client
-        .init_download(info)
-        .await
-        .map_err(|e| format!("Failed to initialize download: {e}"))?;
-    let parallel =
-        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer));
+    let parallel = init_parallel_source(client, info, concurrency, &observer).await?;
     let archive = ZipArchive::open(parallel)
         .await
         .map_err(|e| format!("Failed to open firmware archive: {e}"))?;
 
     let selected = select_entries(archive.entries(), &args.select)?;
 
-    let mut pending = Vec::new();
+    let mut to_open = Vec::new();
     for entry in selected {
         let final_path = out_dir.join(entry.name());
         let size = entry.uncompressed_size();
@@ -217,16 +285,24 @@ async fn download_archive(
             );
             continue;
         }
-        let stream = archive
-            .open_entry(entry)
-            .await
-            .map_err(|e| format!("Failed to open archive entry '{}': {e}", entry.name()))?;
-        pending.push((stream, final_path));
+        to_open.push((entry, final_path));
     }
 
-    if pending.is_empty() {
+    if to_open.is_empty() {
         return Ok(());
     }
+
+    let pending = try_join_all(to_open.into_iter().map(|(entry, final_path)| {
+        let archive = &archive;
+        async move {
+            let stream = archive
+                .open_entry(entry)
+                .await
+                .map_err(|e| format!("Failed to open archive entry '{}': {e}", entry.name()))?;
+            Ok::<_, String>((stream, final_path))
+        }
+    }))
+    .await?;
 
     let total = pending.len();
     println!(
@@ -234,6 +310,7 @@ async fn download_archive(
         out_dir.display()
     );
 
+    let mut cancel = CancelGuard::new();
     for (index, (stream, final_path)) in pending.into_iter().enumerate() {
         let label = FileLabel {
             name: stream.entry().name(),
@@ -247,6 +324,7 @@ async fn download_archive(
             args.force,
             &observer,
             Some(label),
+            &mut cancel.rx,
         )
         .await?;
     }
@@ -382,5 +460,31 @@ mod tests {
         let err = select_entries(entries, &[OdinComponent::Cp]).unwrap_err();
         assert!(err.contains("'cp'"), "err={err}");
         assert!(err.contains("bl, ap, home_csc"), "err={err}");
+    }
+
+    #[test]
+    fn test_is_complete_respects_active_part_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "samloader-download-complete-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("fw.zip");
+        std::fs::write(&file, vec![0u8; 100]).unwrap();
+        assert!(is_complete(&file, (90, 100)));
+        assert!(!is_complete(&file, (101, 200)));
+
+        // Presence of a sibling `.part` file means an interrupted `--force` download
+        // is still in progress and must not be skipped as complete.
+        let part = part_path_for(&file);
+        std::fs::write(&part, b"in-progress").unwrap();
+        assert!(!is_complete(&file, (90, 100)));
+
+        std::fs::remove_file(&part).unwrap();
+        assert!(is_complete(&file, (90, 100)));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

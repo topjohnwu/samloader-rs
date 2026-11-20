@@ -22,7 +22,7 @@ use indicatif::{
 use samloader_fus::{TransferObserver, TransferWarning};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const RAW_PROGRESS_TEMPLATE: &str =
@@ -96,20 +96,38 @@ impl RateEstimator {
     }
 }
 
+struct RateEstimators {
+    wire: RateEstimator,
+    net: RateEstimator,
+    out: RateEstimator,
+}
+
+impl RateEstimators {
+    fn new(now: Instant) -> Self {
+        Self {
+            wire: RateEstimator::new(now),
+            net: RateEstimator::new(now),
+            out: RateEstimator::new(now),
+        }
+    }
+}
+
 struct TransferMetrics {
     rem_total_comp: u64,
+    resumed_out: u64,
     wire_bytes: AtomicU64,
     net_comp_bytes: AtomicU64,
-    est: Mutex<RateEstimator>,
+    est: Mutex<RateEstimators>,
 }
 
 impl TransferMetrics {
-    fn new(rem_total_comp: u64) -> Self {
+    fn new(rem_total_comp: u64, resumed_out: u64) -> Self {
         Self {
             rem_total_comp,
+            resumed_out,
             wire_bytes: AtomicU64::new(0),
             net_comp_bytes: AtomicU64::new(0),
-            est: Mutex::new(RateEstimator::new(Instant::now())),
+            est: Mutex::new(RateEstimators::new(Instant::now())),
         }
     }
 
@@ -120,18 +138,28 @@ impl TransferMetrics {
         }
     }
 
-    fn eta(&self, state: &ProgressState) -> Duration {
+    fn eta(&self, state: &ProgressState) -> Option<Duration> {
         if state.is_finished() {
-            return Duration::ZERO;
+            return Some(Duration::ZERO);
         }
+        let now = Instant::now();
         let done_comp = self.net_comp_bytes.load(Ordering::Relaxed);
         let rem_comp = self.rem_total_comp.saturating_sub(done_comp);
-        let rate = self.est.lock().unwrap().bytes_per_sec(Instant::now());
-        if rate >= 1.0 {
-            Duration::from_secs_f64((rem_comp as f64 / rate).min(u32::MAX as f64))
+        let rem_out = state.len().unwrap_or(0).saturating_sub(state.pos());
+        let est = self.est.lock().unwrap();
+
+        let (remaining, rate) = if rem_comp > 0 {
+            // Use net compressed goodput so retried traffic does not make ETA optimistic.
+            (rem_comp, est.net.bytes_per_sec(now))
+        } else if rem_out > 0 {
+            // Network prefetch finished; estimate remaining decompression/disk drain time.
+            (rem_out, est.out.bytes_per_sec(now))
         } else {
-            Duration::ZERO
-        }
+            return Some(Duration::ZERO);
+        };
+
+        (rate >= 1.0)
+            .then(|| Duration::from_secs_f64((remaining as f64 / rate).min(u32::MAX as f64)))
     }
 
     fn speed(&self, state: &ProgressState) -> f64 {
@@ -143,7 +171,7 @@ impl TransferMetrics {
                 0.0
             }
         } else {
-            self.est.lock().unwrap().bytes_per_sec(Instant::now())
+            self.est.lock().unwrap().wire.bytes_per_sec(Instant::now())
         }
     }
 }
@@ -160,8 +188,13 @@ impl SpeedTracker {
 
     fn eta_tracker(&self) -> impl ProgressTracker + use<> {
         let metrics = Arc::clone(&self.metrics);
-        move |state: &ProgressState, w: &mut dyn fmt::Write| {
-            let _ = write!(w, "{}", FormattedDuration(metrics.eta(state)));
+        move |state: &ProgressState, w: &mut dyn fmt::Write| match metrics.eta(state) {
+            Some(dur) => {
+                let _ = write!(w, "{}", FormattedDuration(dur));
+            }
+            None => {
+                let _ = w.write_str("--:--:--");
+            }
         }
     }
 }
@@ -173,20 +206,24 @@ impl ProgressTracker for SpeedTracker {
 
     fn tick(&mut self, state: &ProgressState, now: Instant) {
         if !state.is_finished() {
-            self.metrics
-                .est
-                .lock()
-                .unwrap()
-                .record(self.metrics.wire_bytes.load(Ordering::Relaxed), now);
+            let wire = self.metrics.wire_bytes.load(Ordering::Relaxed);
+            let net = self.metrics.net_comp_bytes.load(Ordering::Relaxed);
+            let out = state.pos().saturating_sub(self.metrics.resumed_out);
+            let mut est = self.metrics.est.lock().unwrap();
+            est.wire.record(wire, now);
+            est.net.record(net, now);
+            est.out.record(out, now);
         }
     }
 
-    fn reset(&mut self, _state: &ProgressState, now: Instant) {
-        self.metrics
-            .est
-            .lock()
-            .unwrap()
-            .reset(self.metrics.wire_bytes.load(Ordering::Relaxed), now);
+    fn reset(&mut self, state: &ProgressState, now: Instant) {
+        let wire = self.metrics.wire_bytes.load(Ordering::Relaxed);
+        let net = self.metrics.net_comp_bytes.load(Ordering::Relaxed);
+        let out = state.pos().saturating_sub(self.metrics.resumed_out);
+        let mut est = self.metrics.est.lock().unwrap();
+        est.wire.reset(wire, now);
+        est.net.reset(net, now);
+        est.out.reset(out, now);
     }
 
     fn write(&self, state: &ProgressState, w: &mut dyn fmt::Write) {
@@ -210,21 +247,21 @@ struct ActiveTransfer {
 /// Shared [`TransferObserver`] routing wire-byte metrics and verbose warnings to the
 /// currently active [`TransferProgress`].
 pub(crate) struct CliObserver {
-    active: Mutex<Option<ActiveTransfer>>,
+    active: RwLock<Option<ActiveTransfer>>,
     verbose: bool,
 }
 
 impl CliObserver {
     pub(crate) fn new(verbose: bool) -> Self {
         Self {
-            active: Mutex::new(None),
+            active: RwLock::new(None),
             verbose,
         }
     }
 
     /// Creates an isolated progress bar for a single file transfer and attaches it to
     /// this observer until the returned [`TransferProgress`] is finished, abandoned,
-    /// or dropped.
+    /// interrupted, or dropped.
     pub(crate) fn start_transfer<'a>(
         &'a self,
         label: Option<FileLabel<'a>>,
@@ -252,7 +289,7 @@ impl CliObserver {
         restarted: bool,
         target: ProgressDrawTarget,
     ) -> TransferProgress<'a> {
-        let metrics = Arc::new(TransferMetrics::new(rem_total_comp));
+        let metrics = Arc::new(TransferMetrics::new(rem_total_comp, resumed_out));
         let speed_tracker = SpeedTracker::new(Arc::clone(&metrics));
         let eta_tracker = speed_tracker.eta_tracker();
         let template = if label.is_some() {
@@ -298,7 +335,7 @@ impl CliObserver {
             pb.enable_steady_tick(Duration::from_secs(1));
         }
 
-        *self.active.lock().unwrap() = Some(ActiveTransfer {
+        *self.active.write().unwrap() = Some(ActiveTransfer {
             pb: pb.clone(),
             metrics: Arc::clone(&metrics),
         });
@@ -315,7 +352,7 @@ impl CliObserver {
 
 impl TransferObserver for CliObserver {
     fn on_bytes(&self, wire_bytes: u64, net_bytes: u64) {
-        if let Some(active) = self.active.lock().unwrap().as_ref() {
+        if let Some(active) = self.active.read().unwrap().as_ref() {
             active.metrics.record_bytes(wire_bytes, net_bytes);
         }
     }
@@ -342,7 +379,7 @@ impl TransferObserver for CliObserver {
             ),
             other => format!("Download warning: {other:?}"),
         };
-        let pb = self.active.lock().unwrap().as_ref().map(|a| a.pb.clone());
+        let pb = self.active.read().unwrap().as_ref().map(|a| a.pb.clone());
         if let Some(pb) = pb {
             pb.println(msg);
         } else {
@@ -353,7 +390,8 @@ impl TransferObserver for CliObserver {
 
 /// RAII handle owning a single file's [`ProgressBar`] and isolated transfer metrics.
 ///
-/// Detaches automatically from [`CliObserver`] when finished, abandoned, or dropped.
+/// Detaches automatically from [`CliObserver`] when finished, abandoned, interrupted,
+/// or dropped.
 pub(crate) struct TransferProgress<'a> {
     observer: &'a CliObserver,
     pb: ProgressBar,
@@ -392,10 +430,19 @@ impl TransferProgress<'_> {
 
     /// Abandons the progress bar after a transfer error.
     pub(crate) fn abandon(self) {
+        self.abandon_with("Failed to extract");
+    }
+
+    /// Abandons the progress bar after user interruption (e.g. Ctrl-C).
+    pub(crate) fn interrupt(self) {
+        self.abandon_with("Interrupted");
+    }
+
+    fn abandon_with(self, verb: &str) {
         self.detach();
         if let Some(label) = self.label {
             self.pb.abandon_with_message(format!(
-                "[{}/{}] Failed to extract {}",
+                "[{}/{}] {verb} {}",
                 label.index + 1,
                 label.total,
                 label.name
@@ -409,7 +456,7 @@ impl TransferProgress<'_> {
     }
 
     fn detach(&self) {
-        let mut active = self.observer.active.lock().unwrap();
+        let mut active = self.observer.active.write().unwrap();
         if active
             .as_ref()
             .is_some_and(|a| Arc::ptr_eq(&a.metrics, &self.metrics))
@@ -456,35 +503,54 @@ mod tests {
         );
         let pb1 = p1.pb.clone();
         let m1 = Arc::clone(&p1.metrics);
+        let eta1 = SpeedTracker::new(Arc::clone(&m1)).eta_tracker();
 
+        // Before any bytes/rate arrive, ETA displays "--:--:--" instead of "00:00:00".
+        let mut initial_eta = String::new();
+        pb1.update(|state| eta1.write(state, &mut initial_eta));
+        assert_eq!(initial_eta, "--:--:--");
+
+        // Simulate 4 MiB net compressed + 4 MiB retried wire traffic (8 MiB wire total over 2s).
+        // Net goodput is 2 MiB/s -> remaining 6 MiB compressed yields ETA of 3s (not skewed by retries).
         obs.on_bytes(4 * mib, 4 * mib);
-        assert_eq!(m1.wire_bytes.load(Ordering::Relaxed), 4 * mib);
+        obs.on_bytes(4 * mib, 0);
+        assert_eq!(m1.wire_bytes.load(Ordering::Relaxed), 8 * mib);
         assert_eq!(m1.net_comp_bytes.load(Ordering::Relaxed), 4 * mib);
 
-        // Verify live ETA tracker reflects remaining compressed bytes (6 MiB) / wire rate (2 MiB/s) = 3s.
         {
             let now = Instant::now();
             let mut est = m1.est.lock().unwrap();
-            est.reset(0, now - Duration::from_secs(2));
-            est.record(4 * mib, now);
+            est.wire.reset(0, now - Duration::from_secs(2));
+            est.wire.record(8 * mib, now);
+            est.net.reset(0, now - Duration::from_secs(2));
+            est.net.record(4 * mib, now);
         }
-        let eta1 = SpeedTracker::new(Arc::clone(&m1)).eta_tracker();
         let mut live_eta = String::new();
         pb1.update(|state| eta1.write(state, &mut live_eta));
         assert_eq!(live_eta, "00:00:03");
 
-        // Simulate 1 MiB of retried wire traffic (wire increases, net does not).
-        obs.on_bytes(mib, 0);
+        // Network finishes prefetching remaining 6 MiB compressed while 20 MiB of output
+        // still remain to drain at 10 MiB/s -> ETA falls back to output drain rate (2s).
         obs.on_bytes(6 * mib, 6 * mib);
-        assert_eq!(m1.wire_bytes.load(Ordering::Relaxed), 11 * mib);
+        assert_eq!(m1.wire_bytes.load(Ordering::Relaxed), 14 * mib);
         assert_eq!(m1.net_comp_bytes.load(Ordering::Relaxed), 10 * mib);
-
         let on_written1 = p1.on_written();
-        on_written1(30 * mib);
+        on_written1(10 * mib);
+        {
+            let now = Instant::now();
+            let mut est = m1.est.lock().unwrap();
+            est.out.reset(0, now - Duration::from_secs(1));
+            est.out.record(10 * mib, now);
+        }
+        let mut drain_eta = String::new();
+        pb1.update(|state| eta1.write(state, &mut drain_eta));
+        assert_eq!(drain_eta, "00:00:02");
+
+        on_written1(20 * mib);
         assert_eq!(pb1.position(), target_uncomp);
         pb1.set_elapsed(Duration::from_secs(2));
         p1.finish();
-        assert!(obs.active.lock().unwrap().is_none());
+        assert!(obs.active.read().unwrap().is_none());
 
         let mut finished_eta = String::new();
         pb1.update(|state| eta1.write(state, &mut finished_eta));
@@ -512,14 +578,14 @@ mod tests {
         p2.on_written()(16 * mib);
         pb2.set_elapsed(Duration::from_secs(1));
         p2.finish();
-        assert!(obs.active.lock().unwrap().is_none());
+        assert!(obs.active.read().unwrap().is_none());
 
-        // File 1's finished speed remains intact (5.5 MiB/s) even after File 2 completed!
+        // File 1's finished speed remains intact (7.0 MiB/s) even after File 2 completed!
         let tracker1 = SpeedTracker::new(m1);
         let mut formatted1 = String::new();
         pb1.update(|state| tracker1.write(state, &mut formatted1));
         assert!(
-            formatted1.starts_with("5.5") && formatted1.ends_with("MiB/s"),
+            formatted1.starts_with("7.0") && formatted1.ends_with("MiB/s"),
             "unexpected file 1 final speed: {formatted1}"
         );
 
@@ -531,7 +597,19 @@ mod tests {
             "unexpected file 2 final speed: {formatted2}"
         );
 
-        // Dropping an unfinished TransferProgress detaches automatically via RAII.
+        // Interrupting or dropping an unfinished TransferProgress detaches automatically.
+        let p_int = obs.start_transfer_with_target(
+            None,
+            1024,
+            1024,
+            0,
+            false,
+            ProgressDrawTarget::hidden(),
+        );
+        assert!(obs.active.read().unwrap().is_some());
+        p_int.interrupt();
+        assert!(obs.active.read().unwrap().is_none());
+
         {
             let _p3 = obs.start_transfer_with_target(
                 None,
@@ -541,9 +619,9 @@ mod tests {
                 false,
                 ProgressDrawTarget::hidden(),
             );
-            assert!(obs.active.lock().unwrap().is_some());
+            assert!(obs.active.read().unwrap().is_some());
         }
-        assert!(obs.active.lock().unwrap().is_none());
+        assert!(obs.active.read().unwrap().is_none());
     }
 
     #[test]
