@@ -9,5 +9,5 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 wasm-bindgen-cli-support = { workspace = true }

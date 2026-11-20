@@ -20,12 +20,12 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, default-features = false, features = ["time"] }
 # Native nusb runs blocking syscalls (open, claim, clear_halt, ...) on a
 # thread pool when awaited; without a runtime feature it panics instead.
 nusb = { workspace = true, optional = true, features = ["tokio"] }
-rusb = { workspace = true, optional = true }
-serialport = { workspace = true, optional = true }
+rusb = { workspace = true, optional = true, features = ["vendored"] }
+serialport = { workspace = true, optional = true, default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-timer = { workspace = true, features = ["wasm-bindgen"] }
