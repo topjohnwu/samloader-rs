@@ -1391,7 +1391,6 @@ dependencies = [
  "binrw",
  "cfg-if",
  "clap",
- "fast-md5",
  "indicatif",
  "libc",
  "samloader-fus",
@@ -1406,7 +1405,6 @@ name = "samloader-fus"
 version = "3.0.0"
 dependencies = [
  "aes",
- "binrw",
  "ecb",
  "fast-md5",
  "futures",

@@ -15,39 +15,31 @@
 //! Stateful ZIP entry [`ResumableAsyncRead`] supporting `Stored` and `Z_BLOCK`-checkpointed `Deflate`.
 
 use crate::compat::MaybeSend;
-use crate::stream::{Checkpoint, ResumableAsyncRead};
-use binrw::binrw;
+use crate::stream::{Checkpoint, ResumableAsyncRead, poll_read_retry_eintr};
+use crate::zip::Compression;
 use core::ffi::c_int;
 use futures::io::AsyncRead;
-use rawzip::CompressionMethod;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 const DEFLATE_IN_BUF_SIZE: usize = 64 * 1024;
 const MAX_DICT_SIZE: usize = 32_768;
 
-#[binrw]
-#[brw(little)]
+const TAG_STORED: u8 = 0;
+const TAG_DEFLATE: u8 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZipCheckpointKind {
-    #[brw(magic = 1u8)]
     Stored {
         offset: u64,
-        #[br(assert(offset > 0 || crc32 == 0))]
         crc32: u32,
     },
-    #[brw(magic = 2u8)]
     Deflate {
         comp_offset: u64,
         uncomp_offset: u64,
         crc32: u32,
-        #[br(assert(
-            prime_bits <= 7
-                && (comp_offset > 0 || (uncomp_offset == 0 && crc32 == 0 && prime_bits == 0))
-        ))]
         prime_bits: u8,
-        #[br(assert(prime_value < (1u8 << prime_bits)))]
         prime_value: u8,
     },
 }
@@ -55,12 +47,11 @@ enum ZipCheckpointKind {
 /// Opaque, serializable mid-stream [`Checkpoint`] for [`ZipEntrySession`](crate::ZipEntrySession)
 /// streams (`Stored` or `Deflate`).
 ///
-/// Implements [`binrw::BinRead`] and [`binrw::BinWrite`] in a compact little-endian
-/// format, and can be passed to [`ResumableStream::resume`](crate::ResumableStream::resume)
-/// along with the trailing uncompressed dictionary bytes indicated by
+/// Serialize with [`write_to`](Self::write_to) and deserialize with
+/// [`read_from`](Self::read_from), then pass to
+/// [`ResumableStream::resume`](crate::ResumableStream::resume) along with the trailing
+/// uncompressed dictionary bytes indicated by
 /// [`ResumableStream::resume_dict_len`](crate::ResumableStream::resume_dict_len).
-#[binrw]
-#[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZipCheckpoint(ZipCheckpointKind);
 
@@ -81,26 +72,107 @@ impl Checkpoint for ZipCheckpoint {
 }
 
 impl ZipCheckpoint {
+    /// Serializes this checkpoint in a compact little-endian binary format
+    /// (13 bytes for `Stored`, 23 bytes for `Deflate`).
+    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        match self.0 {
+            ZipCheckpointKind::Stored { offset, crc32 } => {
+                let mut buf = [0u8; 13];
+                buf[0] = TAG_STORED;
+                buf[1..9].copy_from_slice(&offset.to_le_bytes());
+                buf[9..13].copy_from_slice(&crc32.to_le_bytes());
+                writer.write_all(&buf)
+            }
+            ZipCheckpointKind::Deflate {
+                comp_offset,
+                uncomp_offset,
+                crc32,
+                prime_bits,
+                prime_value,
+            } => {
+                let mut buf = [0u8; 23];
+                buf[0] = TAG_DEFLATE;
+                buf[1..9].copy_from_slice(&comp_offset.to_le_bytes());
+                buf[9..17].copy_from_slice(&uncomp_offset.to_le_bytes());
+                buf[17..21].copy_from_slice(&crc32.to_le_bytes());
+                buf[21] = prime_bits;
+                buf[22] = prime_value;
+                writer.write_all(&buf)
+            }
+        }
+    }
+
+    /// Deserializes and validates a checkpoint previously written by [`write_to`](Self::write_to).
+    pub fn read_from(reader: &mut impl io::Read) -> io::Result<Self> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        match tag[0] {
+            TAG_STORED => {
+                let mut buf = [0u8; 12];
+                reader.read_exact(&mut buf)?;
+                let offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+                let crc32 = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+                if offset == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "stored checkpoint offset must be non-zero",
+                    ));
+                }
+                Ok(Self(ZipCheckpointKind::Stored { offset, crc32 }))
+            }
+            TAG_DEFLATE => {
+                let mut buf = [0u8; 22];
+                reader.read_exact(&mut buf)?;
+                let comp_offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+                let uncomp_offset = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+                let crc32 = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+                let prime_bits = buf[20];
+                let prime_value = buf[21];
+                if comp_offset == 0 || prime_bits > 7 || prime_value >= (1u8 << prime_bits) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid deflate checkpoint state",
+                    ));
+                }
+                Ok(Self(ZipCheckpointKind::Deflate {
+                    comp_offset,
+                    uncomp_offset,
+                    crc32,
+                    prime_bits,
+                    prime_value,
+                }))
+            }
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown ZIP checkpoint tag: {other}"),
+            )),
+        }
+    }
+
     pub(crate) fn resume_dict_len(
         &self,
-        compression: CompressionMethod,
+        compression: Compression,
         comp_size: u64,
         uncomp_size: u64,
     ) -> Option<usize> {
         match (compression, self.0) {
-            (CompressionMethod::STORE, ZipCheckpointKind::Stored { offset, .. })
-                if offset <= comp_size && offset <= uncomp_size =>
+            (Compression::Stored, ZipCheckpointKind::Stored { offset, .. })
+                if offset > 0 && offset < comp_size && offset < uncomp_size =>
             {
                 Some(0)
             }
             (
-                CompressionMethod::DEFLATE,
+                Compression::Deflate,
                 ZipCheckpointKind::Deflate {
                     comp_offset,
                     uncomp_offset,
+                    prime_bits,
                     ..
                 },
-            ) if comp_offset <= comp_size && uncomp_offset <= uncomp_size => {
+            ) if comp_offset > 0
+                && uncomp_offset < uncomp_size
+                && (comp_offset < comp_size || (comp_offset == comp_size && prime_bits > 0)) =>
+            {
                 Some(uncomp_offset.min(MAX_DICT_SIZE as u64) as usize)
             }
             _ => None,
@@ -263,6 +335,7 @@ impl DeflateState {
 
                     if at_block_end
                         && !self.in_final_block
+                        && self.comp_offset > 0
                         && self.uncomp_offset < self.expected_size
                     {
                         let prime_bits = (self.strm.data_type & 7) as u8;
@@ -347,75 +420,23 @@ enum ZipDecoderMode {
     Deflate(Box<DeflateState>),
 }
 
-pub(crate) struct ZipDecoder {
-    mode: ZipDecoderMode,
-}
-
-fn check_output_add(offset: u64, max_size: u64, len: usize) -> io::Result<u64> {
-    offset
-        .checked_add(len as u64)
-        .filter(|&end| end <= max_size)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("decoded stream exceeded expected size ({max_size} bytes)"),
-            )
-        })
-}
-
-fn verify_zip_eof(
-    uncomp_offset: u64,
-    expected_size: u64,
-    crc32: u32,
-    expected_crc32: u32,
-) -> io::Result<()> {
-    if uncomp_offset != expected_size {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!(
-                "uncompressed length mismatch: expected {expected_size} bytes, got {uncomp_offset}"
-            ),
-        ));
-    }
-
-    if crc32 != expected_crc32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("CRC-32 mismatch: expected {expected_crc32:#010x}, got {crc32:#010x}"),
-        ));
-    }
-
-    Ok(())
-}
-
-impl ZipDecoder {
-    pub(crate) fn new(
-        compression: CompressionMethod,
-        expected_crc32: u32,
-        expected_size: u64,
-    ) -> io::Result<Self> {
-        let mode = match compression {
-            CompressionMethod::STORE => ZipDecoderMode::Stored {
+impl ZipDecoderMode {
+    fn new(compression: Compression, expected_crc32: u32, expected_size: u64) -> io::Result<Self> {
+        Ok(match compression {
+            Compression::Stored => Self::Stored {
                 expected_crc32,
                 expected_size,
                 offset: 0,
                 crc32: 0,
             },
-            CompressionMethod::DEFLATE => {
-                ZipDecoderMode::Deflate(Box::new(DeflateState::new(expected_crc32, expected_size)?))
+            Compression::Deflate => {
+                Self::Deflate(Box::new(DeflateState::new(expected_crc32, expected_size)?))
             }
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("unsupported ZIP compression method: {other}"),
-                ));
-            }
-        };
-        Ok(Self { mode })
+        })
     }
 
-    pub(crate) fn resume(
-        compression: CompressionMethod,
+    fn resume(
+        compression: Compression,
         expected_crc32: u32,
         expected_comp_size: u64,
         expected_size: u64,
@@ -441,8 +462,8 @@ impl ZipDecoder {
             ));
         }
 
-        let mode = match checkpoint.0 {
-            ZipCheckpointKind::Stored { offset, crc32 } => ZipDecoderMode::Stored {
+        Ok(match checkpoint.0 {
+            ZipCheckpointKind::Stored { offset, crc32 } => Self::Stored {
                 expected_crc32,
                 expected_size,
                 offset,
@@ -493,47 +514,111 @@ impl ZipDecoder {
                         ));
                     }
                 }
-                ZipDecoderMode::Deflate(Box::new(state))
+                Self::Deflate(Box::new(state))
             }
-        };
-
-        Ok(Self { mode })
-    }
-
-    pub(crate) fn into_reader<R>(self, reader: R) -> ZipEntryReader<R> {
-        ZipEntryReader {
-            reader,
-            decoder: Some(self),
-        }
+        })
     }
 
     fn finish(self) -> io::Result<()> {
-        match self.mode {
-            ZipDecoderMode::Stored {
+        match self {
+            Self::Stored {
                 expected_crc32,
                 expected_size,
                 offset,
                 crc32,
             } => verify_zip_eof(offset, expected_size, crc32, expected_crc32),
-            ZipDecoderMode::Deflate(state) => state.finish(),
+            Self::Deflate(state) => state.finish(),
         }
     }
 }
 
+fn check_output_add(offset: u64, max_size: u64, len: usize) -> io::Result<u64> {
+    offset
+        .checked_add(len as u64)
+        .filter(|&end| end <= max_size)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decoded stream exceeded expected size ({max_size} bytes)"),
+            )
+        })
+}
+
+fn verify_zip_eof(
+    uncomp_offset: u64,
+    expected_size: u64,
+    crc32: u32,
+    expected_crc32: u32,
+) -> io::Result<()> {
+    if uncomp_offset != expected_size {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "uncompressed length mismatch: expected {expected_size} bytes, got {uncomp_offset}"
+            ),
+        ));
+    }
+
+    if crc32 != expected_crc32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CRC-32 mismatch: expected {expected_crc32:#010x}, got {crc32:#010x}"),
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) struct ZipEntryReader<R> {
     reader: R,
-    decoder: Option<ZipDecoder>,
+    mode: Option<ZipDecoderMode>,
 }
 
 impl<R> ZipEntryReader<R> {
+    pub(crate) fn new(
+        reader: R,
+        compression: Compression,
+        expected_crc32: u32,
+        expected_size: u64,
+    ) -> io::Result<Self> {
+        let mode = ZipDecoderMode::new(compression, expected_crc32, expected_size)?;
+        Ok(Self {
+            reader,
+            mode: Some(mode),
+        })
+    }
+
+    pub(crate) fn resume(
+        reader: R,
+        compression: Compression,
+        expected_crc32: u32,
+        expected_comp_size: u64,
+        expected_size: u64,
+        checkpoint: ZipCheckpoint,
+        dict: &[u8],
+    ) -> io::Result<Self> {
+        let mode = ZipDecoderMode::resume(
+            compression,
+            expected_crc32,
+            expected_comp_size,
+            expected_size,
+            checkpoint,
+            dict,
+        )?;
+        Ok(Self {
+            reader,
+            mode: Some(mode),
+        })
+    }
+
     fn fail(&mut self, err: io::Error) -> Poll<io::Result<usize>> {
-        self.decoder = None;
+        self.mode = None;
         Poll::Ready(Err(err))
     }
 
     fn finish_eof(&mut self) -> Poll<io::Result<usize>> {
-        if let Some(dec) = self.decoder.take()
-            && let Err(e) = dec.finish()
+        if let Some(mode) = self.mode.take()
+            && let Err(e) = mode.finish()
         {
             return Poll::Ready(Err(e));
         }
@@ -545,7 +630,7 @@ impl<R: AsyncRead + MaybeSend + Unpin> ResumableAsyncRead for ZipEntryReader<R> 
     type Checkpoint = ZipCheckpoint;
 
     fn checkpoint(&self) -> Option<ZipCheckpoint> {
-        match &self.decoder.as_ref()?.mode {
+        match self.mode.as_ref()? {
             ZipDecoderMode::Stored {
                 expected_size,
                 offset,
@@ -574,24 +659,21 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for ZipEntryReader<R> {
 
         loop {
             let this = &mut *self;
-            let Some(dec) = this.decoder.as_mut() else {
+            let Some(mode) = this.mode.as_mut() else {
                 return Poll::Ready(Ok(0));
             };
 
-            match &mut dec.mode {
+            match mode {
                 ZipDecoderMode::Stored {
                     expected_size,
                     offset,
                     crc32,
                     ..
                 } => {
-                    let n = match Pin::new(&mut this.reader).poll_read(cx, buf) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                        Poll::Ready(Ok(0)) => return self.finish_eof(),
-                        Poll::Ready(Ok(n)) => n,
-                    };
+                    let n = ready!(poll_read_retry_eintr(&mut this.reader, cx, buf))?;
+                    if n == 0 {
+                        return self.finish_eof();
+                    }
                     let new_offset = match check_output_add(*offset, *expected_size, n) {
                         Ok(off) => off,
                         Err(e) => return self.fail(e),
@@ -610,13 +692,14 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for ZipEntryReader<R> {
                     }
 
                     debug_assert_eq!(state.in_pos, state.in_len);
-                    let n = match Pin::new(&mut this.reader).poll_read(cx, &mut state.in_buf) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                        Poll::Ready(Ok(0)) => return self.finish_eof(),
-                        Poll::Ready(Ok(n)) => n,
-                    };
+                    let n = ready!(poll_read_retry_eintr(
+                        &mut this.reader,
+                        cx,
+                        &mut state.in_buf
+                    ))?;
+                    if n == 0 {
+                        return self.finish_eof();
+                    }
 
                     if state.ended {
                         return self.fail(io::Error::new(
@@ -634,11 +717,33 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for ZipEntryReader<R> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use crate::test_util::{TrickleReader, compress_multi_block};
     use futures::executor::block_on;
     use futures::io::{AsyncReadExt, Cursor};
-    use zlib_rs::{Deflate, DeflateFlush, Status};
+
+    struct SteppedReader {
+        data: Vec<u8>,
+        pos: usize,
+        steps: &'static [usize],
+        step_idx: usize,
+    }
+
+    impl AsyncRead for SteppedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let step = self.steps[self.step_idx % self.steps.len()];
+            self.step_idx += 1;
+            let n = (self.data.len() - self.pos).min(step).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Poll::Ready(Ok(n))
+        }
+    }
 
     fn make_cross_32k_payload() -> Vec<u8> {
         let mut out = Vec::with_capacity(4 * 1024 * 1024);
@@ -674,40 +779,42 @@ pub(crate) mod tests {
         out
     }
 
-    pub(crate) fn compress_multi_block(data: &[u8], chunk_sizes: &[usize]) -> Vec<u8> {
-        let mut def = Deflate::new(6, false, 15);
-        let mut out = vec![0u8; zlib_rs::compress_bound(data.len()) + 4096];
-        let mut in_off = 0usize;
-        let mut out_off = 0usize;
-        let mut idx = 0;
-        while in_off < data.len() {
-            let chunk = chunk_sizes[idx % chunk_sizes.len()].min(data.len() - in_off);
-            idx += 1;
-            let prev_in = def.total_in();
-            let prev_out = def.total_out();
-            let is_last = in_off + chunk == data.len();
-            let flush = if is_last {
-                DeflateFlush::Finish
-            } else {
-                DeflateFlush::Block
-            };
-            let status = def
-                .compress(&data[in_off..in_off + chunk], &mut out[out_off..], flush)
-                .unwrap();
-            in_off += (def.total_in() - prev_in) as usize;
-            out_off += (def.total_out() - prev_out) as usize;
-            if is_last {
-                assert_eq!(status, Status::StreamEnd);
-            }
-        }
-        out.truncate(out_off);
-        out
+    async fn verify_deflate_resume(
+        payload: &[u8],
+        compressed: &[u8],
+        expected_crc: u32,
+        cp: ZipCheckpoint,
+        step: usize,
+    ) {
+        let expected_size = payload.len() as u64;
+        let expected_comp = compressed.len() as u64;
+        let dict_len = cp
+            .resume_dict_len(Compression::Deflate, expected_comp, expected_size)
+            .unwrap();
+        let uncomp = cp.output_offset() as usize;
+        let dict = &payload[uncomp - dict_len..uncomp];
+        let mut resumed = ZipEntryReader::resume(
+            SteppedReader {
+                data: compressed[cp.source_offset() as usize..].to_vec(),
+                pos: 0,
+                steps: if step == 0 { &[usize::MAX] } else { &[11_113] },
+                step_idx: 0,
+            },
+            Compression::Deflate,
+            expected_crc,
+            expected_comp,
+            expected_size,
+            cp,
+            dict,
+        )
+        .unwrap();
+        let mut resumed_out = payload[..uncomp].to_vec();
+        resumed.read_to_end(&mut resumed_out).await.unwrap();
+        assert_eq!(resumed_out, payload);
     }
 
     #[test]
     fn test_zip_checkpoint_wire_round_trip_and_validation() {
-        use binrw::{BinRead, BinWrite};
-
         let stored_cp = ZipCheckpoint(ZipCheckpointKind::Stored {
             offset: 1024,
             crc32: 0xABCD_1234,
@@ -725,9 +832,9 @@ pub(crate) mod tests {
             (deflate_cp, 23, 1024, 3072),
         ] {
             let mut bytes = Vec::new();
-            cp.write(&mut std::io::Cursor::new(&mut bytes)).unwrap();
+            cp.write_to(&mut bytes).unwrap();
             assert_eq!(bytes.len(), expected_len);
-            let decoded = ZipCheckpoint::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+            let decoded = ZipCheckpoint::read_from(&mut io::Cursor::new(&bytes)).unwrap();
             assert_eq!(decoded, cp);
             assert_eq!(decoded.source_offset(), exp_src);
             assert_eq!(decoded.output_offset(), exp_out);
@@ -735,84 +842,78 @@ pub(crate) mod tests {
 
         // Invalid Deflate prime_bits (> 7) and prime_value (>= 1 << prime_bits)
         let mut def_bytes = Vec::new();
-        deflate_cp
-            .write(&mut std::io::Cursor::new(&mut def_bytes))
-            .unwrap();
+        deflate_cp.write_to(&mut def_bytes).unwrap();
         let mut bad_bits = def_bytes.clone();
         bad_bits[21] = 8;
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&bad_bits)).is_err());
+        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&bad_bits)).is_err());
 
         let mut bad_val = def_bytes;
         bad_val[22] = 0x20;
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&bad_val)).is_err());
+        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&bad_val)).is_err());
 
-        // Deflate comp_offset == 0 with non-zero uncomp_offset / crc32 / prime_bits
-        let mut zero_comp_dirty = [0u8; 23];
-        zero_comp_dirty[0] = 2; // Deflate tag
-        zero_comp_dirty[9..17].copy_from_slice(&10u64.to_le_bytes());
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&zero_comp_dirty)).is_err());
+        // Zero offsets must be rejected for both Stored and Deflate
+        let mut zero_stored = [0u8; 13];
+        zero_stored[0] = TAG_STORED;
+        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&zero_stored)).is_err());
 
-        // Stored offset == 0 with non-zero crc32
-        let mut zero_stored_dirty = [0u8; 13];
-        zero_stored_dirty[0] = 1; // Stored tag
-        zero_stored_dirty[9..13].copy_from_slice(&1u32.to_le_bytes());
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&zero_stored_dirty)).is_err());
+        let mut zero_deflate = [0u8; 23];
+        zero_deflate[0] = TAG_DEFLATE;
+        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&zero_deflate)).is_err());
 
-        // Offset tag (0) and unknown tags must be rejected by ZipCheckpoint
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&[0u8; 23])).is_err());
-        assert!(ZipCheckpoint::read(&mut std::io::Cursor::new(&[9u8; 23])).is_err());
+        // Unknown tags must be rejected
+        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&[9u8; 23])).is_err());
 
         // Stored vs Deflate compatibility and bounds checks
         assert_eq!(
-            stored_cp.resume_dict_len(CompressionMethod::STORE, 2048, 2048),
+            stored_cp.resume_dict_len(Compression::Stored, 2048, 2048),
             Some(0)
         );
         assert_eq!(
-            stored_cp.resume_dict_len(CompressionMethod::DEFLATE, 2048, 2048),
+            stored_cp.resume_dict_len(Compression::Deflate, 2048, 2048),
             None
         );
         assert_eq!(
-            deflate_cp.resume_dict_len(CompressionMethod::DEFLATE, 2048, 4096),
+            stored_cp.resume_dict_len(Compression::Stored, 1024, 1024),
+            None
+        );
+
+        assert_eq!(
+            deflate_cp.resume_dict_len(Compression::Deflate, 2048, 4096),
             Some(3072)
         );
         assert_eq!(
-            deflate_cp.resume_dict_len(CompressionMethod::STORE, 2048, 4096),
+            deflate_cp.resume_dict_len(Compression::Stored, 2048, 4096),
             None
         );
         assert_eq!(
-            deflate_cp.resume_dict_len(CompressionMethod::DEFLATE, 1023, 4096),
+            deflate_cp.resume_dict_len(Compression::Deflate, 1023, 4096),
             None
         );
         assert_eq!(
-            deflate_cp.resume_dict_len(CompressionMethod::DEFLATE, 2048, 3071),
+            deflate_cp.resume_dict_len(Compression::Deflate, 2048, 3072),
+            None
+        );
+        // comp_offset == comp_size with prime_bits > 0 is resumable (final block fits in primed bits),
+        // while comp_offset == comp_size with prime_bits == 0 has 0 bits left and must be rejected.
+        assert_eq!(
+            deflate_cp.resume_dict_len(Compression::Deflate, 1024, 4096),
+            Some(3072)
+        );
+        let eof_deflate = ZipCheckpoint(ZipCheckpointKind::Deflate {
+            comp_offset: 1024,
+            uncomp_offset: 3072,
+            crc32: 0x1234_5678,
+            prime_bits: 0,
+            prime_value: 0,
+        });
+        assert_eq!(
+            eof_deflate.resume_dict_len(Compression::Deflate, 1024, 4096),
             None
         );
     }
 
     #[test]
     fn test_deflate_z_block_checkpoints_and_resume() {
-        struct SteppedReader {
-            data: Vec<u8>,
-            pos: usize,
-            steps: &'static [usize],
-            step_idx: usize,
-        }
-
-        impl AsyncRead for SteppedReader {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-                buf: &mut [u8],
-            ) -> Poll<io::Result<usize>> {
-                let step = self.steps[self.step_idx % self.steps.len()];
-                self.step_idx += 1;
-                let n = (self.data.len() - self.pos).min(step).min(buf.len());
-                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-                self.pos += n;
-                Poll::Ready(Ok(n))
-            }
-        }
-
         let payload = make_cross_32k_payload();
         let compressed = compress_multi_block(
             &payload,
@@ -822,42 +923,19 @@ pub(crate) mod tests {
         let expected_size = payload.len() as u64;
         let expected_comp = compressed.len() as u64;
 
-        let verify_resume = async |cp: ZipCheckpoint| {
-            let dict_len = cp
-                .resume_dict_len(CompressionMethod::DEFLATE, expected_comp, expected_size)
-                .unwrap();
-            let uncomp = cp.output_offset() as usize;
-            let dict = &payload[uncomp - dict_len..uncomp];
-            let mut resumed = ZipDecoder::resume(
-                CompressionMethod::DEFLATE,
-                expected_crc,
-                expected_comp,
-                expected_size,
-                cp,
-                dict,
-            )
-            .unwrap()
-            .into_reader(SteppedReader {
-                data: compressed[cp.source_offset() as usize..].to_vec(),
-                pos: 0,
-                steps: &[11_113],
-                step_idx: 0,
-            });
-            let mut resumed_out = payload[..uncomp].to_vec();
-            resumed.read_to_end(&mut resumed_out).await.unwrap();
-            assert_eq!(resumed_out, payload);
-        };
-
         block_on(async {
-            let mut reader =
-                ZipDecoder::new(CompressionMethod::DEFLATE, expected_crc, expected_size)
-                    .unwrap()
-                    .into_reader(SteppedReader {
-                        data: compressed.clone(),
-                        pos: 0,
-                        steps: &[7, 131, 4093, 65535, 19, 8191],
-                        step_idx: 0,
-                    });
+            let mut reader = ZipEntryReader::new(
+                SteppedReader {
+                    data: compressed.clone(),
+                    pos: 0,
+                    steps: &[7, 131, 4093, 65535, 19, 8191],
+                    step_idx: 0,
+                },
+                Compression::Deflate,
+                expected_crc,
+                expected_size,
+            )
+            .unwrap();
 
             let mut full_out = Vec::with_capacity(payload.len());
             let mut checkpoints = Vec::new();
@@ -904,11 +982,12 @@ pub(crate) mod tests {
             // Short dictionary must be rejected explicitly rather than silently corrupting
             if let Some(&cp) = checkpoints.iter().find(|cp| cp.output_offset() > 0) {
                 let dict_len = cp
-                    .resume_dict_len(CompressionMethod::DEFLATE, expected_comp, expected_size)
+                    .resume_dict_len(Compression::Deflate, expected_comp, expected_size)
                     .unwrap();
                 assert_eq!(
-                    ZipDecoder::resume(
-                        CompressionMethod::DEFLATE,
+                    ZipEntryReader::resume(
+                        Cursor::new(Vec::<u8>::new()),
+                        Compression::Deflate,
                         expected_crc,
                         expected_comp,
                         expected_size,
@@ -923,15 +1002,18 @@ pub(crate) mod tests {
             }
 
             for &cp in checkpoints.iter().step_by((checkpoints.len() / 8).max(1)) {
-                verify_resume(cp).await;
+                verify_deflate_resume(&payload, &compressed, expected_crc, cp, 1).await;
             }
 
             // Exercise consumed == 0 block boundaries with small caller buffers draining a
             // single pre-buffered compressed chunk spanning multiple Deflate blocks.
-            let mut small_reader =
-                ZipDecoder::new(CompressionMethod::DEFLATE, expected_crc, expected_size)
-                    .unwrap()
-                    .into_reader(Cursor::new(compressed.clone()));
+            let mut small_reader = ZipEntryReader::new(
+                Cursor::new(compressed.clone()),
+                Compression::Deflate,
+                expected_crc,
+                expected_size,
+            )
+            .unwrap();
             let mut small_out = Vec::with_capacity(payload.len());
             let mut small_cps = Vec::new();
             let mut buf = [0u8; 137];
@@ -950,40 +1032,20 @@ pub(crate) mod tests {
             }
             assert_eq!(small_out, payload);
             assert!(!small_cps.is_empty());
-            verify_resume(small_cps[0]).await;
-            verify_resume(small_cps[small_cps.len() / 2]).await;
+            verify_deflate_resume(&payload, &compressed, expected_crc, small_cps[0], 1).await;
+            verify_deflate_resume(
+                &payload,
+                &compressed,
+                expected_crc,
+                small_cps[small_cps.len() / 2],
+                1,
+            )
+            .await;
         });
     }
 
     #[test]
     fn test_reader_streaming_checkpoints_and_errors() {
-        struct TrickleReader {
-            data: Vec<u8>,
-            pos: usize,
-            reads: usize,
-        }
-
-        impl AsyncRead for TrickleReader {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-                buf: &mut [u8],
-            ) -> Poll<io::Result<usize>> {
-                self.reads += 1;
-                if self.reads.is_multiple_of(5) {
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-                if self.reads.is_multiple_of(3) {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "eintr")));
-                }
-                let n = (self.data.len() - self.pos).min(97).min(buf.len());
-                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-                self.pos += n;
-                Poll::Ready(Ok(n))
-            }
-        }
-
         async fn read_varied_with_checkpoints<R: ResumableAsyncRead>(
             mut reader: R,
         ) -> io::Result<(Vec<u8>, Option<R::Checkpoint>)> {
@@ -1020,32 +1082,36 @@ pub(crate) mod tests {
         block_on(async {
             // Stored & Deflate with tiny/varied read buffers exercising direct inflate
             // and the checkpoint delivery invariant.
-            let stored_reader = ZipDecoder::new(CompressionMethod::STORE, crc, size)
-                .unwrap()
-                .into_reader(TrickleReader {
-                    data: payload.clone(),
-                    pos: 0,
-                    reads: 0,
-                });
+            let stored_reader = ZipEntryReader::new(
+                TrickleReader::new(payload.clone(), 97),
+                Compression::Stored,
+                crc,
+                size,
+            )
+            .unwrap();
             let (out, cp) = read_varied_with_checkpoints(stored_reader).await.unwrap();
             assert_eq!(out, payload);
             assert!(cp.is_some());
 
-            let def_reader = ZipDecoder::new(CompressionMethod::DEFLATE, crc, size)
-                .unwrap()
-                .into_reader(TrickleReader {
-                    data: compressed.clone(),
-                    pos: 0,
-                    reads: 0,
-                });
+            let def_reader = ZipEntryReader::new(
+                TrickleReader::new(compressed.clone(), 97),
+                Compression::Deflate,
+                crc,
+                size,
+            )
+            .unwrap();
             let (out, cp) = read_varied_with_checkpoints(def_reader).await.unwrap();
             assert_eq!(out, payload);
             assert!(cp.is_some());
 
             // Immediate overflow detection when decoded output exceeds expected_size
-            let mut over_reader = ZipDecoder::new(CompressionMethod::DEFLATE, crc, size - 10)
-                .unwrap()
-                .into_reader(Cursor::new(compressed.clone()));
+            let mut over_reader = ZipEntryReader::new(
+                Cursor::new(compressed.clone()),
+                Compression::Deflate,
+                crc,
+                size - 10,
+            )
+            .unwrap();
             let mut scratch = Vec::new();
             assert_eq!(
                 over_reader
@@ -1057,9 +1123,13 @@ pub(crate) mod tests {
             );
 
             // Truncated stream rejected at EOF
-            let mut trunc_reader = ZipDecoder::new(CompressionMethod::DEFLATE, crc, size)
-                .unwrap()
-                .into_reader(Cursor::new(compressed[..compressed.len() - 4].to_vec()));
+            let mut trunc_reader = ZipEntryReader::new(
+                Cursor::new(compressed[..compressed.len() - 4].to_vec()),
+                Compression::Deflate,
+                crc,
+                size,
+            )
+            .unwrap();
             scratch.clear();
             assert_eq!(
                 trunc_reader
@@ -1070,50 +1140,28 @@ pub(crate) mod tests {
                 io::ErrorKind::UnexpectedEof
             );
 
-            // Highly compressible zero payload read in tiny chunks (tests direct inflate without
-            // staging buffer growth and checkpoint resume across high-expansion blocks).
+            // Highly compressible zero payload read in tiny chunks (high-expansion blocks).
             let zeros = vec![0u8; 512 * 1024];
             let zeros_comp = compress_multi_block(&zeros, &[128 * 1024]);
             let zeros_crc = zlib_rs::crc32::crc32(0, &zeros);
-            let zeros_reader =
-                ZipDecoder::new(CompressionMethod::DEFLATE, zeros_crc, zeros.len() as u64)
-                    .unwrap()
-                    .into_reader(Cursor::new(zeros_comp.clone()));
+            let zeros_reader = ZipEntryReader::new(
+                Cursor::new(zeros_comp.clone()),
+                Compression::Deflate,
+                zeros_crc,
+                zeros.len() as u64,
+            )
+            .unwrap();
             let (out, cp) = read_varied_with_checkpoints(zeros_reader).await.unwrap();
             assert_eq!(out, zeros);
             let cp = cp.expect("zero-filled multi-block stream emits checkpoint");
-            let dict_len = cp
-                .resume_dict_len(
-                    CompressionMethod::DEFLATE,
-                    zeros_comp.len() as u64,
-                    zeros.len() as u64,
-                )
-                .unwrap();
-            let uncomp = cp.output_offset() as usize;
-            let mut resumed_zeros = zeros[..uncomp].to_vec();
-            ZipDecoder::resume(
-                CompressionMethod::DEFLATE,
-                zeros_crc,
-                zeros_comp.len() as u64,
-                zeros.len() as u64,
-                cp,
-                &zeros[uncomp - dict_len..uncomp],
-            )
-            .unwrap()
-            .into_reader(Cursor::new(
-                zeros_comp[cp.source_offset() as usize..].to_vec(),
-            ))
-            .read_to_end(&mut resumed_zeros)
-            .await
-            .unwrap();
-            assert_eq!(resumed_zeros, zeros);
+            verify_deflate_resume(&zeros, &zeros_comp, zeros_crc, cp, 0).await;
 
             // Trailing bytes after Deflate stream end (both inline and on a follow-up read)
             let mut trailing = compressed.clone();
             trailing.extend_from_slice(b"junk");
-            let mut inline_trailing = ZipDecoder::new(CompressionMethod::DEFLATE, crc, size)
-                .unwrap()
-                .into_reader(Cursor::new(trailing));
+            let mut inline_trailing =
+                ZipEntryReader::new(Cursor::new(trailing), Compression::Deflate, crc, size)
+                    .unwrap();
             scratch.clear();
             assert_eq!(
                 inline_trailing
@@ -1124,41 +1172,13 @@ pub(crate) mod tests {
                 io::ErrorKind::InvalidData
             );
 
-            struct SplitTrailingReader {
-                head: Vec<u8>,
-                head_pos: usize,
-                tail: Vec<u8>,
-                tail_pos: usize,
-            }
-            impl AsyncRead for SplitTrailingReader {
-                fn poll_read(
-                    mut self: Pin<&mut Self>,
-                    _cx: &mut Context<'_>,
-                    buf: &mut [u8],
-                ) -> Poll<io::Result<usize>> {
-                    if self.head_pos < self.head.len() {
-                        let n = (self.head.len() - self.head_pos).min(buf.len());
-                        buf[..n].copy_from_slice(&self.head[self.head_pos..self.head_pos + n]);
-                        self.head_pos += n;
-                        return Poll::Ready(Ok(n));
-                    }
-                    if self.tail_pos < self.tail.len() {
-                        let n = (self.tail.len() - self.tail_pos).min(buf.len());
-                        buf[..n].copy_from_slice(&self.tail[self.tail_pos..self.tail_pos + n]);
-                        self.tail_pos += n;
-                        return Poll::Ready(Ok(n));
-                    }
-                    Poll::Ready(Ok(0))
-                }
-            }
-            let mut split_trailing = ZipDecoder::new(CompressionMethod::DEFLATE, crc, size)
-                .unwrap()
-                .into_reader(SplitTrailingReader {
-                    head: compressed.clone(),
-                    head_pos: 0,
-                    tail: b"extra".to_vec(),
-                    tail_pos: 0,
-                });
+            let mut split_trailing = ZipEntryReader::new(
+                Cursor::new(compressed.clone()).chain(Cursor::new(b"extra")),
+                Compression::Deflate,
+                crc,
+                size,
+            )
+            .unwrap();
             scratch.clear();
             assert_eq!(
                 split_trailing
@@ -1170,10 +1190,13 @@ pub(crate) mod tests {
             );
 
             // CRC mismatch rejected at EOF
-            let mut bad_crc_reader =
-                ZipDecoder::new(CompressionMethod::DEFLATE, crc ^ 0xFFFF, size)
-                    .unwrap()
-                    .into_reader(Cursor::new(compressed));
+            let mut bad_crc_reader = ZipEntryReader::new(
+                Cursor::new(compressed),
+                Compression::Deflate,
+                crc ^ 0xFFFF,
+                size,
+            )
+            .unwrap();
             scratch.clear();
             assert_eq!(
                 bad_crc_reader
@@ -1188,10 +1211,13 @@ pub(crate) mod tests {
             // (prior to EOF CRC verification) so an unverified 100% checkpoint is never persisted.
             let sample = b"hello stored world";
             let sample_crc = zlib_rs::crc32::crc32(0, sample);
-            let mut exact_stored =
-                ZipDecoder::new(CompressionMethod::STORE, sample_crc, sample.len() as u64)
-                    .unwrap()
-                    .into_reader(Cursor::new(sample.to_vec()));
+            let mut exact_stored = ZipEntryReader::new(
+                Cursor::new(sample.to_vec()),
+                Compression::Stored,
+                sample_crc,
+                sample.len() as u64,
+            )
+            .unwrap();
             let mut half = [0u8; 6];
             assert_eq!(exact_stored.read(&mut half).await.unwrap(), 6);
             assert!(exact_stored.checkpoint().is_some());
@@ -1204,15 +1230,15 @@ pub(crate) mod tests {
             assert_eq!(exact_stored.read(&mut rest).await.unwrap(), 0);
 
             // 0-byte Stored and 0-byte Deflate streams verify cleanly with CRC=0
-            let mut empty_stored = ZipDecoder::new(CompressionMethod::STORE, 0, 0)
-                .unwrap()
-                .into_reader(Cursor::new(Vec::<u8>::new()));
+            let mut empty_stored =
+                ZipEntryReader::new(Cursor::new(Vec::<u8>::new()), Compression::Stored, 0, 0)
+                    .unwrap();
             assert_eq!(empty_stored.read(&mut [0u8; 8]).await.unwrap(), 0);
 
             let empty_deflate_bytes = vec![0x03, 0x00]; // valid empty final fixed block
-            let mut empty_deflate = ZipDecoder::new(CompressionMethod::DEFLATE, 0, 0)
-                .unwrap()
-                .into_reader(Cursor::new(empty_deflate_bytes));
+            let mut empty_deflate =
+                ZipEntryReader::new(Cursor::new(empty_deflate_bytes), Compression::Deflate, 0, 0)
+                    .unwrap();
             assert_eq!(empty_deflate.read(&mut [0u8; 8]).await.unwrap(), 0);
         });
     }

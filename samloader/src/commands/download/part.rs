@@ -15,14 +15,13 @@
 //! Resumable `.part` file management, `SAMLOADR` v4 checkpoint footers, and
 //! ring-buffered background disk writing.
 
-use binrw::{BinRead, BinWrite, binrw};
-use fast_md5::Md5;
+use binrw::{BinRead, BinResult, BinWrite, Endian, binrw};
 use samloader_fus::futures::io::AsyncReadExt;
 use samloader_fus::{
-    BinaryInform, Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream, ZipCheckpoint,
+    Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream, ZipCheckpoint,
 };
 use std::fs::{File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -32,6 +31,40 @@ const CHECKPOINT_INTERVAL: u64 = 32 * 1024 * 1024;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
 const RING_SLOTS: usize = 16;
 
+fn read_offset_cp<R: Read + Seek>(
+    reader: &mut R,
+    _endian: Endian,
+    _args: (),
+) -> BinResult<OffsetCheckpoint> {
+    OffsetCheckpoint::read_from(reader).map_err(binrw::Error::Io)
+}
+
+fn write_offset_cp<W: Write + Seek>(
+    cp: &OffsetCheckpoint,
+    writer: &mut W,
+    _endian: Endian,
+    _args: (),
+) -> BinResult<()> {
+    cp.write_to(writer).map_err(binrw::Error::Io)
+}
+
+fn read_zip_cp<R: Read + Seek>(
+    reader: &mut R,
+    _endian: Endian,
+    _args: (),
+) -> BinResult<ZipCheckpoint> {
+    ZipCheckpoint::read_from(reader).map_err(binrw::Error::Io)
+}
+
+fn write_zip_cp<W: Write + Seek>(
+    cp: &ZipCheckpoint,
+    writer: &mut W,
+    _endian: Endian,
+    _args: (),
+) -> BinResult<()> {
+    cp.write_to(writer).map_err(binrw::Error::Io)
+}
+
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,9 +72,17 @@ pub(crate) enum FooterState {
     #[brw(magic = 0u8)]
     Fresh,
     #[brw(magic = 1u8)]
-    Offset(OffsetCheckpoint),
+    Offset(
+        #[br(parse_with = read_offset_cp)]
+        #[bw(write_with = write_offset_cp)]
+        OffsetCheckpoint,
+    ),
     #[brw(magic = 2u8)]
-    Zip(ZipCheckpoint),
+    Zip(
+        #[br(parse_with = read_zip_cp)]
+        #[bw(write_with = write_zip_cp)]
+        ZipCheckpoint,
+    ),
 }
 
 impl From<OffsetCheckpoint> for FooterState {
@@ -134,25 +175,6 @@ impl Footer {
         reader.read_exact(&mut buf).ok()?;
         Self::from_bytes(&buf, expected_checksum)
     }
-}
-
-fn update_len_prefixed(hasher: &mut Md5, data: &[u8]) {
-    hasher.update(&(data.len() as u64).to_le_bytes());
-    hasher.update(data);
-}
-
-/// Computes a stable 128-bit identity checksum for a firmware binary package, stored
-/// inside `.part` footers to prevent resuming across mismatched builds.
-pub(crate) fn binary_checksum(info: &BinaryInform) -> [u8; 16] {
-    let mut hasher = Md5::new();
-    update_len_prefixed(&mut hasher, info.version.as_bytes());
-    update_len_prefixed(&mut hasher, info.filename.as_bytes());
-    update_len_prefixed(&mut hasher, info.path.as_bytes());
-    hasher.update(&info.size.to_le_bytes());
-    hasher.update(&info.key);
-    update_len_prefixed(&mut hasher, info.model_type.as_bytes());
-    update_len_prefixed(&mut hasher, info.region.as_bytes());
-    hasher.finalize()
 }
 
 fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
@@ -396,7 +418,7 @@ impl PartFile {
                 Ok(cp) => match source.resume_dict_len(&cp) {
                     Some(dict_len)
                         if cp.source_offset() > 0
-                            && cp.output_offset() <= target_size
+                            && cp.output_offset() < target_size
                             && (dict_len as u64) <= cp.output_offset() =>
                     {
                         let start_pos = cp.output_offset();
@@ -407,9 +429,6 @@ impl PartFile {
                             },
                             Some(cp),
                         )
-                    }
-                    Some(_) if cp.source_offset() == 0 && cp.output_offset() == 0 => {
-                        (SetupAction::KeepFresh, None)
                     }
                     _ => (SetupAction::InitFresh { restarted }, None),
                 },
@@ -587,25 +606,15 @@ impl PartFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use samloader_fus::DataSource;
     use samloader_fus::futures::io::AsyncRead;
+    use samloader_fus::{DataSource, DataStream};
     use std::ops::RangeBounds;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll};
 
-    fn mock_info() -> BinaryInform {
-        BinaryInform {
-            version: "S931U1UES1AXB2/S931U1OYM1AXB2/S931U1UES1AXB2/S931U1UES1AXB2".to_string(),
-            filename: "SM-S931U1_1_20240215120000_abcdefghij_fac.zip.enc4".to_string(),
-            path: "T1/SM-S931U1/XAA/".to_string(),
-            size: 10_000_000,
-            key: [0x42; 16],
-            model_type: "SM-S931U1".to_string(),
-            region: "XAA".to_string(),
-        }
-    }
+    const TEST_CHECKSUM: [u8; 16] = [0x42; 16];
 
     fn read_part(target_size: u64, footer_bytes: &[u8], checksum: [u8; 16]) -> Option<Footer> {
         let mut part = vec![0u8; target_size as usize];
@@ -637,26 +646,26 @@ mod tests {
 
     #[test]
     fn test_footer_v4_round_trip_and_rejection() {
-        let checksum = binary_checksum(&mock_info());
+        let checksum = TEST_CHECKSUM;
         let other_checksum = [0x99; 16];
         let target_size = 4096_u64;
 
         let offset_cp = OffsetCheckpoint::new(2048);
 
         let mut stored_bytes = [0u8; 13];
-        stored_bytes[0] = 1; // Stored
+        stored_bytes[0] = 0; // Stored
         stored_bytes[1..9].copy_from_slice(&1536u64.to_le_bytes());
         stored_bytes[9..13].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
-        let stored_cp = ZipCheckpoint::read(&mut Cursor::new(&stored_bytes)).unwrap();
+        let stored_cp = ZipCheckpoint::read_from(&mut Cursor::new(&stored_bytes)).unwrap();
 
         let mut deflate_bytes = [0u8; 23];
-        deflate_bytes[0] = 2; // Deflate
+        deflate_bytes[0] = 1; // Deflate
         deflate_bytes[1..9].copy_from_slice(&1024u64.to_le_bytes());
         deflate_bytes[9..17].copy_from_slice(&3072u64.to_le_bytes());
         deflate_bytes[17..21].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         deflate_bytes[21] = 5;
         deflate_bytes[22] = 0x1A;
-        let deflate_cp = ZipCheckpoint::read(&mut Cursor::new(&deflate_bytes)).unwrap();
+        let deflate_cp = ZipCheckpoint::read_from(&mut Cursor::new(&deflate_bytes)).unwrap();
 
         let mut last_bytes = [0u8; FOOTER_SIZE];
         for state in [
@@ -791,15 +800,15 @@ mod tests {
 
         let dir = TempDir::new("resume");
         let final_path = dir.0.join("firmware.zip");
-        let checksum = binary_checksum(&mock_info());
+        let checksum = TEST_CHECKSUM;
         let payload: Vec<u8> = (0..128_000).map(|i| ((i * 29) ^ (i >> 5)) as u8).collect();
 
         rt.block_on(async {
             // 1. First attempt fails after 64 KiB, leaving a valid checkpoint in .part
-            let flaky = ChunkedFailSource {
+            let flaky = DataStream::new(ChunkedFailSource {
                 data: payload.clone(),
                 fail_after: Some(64 * 1024),
-            };
+            });
             let (part, resume) = PartFile::open(final_path.clone(), checksum, &flaky, false)
                 .await
                 .unwrap();
@@ -814,10 +823,10 @@ mod tests {
             assert!(part_path_for(&final_path).exists());
 
             // 2. Second attempt resumes from persisted checkpoint and finalizes cleanly
-            let healthy = ChunkedFailSource {
+            let healthy = DataStream::new(ChunkedFailSource {
                 data: payload.clone(),
                 fail_after: None,
-            };
+            });
             let (part, resume) = PartFile::open(final_path.clone(), checksum, &healthy, false)
                 .await
                 .unwrap();
@@ -861,7 +870,7 @@ mod tests {
     #[test]
     fn test_part_file_loads_resume_dictionary_from_disk() {
         struct DictSource {
-            inner: Vec<u8>,
+            inner: DataStream<Vec<u8>>,
             dict_len: usize,
         }
 
@@ -882,10 +891,9 @@ mod tests {
                     .map(|_| self.dict_len.min(checkpoint.output_offset() as usize))
             }
 
-            async fn open<'a>(
-                &'a self,
-            ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint> + use<'a>>
-            {
+            async fn open(
+                &self,
+            ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint>> {
                 self.inner.open().await
             }
 
@@ -907,10 +915,10 @@ mod tests {
 
         let dir = TempDir::new("dict");
         let final_path = dir.0.join("entry.tar");
-        let checksum = binary_checksum(&mock_info());
+        let checksum = TEST_CHECKSUM;
         let payload: Vec<u8> = (0..8192).map(|i| ((i * 17) ^ (i >> 3)) as u8).collect();
         let src = DictSource {
-            inner: payload.clone(),
+            inner: DataStream::new(payload.clone()),
             dict_len: 512,
         };
 
@@ -938,7 +946,7 @@ mod tests {
 
             // A source reporting an invalid dict_len > output_offset safely restarts
             // instead of panicking on offset subtraction.
-            struct BadDictSource(Vec<u8>);
+            struct BadDictSource(DataStream<Vec<u8>>);
             impl ResumableStream for BadDictSource {
                 type Checkpoint = OffsetCheckpoint;
 
@@ -951,9 +959,9 @@ mod tests {
                 fn resume_dict_len(&self, _checkpoint: &OffsetCheckpoint) -> Option<usize> {
                     Some(8192) // larger than output_offset (4096)
                 }
-                async fn open<'a>(
-                    &'a self,
-                ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint> + use<'a>>
+                async fn open(
+                    &self,
+                ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint>>
                 {
                     self.0.open().await
                 }
@@ -966,14 +974,19 @@ mod tests {
                     self.0.resume(checkpoint, dict).await
                 }
             }
-            let (_, resume) = PartFile::open(final_path, checksum, &BadDictSource(payload), false)
-                .await
-                .unwrap();
+            let (_, resume) = PartFile::open(
+                final_path,
+                checksum,
+                &BadDictSource(DataStream::new(payload)),
+                false,
+            )
+            .await
+            .unwrap();
             assert!(matches!(resume, ResumeState::Restarted));
 
             // 0-byte stream opens, writes, and finalizes cleanly without empty-buffer stalls.
             let empty_path = dir.0.join("empty.bin");
-            let empty_src: Vec<u8> = Vec::new();
+            let empty_src = DataStream::new(Vec::<u8>::new());
             let (part, resume) = PartFile::open(empty_path.clone(), checksum, &empty_src, false)
                 .await
                 .unwrap();

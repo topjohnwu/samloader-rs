@@ -340,6 +340,7 @@ impl TransferObserver for CliObserver {
                 "Connection throttled at offset {offset}; \
                  reducing to {remaining_connections} connection(s)"
             ),
+            other => format!("Download warning: {other:?}"),
         };
         let pb = self.active.lock().unwrap().as_ref().map(|a| a.pb.clone());
         if let Some(pb) = pb {

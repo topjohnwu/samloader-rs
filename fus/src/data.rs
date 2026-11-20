@@ -18,27 +18,26 @@ use crate::compat::{MaybeSend, MaybeSync};
 use futures::io::{AsyncRead, AsyncReadExt};
 use std::future::Future;
 use std::io;
-use std::ops::{Bound, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
-/// Resolves any [`RangeBounds<u64>`] into `Some((start, exclusive_end))` if non-empty,
-/// or `None` if the range is empty (`end <= start` or excluded `u64::MAX` start).
-///
-/// An `exclusive_end` of `None` means unbounded (read to the end of the source).
-pub(crate) fn resolve_range_bounds(range: impl RangeBounds<u64>) -> Option<(u64, Option<u64>)> {
+/// Clamps any [`RangeBounds<u64>`] against `[0..len)` and returns `Some(start..end)` if
+/// non-empty, or `None` if the range is empty or out of bounds.
+pub(crate) fn resolve_range_bounds(range: impl RangeBounds<u64>, len: u64) -> Option<Range<u64>> {
     let start = match range.start_bound() {
         Bound::Unbounded => 0,
         Bound::Included(&s) => s,
         Bound::Excluded(&s) => s.checked_add(1)?,
     };
+    if start >= len {
+        return None;
+    }
     let end = match range.end_bound() {
-        Bound::Unbounded => None,
-        Bound::Excluded(&e) if e <= start => return None,
-        Bound::Excluded(&e) => Some(e),
-        Bound::Included(&e) if e < start => return None,
-        Bound::Included(&e) => e.checked_add(1),
+        Bound::Unbounded => len,
+        Bound::Excluded(&e) => e.min(len),
+        Bound::Included(&e) => e.saturating_add(1).min(len),
     };
-    Some((start, end))
+    (start < end).then_some(start..end)
 }
 
 /// Concurrency- and transport-agnostic random-access byte source.
@@ -49,7 +48,7 @@ pub trait DataSource: MaybeSend + MaybeSync {
     /// Opens an async sequential reader over `range`.
     fn fetch_range(
         &self,
-        range: impl RangeBounds<u64> + Send,
+        range: impl RangeBounds<u64> + MaybeSend,
     ) -> impl Future<Output = io::Result<impl AsyncRead + MaybeSend + Unpin>> + MaybeSend;
 
     /// Opens an async sequential reader over the entire source (`..`).
@@ -93,15 +92,11 @@ impl DataSource for [u8] {
 
     async fn fetch_range(
         &self,
-        range: impl RangeBounds<u64> + Send,
+        range: impl RangeBounds<u64> + MaybeSend,
     ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-        let len = self.len() as u64;
-        let slice = match resolve_range_bounds(range) {
-            Some((start, end)) if start < len => {
-                let e = end.map_or(self.len(), |e| e.min(len) as usize);
-                &self[start as usize..e]
-            }
-            _ => &[],
+        let slice = match resolve_range_bounds(range, self.len() as u64) {
+            Some(r) => &self[r.start as usize..r.end as usize],
+            None => &[],
         };
         Ok(slice)
     }
@@ -117,7 +112,7 @@ macro_rules! impl_deref_data_source {
 
                 fn fetch_range(
                     &self,
-                    range: impl RangeBounds<u64> + Send,
+                    range: impl RangeBounds<u64> + MaybeSend,
                 ) -> impl Future<Output = io::Result<impl AsyncRead + MaybeSend + Unpin>> + MaybeSend {
                     (**self).fetch_range(range)
                 }
@@ -148,29 +143,32 @@ mod tests {
 
     #[test]
     fn test_resolve_range_bounds() {
-        assert_eq!(resolve_range_bounds(..), Some((0, None)));
-        assert_eq!(resolve_range_bounds(5..), Some((5, None)));
-        assert_eq!(resolve_range_bounds(5..10), Some((5, Some(10))));
-        assert_eq!(resolve_range_bounds(..10), Some((0, Some(10))));
-        assert_eq!(resolve_range_bounds(..0), None);
-        assert_eq!(resolve_range_bounds(5..=9), Some((5, Some(10))));
-        assert_eq!(resolve_range_bounds(..=9), Some((0, Some(10))));
-        assert_eq!(resolve_range_bounds(0..=u64::MAX), Some((0, None)));
+        assert_eq!(resolve_range_bounds(.., 100), Some(0..100));
+        assert_eq!(resolve_range_bounds(.., 0), None);
+        assert_eq!(resolve_range_bounds(5.., 100), Some(5..100));
+        assert_eq!(resolve_range_bounds(100.., 100), None);
+        assert_eq!(resolve_range_bounds(5..10, 100), Some(5..10));
+        assert_eq!(resolve_range_bounds(5..200, 100), Some(5..100));
+        assert_eq!(resolve_range_bounds(..10, 100), Some(0..10));
+        assert_eq!(resolve_range_bounds(..0, 100), None);
+        assert_eq!(resolve_range_bounds(5..=9, 100), Some(5..10));
+        assert_eq!(resolve_range_bounds(..=9, 100), Some(0..10));
+        assert_eq!(resolve_range_bounds(0..=u64::MAX, 100), Some(0..100));
         assert_eq!(
-            resolve_range_bounds((Bound::Excluded(4), Bound::Included(9))),
-            Some((5, Some(10)))
+            resolve_range_bounds((Bound::Excluded(4), Bound::Included(9)), 100),
+            Some(5..10)
         );
         assert_eq!(
-            resolve_range_bounds((Bound::Excluded(u64::MAX), Bound::Unbounded)),
+            resolve_range_bounds((Bound::Excluded(u64::MAX), Bound::Unbounded), u64::MAX),
             None
         );
-        assert_eq!(resolve_range_bounds(10..10), None);
+        assert_eq!(resolve_range_bounds(10..10, 100), None);
         #[allow(clippy::reversed_empty_ranges)]
         {
-            assert_eq!(resolve_range_bounds(10..5), None);
-            assert_eq!(resolve_range_bounds(10..=5), None);
+            assert_eq!(resolve_range_bounds(10..5, 100), None);
+            assert_eq!(resolve_range_bounds(10..=5, 100), None);
         }
-        assert_eq!(resolve_range_bounds(5..=5), Some((5, Some(6))));
+        assert_eq!(resolve_range_bounds(5..=5, 100), Some(5..6));
     }
 
     #[test]

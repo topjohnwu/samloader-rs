@@ -77,17 +77,26 @@ fn to_hex_string(bytes: &[u8]) -> String {
     hex
 }
 
-pub(crate) fn compute_history_headers(model: &str) -> (String, String) {
+pub(crate) fn format_auth_header(nonce: &str, signature: &str) -> String {
+    format!(
+        "FUS nonce=\"{nonce}\", signature=\"{signature}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\""
+    )
+}
+
+pub(crate) fn format_history_auth_header(model: &str) -> String {
     let client_nonce = generate_client_nonce();
 
-    let auth_str = format!("auth:{}:00000001", client_nonce);
+    let auth_str = format!("auth:{client_nonce}:00000001");
     let auth_hash = to_hex_string(&fast_md5::digest(auth_str.as_bytes()));
 
     let interface_str = format!("interface:{}", model.to_uppercase());
     let interface_hash = to_hex_string(&fast_md5::digest(interface_str.as_bytes()));
 
-    let final_str = format!("{}:FUS:{}", auth_hash, interface_hash);
-    let final_signature = to_hex_string(&fast_md5::digest(final_str.as_bytes()));
+    let final_str = format!("{auth_hash}:FUS:{interface_hash}");
+    let signature = to_hex_string(&fast_md5::digest(final_str.as_bytes()));
 
-    (client_nonce, final_signature)
+    format!(
+        "FUS nonce=\"{client_nonce}\", signature=\"{signature}\", \
+         nc=\"00000001\", type=\"auth\", realm=\"interface\""
+    )
 }

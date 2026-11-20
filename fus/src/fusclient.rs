@@ -12,23 +12,96 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! FUS API client, version history queries, and authenticated [`DownloadSession`].
+
 use crate::compat::MaybeSend;
-use crate::data::{DataSource, resolve_range_bounds};
+use crate::data::DataSource;
+use crate::decrypt::{AlignedRange, DecryptReader, decryptor, unpadded_block_len};
 use crate::error::{Error, HttpError, Result};
 use crate::http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
 use crate::{auth, xml};
+use aes::cipher::BlockModeDecrypt;
 use aes::cipher::inout::InOutBuf;
-use aes::cipher::{BlockModeDecrypt, KeyInit};
 use futures::io::{AsyncRead, AsyncReadExt};
 use futures::lock::Mutex as AsyncMutex;
 use std::io;
 use std::ops::RangeBounds;
-use std::pin::Pin;
 use std::sync::Mutex;
-use std::task::{Context, Poll};
-use xml::BinaryInform;
+use xml::{BinaryInform, VersionInfo};
 
-type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+const FUS_HOST: &str = "https://neofussvr.sslcs.cdngc.net";
+const FUS_USER_AGENT: &str = "SMART 2.0";
+
+/// Queries and fetches the standard firmware `version.xml` document for the specified
+/// device model and region.
+async fn fetch_version_xml(
+    client: &impl HttpClient,
+    model: &str,
+    region: &str,
+) -> Result<VersionInfo> {
+    let version_url =
+        format!("https://fota-cloud-dn.ospserver.net:443/firmware/{region}/{model}/version.xml");
+    let headers = [("User-Agent", "Kies2.0_FUS")];
+    let version_xml = client
+        .send(HttpRequest {
+            method: HttpMethod::Get,
+            url: &version_url,
+            headers: &headers,
+            body: None,
+        })
+        .await?
+        .ensure_success()?
+        .into_text()
+        .await?;
+
+    xml::parse_version_xml(&version_xml)
+}
+
+/// Fetches the historical list of released firmware versions for the target model and region
+/// through the `SmartHistory.do` endpoint.
+async fn fetch_smart_history(
+    client: &impl HttpClient,
+    model: &str,
+    region: &str,
+) -> Result<VersionInfo> {
+    let auth_val = auth::format_history_auth_header(model);
+    let req_xml = xml::history_req_xml(model, region);
+    let headers = [
+        ("Authorization", auth_val.as_str()),
+        ("User-Agent", FUS_USER_AGENT),
+    ];
+
+    let xml = client
+        .send(HttpRequest {
+            method: HttpMethod::Post,
+            url: &format!("{FUS_HOST}/SmartHistory.do"),
+            headers: &headers,
+            body: Some(req_xml.as_bytes()),
+        })
+        .await?
+        .ensure_success()?
+        .into_text()
+        .await?;
+
+    xml::parse_history_xml(&xml)
+}
+
+async fn fetch_history_with(
+    client: &impl HttpClient,
+    model: &str,
+    region: &str,
+) -> Result<VersionInfo> {
+    match fetch_smart_history(client, model, region).await {
+        Ok(info) => Ok(info),
+        Err(_) => fetch_version_xml(client, model, region).await,
+    }
+}
+
+/// Fetches the historical list of released firmware versions for the target model and region.
+pub async fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
+    let client = PlatformClient::new()?;
+    fetch_history_with(&client, model, region).await
+}
 
 /// Authentication token state. The download GET signs every request with
 /// `nonce`/`auth`; these expire, so they live behind a lock and are shared
@@ -43,36 +116,30 @@ struct AuthState {
 
 impl AuthState {
     fn auth_header(&self) -> String {
-        format!(
-            "FUS nonce=\"{}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-            self.nonce, self.auth
-        )
+        auth::format_auth_header(&self.nonce, &self.auth)
     }
 }
 
-/// Client coordinating API communication and security authentication
-/// with the Samsung Firmware Update Server (FUS).
-pub struct FusClient {
-    client: PlatformClient,
+struct FusClientCore<C: HttpClient> {
+    client: C,
     auth_state: Mutex<AuthState>,
 }
 
-impl FusClient {
-    /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
-    pub async fn new() -> Result<Self> {
-        let fus = FusClient {
-            client: PlatformClient::new()?,
+impl<C: HttpClient> FusClientCore<C> {
+    async fn new(client: C) -> Result<Self> {
+        let fus = Self {
+            client,
             auth_state: Mutex::new(AuthState::default()),
         };
-
-        // Initialize nonce
         fus.generate_nonce().await?;
-
         Ok(fus)
     }
 
-    /// Queries the server for firmware binary metadata matching the requested model, region, and version.
-    pub async fn fetch_binary_info(
+    async fn fetch_history(&self, model: &str, region: &str) -> Result<VersionInfo> {
+        fetch_history_with(&self.client, model, region).await
+    }
+
+    async fn fetch_binary_info(
         &self,
         model: &str,
         region: &str,
@@ -95,12 +162,12 @@ impl FusClient {
         &self,
         path: &str,
         data: &str,
-    ) -> std::result::Result<impl HttpResponse + use<>, HttpError> {
-        let url = format!("https://neofussvr.sslcs.cdngc.net/{path}");
+    ) -> std::result::Result<C::Response, HttpError> {
+        let url = format!("{FUS_HOST}/{path}");
         let auth_val = self.auth_state.lock().unwrap().auth_header();
         let headers = [
             ("Authorization", auth_val.as_str()),
-            ("User-Agent", "SMART 2.0"),
+            ("User-Agent", FUS_USER_AGENT),
         ];
 
         let resp = self
@@ -148,12 +215,9 @@ impl FusClient {
         xml::check_xml_status(&xml)
     }
 
-    /// Requests a download authorization ticket from FUS for `info`, probes the
-    /// final AES block to determine the exact unpadded payload length, and consumes
-    /// this client into an active [`DownloadSession`].
-    pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
+    async fn init_download(self, info: BinaryInform) -> Result<DownloadSessionCore<C>> {
         self.send_init_download(&info).await?;
-        let mut session = DownloadSession {
+        let mut session = DownloadSessionCore {
             client: self,
             info,
             decrypted_size: 0,
@@ -164,10 +228,42 @@ impl FusClient {
     }
 }
 
-/// Active firmware download session holding an authenticated [`FusClient`]
-/// and the resolved [`BinaryInform`] metadata.
-pub struct DownloadSession {
-    client: FusClient,
+/// Client coordinating API communication and security authentication
+/// with the Samsung Firmware Update Server (FUS).
+pub struct FusClient(FusClientCore<PlatformClient>);
+
+impl FusClient {
+    /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
+    pub async fn new() -> Result<Self> {
+        Ok(Self(FusClientCore::new(PlatformClient::new()?).await?))
+    }
+
+    /// Fetches the historical list of released firmware versions for the target model and region,
+    /// reusing this client's underlying HTTP connection pool.
+    pub async fn fetch_history(&self, model: &str, region: &str) -> Result<VersionInfo> {
+        self.0.fetch_history(model, region).await
+    }
+
+    /// Queries the server for firmware binary metadata matching the requested model, region, and version.
+    pub async fn fetch_binary_info(
+        &self,
+        model: &str,
+        region: &str,
+        version: &str,
+    ) -> Result<BinaryInform> {
+        self.0.fetch_binary_info(model, region, version).await
+    }
+
+    /// Requests a download authorization ticket from FUS for `info`, probes the
+    /// final AES block to determine the exact unpadded payload length, and consumes
+    /// this client into an active [`DownloadSession`].
+    pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
+        Ok(DownloadSession(self.0.init_download(info).await?))
+    }
+}
+
+struct DownloadSessionCore<C: HttpClient> {
+    client: FusClientCore<C>,
     info: BinaryInform,
     decrypted_size: u64,
     /// Reauthentication generation counter. It also serves as the lock that
@@ -176,24 +272,8 @@ pub struct DownloadSession {
     reauth_gen: AsyncMutex<u64>,
 }
 
-impl DownloadSession {
-    #[cfg(all(not(target_arch = "wasm32"), test))]
-    async fn from_mock(client: crate::http::MockClient, info: BinaryInform) -> Result<Self> {
-        let mut session = Self {
-            client: FusClient {
-                client,
-                auth_state: Mutex::new(AuthState::default()),
-            },
-            info,
-            decrypted_size: 0,
-            reauth_gen: AsyncMutex::new(0),
-        };
-        session.decrypted_size = session.probe_decrypted_size().await?;
-        Ok(session)
-    }
-
-    /// Returns the firmware binary metadata associated with this download session.
-    pub fn info(&self) -> &BinaryInform {
+impl<C: HttpClient> DownloadSessionCore<C> {
+    fn info(&self) -> &BinaryInform {
         &self.info
     }
 
@@ -214,7 +294,7 @@ impl DownloadSession {
         let mut block = [0u8; 16];
         resp.into_reader().read_exact(&mut block).await?;
 
-        let mut dec = self.get_decryptor();
+        let mut dec = decryptor(&self.info.key);
         let (blocks, _) = InOutBuf::from(&mut block[..]).into_chunks();
         dec.decrypt_blocks_inout(blocks);
 
@@ -226,7 +306,7 @@ impl DownloadSession {
         &self,
         start: Option<u64>,
         end: Option<u64>,
-    ) -> std::result::Result<impl HttpResponse + use<>, HttpError> {
+    ) -> std::result::Result<C::Response, HttpError> {
         let auth_val = self.client.auth_state.lock().unwrap().auth_header();
         let range_val = match (start, end) {
             (Some(s), Some(e)) => Some(format!("bytes={s}-{e}")),
@@ -237,7 +317,7 @@ impl DownloadSession {
 
         let mut headers = [
             ("Authorization", auth_val.as_str()),
-            ("User-Agent", "SMART 2.0"),
+            ("User-Agent", FUS_USER_AGENT),
             ("Range", ""),
         ];
         let headers = if let Some(range) = &range_val {
@@ -251,7 +331,8 @@ impl DownloadSession {
             "http://cloud-neofussvr.samsungmobile.com/NF_SmartDownloadBinaryForMass.do?file={}{}",
             self.info.path, self.info.filename
         );
-        self.client
+        let resp = self
+            .client
             .client
             .send(HttpRequest {
                 method: HttpMethod::Get,
@@ -259,20 +340,19 @@ impl DownloadSession {
                 headers,
                 body: None,
             })
-            .await?
-            .ensure_success()
+            .await?;
+
+        // A non-zero byte range MUST receive 206 Partial Content; accepting 200 OK
+        // here would silently decrypt from byte 0 at the wrong offset.
+        if start.is_some_and(|s| s > 0) && resp.status() != 206 {
+            return Err(HttpError::Status(resp.status()));
+        }
+
+        resp.ensure_success()
     }
 
     /// Re-establish the session after the auth token expired (HTTP 401),
     /// rewriting the shared `nonce`/`auth`.
-    ///
-    /// `gen_seen` is the generation the failed request was signed with. Holding
-    /// `reauth_gen` serializes refreshes, and the generation check makes the
-    /// refresh idempotent: the first task to react to an expiry does the work
-    /// and bumps the counter, so the others — which were waiting on the same
-    /// lock with the same `gen_seen` — simply return and retry with the token
-    /// that is now fresh. The new generation is published only on full success,
-    /// so a failed refresh leaves the counter untouched and is retried.
     async fn reauthenticate(&self, gen_seen: u64) {
         let mut generation = self.reauth_gen.lock().await;
         if *generation != gen_seen {
@@ -284,29 +364,22 @@ impl DownloadSession {
             *generation += 1;
         }
     }
-
-    fn get_decryptor(&self) -> Aes128EcbDec {
-        Aes128EcbDec::new(&self.info.key.into())
-    }
 }
 
-impl DataSource for DownloadSession {
+impl<C: HttpClient> DataSource for DownloadSessionCore<C> {
     fn size(&self) -> u64 {
         self.decrypted_size
     }
 
     async fn fetch_range(
         &self,
-        range: impl RangeBounds<u64> + Send,
+        range: impl RangeBounds<u64> + MaybeSend,
     ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
         let aligned = AlignedRange::new(range, self.decrypted_size, self.info.size);
         if aligned.dec_remaining == 0 {
-            return Ok(DecryptReader(None));
+            return Ok(DecryptReader::empty());
         }
 
-        // Capture the token generation backing this request. If the request is
-        // rejected as unauthorized, this lets the refresh tell whether another
-        // task has already rotated the token in the meantime.
         let gen_used = *self.reauth_gen.lock().await;
 
         let resp = match self
@@ -314,10 +387,6 @@ impl DataSource for DownloadSession {
             .await
         {
             Err(HttpError::Status(401)) => {
-                // The download token expired mid-transfer. Refresh it (at most
-                // once per expiry across all tasks) and retry the request once
-                // with the new token. If it still fails, the caller's retry loop
-                // takes over.
                 self.reauthenticate(gen_used).await;
                 self.fetch_range_once(aligned.http_start, aligned.http_end)
                     .await
@@ -328,549 +397,174 @@ impl DataSource for DownloadSession {
 
         Ok(DecryptReader::new(
             resp.into_reader(),
-            self.get_decryptor(),
+            decryptor(&self.info.key),
             aligned,
         ))
     }
 }
 
-struct AlignedRange {
-    http_start: Option<u64>,
-    http_end: Option<u64>,
-    skip_start: usize,
-    dec_remaining: u64,
-    enc_remaining: u64,
-}
+/// Active firmware download session holding an authenticated [`FusClient`]
+/// and the resolved [`BinaryInform`] metadata.
+pub struct DownloadSession(DownloadSessionCore<PlatformClient>);
 
-impl AlignedRange {
-    fn new(range: impl RangeBounds<u64>, decrypted_size: u64, enc_size: u64) -> Self {
-        let empty = Self {
-            http_start: None,
-            http_end: None,
-            skip_start: 0,
-            dec_remaining: 0,
-            enc_remaining: 0,
-        };
-        let Some((req_start, end_opt)) = resolve_range_bounds(range) else {
-            return empty;
-        };
-        if decrypted_size == 0 || req_start >= decrypted_size {
-            return empty;
-        }
-
-        let max_enc_end = enc_size - 1;
-        let end_excl = end_opt.map_or(decrypted_size, |e| e.min(decrypted_size));
-        let req_end = end_excl - 1;
-        let aligned_start = req_start & !15;
-        let aligned_end = (req_end | 15).min(max_enc_end);
-        let dec_remaining = end_excl - req_start;
-        let enc_remaining = aligned_end - aligned_start + 1;
-
-        Self {
-            http_start: (aligned_start > 0).then_some(aligned_start),
-            http_end: (end_opt.is_some() || aligned_end < max_enc_end).then_some(aligned_end),
-            skip_start: (req_start - aligned_start) as usize,
-            dec_remaining,
-            enc_remaining,
-        }
+impl DownloadSession {
+    /// Returns the firmware binary metadata associated with this download session.
+    pub fn info(&self) -> &BinaryInform {
+        self.0.info()
     }
 }
 
-/// Async reader transparently decrypting an AES-128-ECB FUS byte range and trimming
-/// unaligned boundaries.
-struct DecryptReader<R>(Option<DecryptInner<R>>);
+impl DataSource for DownloadSession {
+    fn size(&self) -> u64 {
+        self.0.size()
+    }
 
-struct DecryptInner<R> {
-    resp: R,
-    dec: Aes128EcbDec,
-    rem: [u8; 16],
-    enc_len: usize,
-    dec_pos: usize,
-    dec_len: usize,
-    skip_start: usize,
-    dec_remaining: u64,
-    enc_remaining: u64,
-}
-
-impl<R> DecryptReader<R> {
-    fn new(resp: R, dec: Aes128EcbDec, aligned: AlignedRange) -> Self {
-        if aligned.dec_remaining == 0 {
-            return Self(None);
-        }
-        Self(Some(DecryptInner {
-            resp,
-            dec,
-            rem: [0; 16],
-            enc_len: 0,
-            dec_pos: 0,
-            dec_len: 0,
-            skip_start: aligned.skip_start,
-            dec_remaining: aligned.dec_remaining,
-            enc_remaining: aligned.enc_remaining,
-        }))
+    async fn fetch_range(
+        &self,
+        range: impl RangeBounds<u64> + MaybeSend,
+    ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
+        self.0.fetch_range(range).await
     }
 }
 
-impl<R> DecryptInner<R> {
-    fn drain_dec_rem(&mut self, buf: &mut [u8]) -> usize {
-        let n = (self.dec_len - self.dec_pos).min(buf.len());
-        buf[..n].copy_from_slice(&self.rem[self.dec_pos..self.dec_pos + n]);
-        self.dec_pos += n;
-        self.dec_remaining -= n as u64;
-        n
-    }
-}
-
-fn unpadded_block_len(block: &[u8; 16]) -> usize {
-    let pad = block[15] as usize;
-    if (1..=16).contains(&pad) && block[16 - pad..].iter().all(|&b| b == pad as u8) {
-        16 - pad
-    } else {
-        16
-    }
-}
-
-fn poll_read_at_least_16<R: AsyncRead + Unpin>(
-    resp: &mut R,
-    cx: &mut Context<'_>,
-    dst: &mut [u8],
-    total: &mut usize,
-) -> Poll<io::Result<()>> {
-    while *total < 16 {
-        match Pin::new(&mut *resp).poll_read(cx, &mut dst[*total..]) {
-            Poll::Ready(Ok(0)) => {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "premature EOF in encrypted stream",
-                )));
-            }
-            Poll::Ready(Ok(n)) => *total += n,
-            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-    }
-    Poll::Ready(Ok(()))
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for DecryptReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        let Some(inner) = self.0.as_mut() else {
-            return Poll::Ready(Ok(0));
-        };
-
-        if inner.dec_pos < inner.dec_len {
-            let n = inner.drain_dec_rem(buf);
-            if inner.dec_remaining == 0 {
-                self.0 = None;
-            }
-            return Poll::Ready(Ok(n));
-        }
-
-        let fast_cap = buf
-            .len()
-            .min(inner.dec_remaining.min(usize::MAX as u64) as usize)
-            .min(inner.enc_remaining.min(usize::MAX as u64) as usize);
-        let max_aligned = fast_cap & !15;
-
-        // Zero-copy fast path: aligned start and >= 16 bytes requested and available.
-        if inner.skip_start == 0 && max_aligned >= 16 {
-            let mut total = inner.enc_len;
-            buf[..total].copy_from_slice(&inner.rem[..total]);
-            inner.enc_len = 0;
-
-            match poll_read_at_least_16(&mut inner.resp, cx, &mut buf[..max_aligned], &mut total) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => {
-                    inner.rem[..total].copy_from_slice(&buf[..total]);
-                    inner.enc_len = total;
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending => {
-                    inner.rem[..total].copy_from_slice(&buf[..total]);
-                    inner.enc_len = total;
-                    return Poll::Pending;
-                }
-            }
-
-            let tail_len = total & 15;
-            let aligned = total - tail_len;
-            inner.rem[..tail_len].copy_from_slice(&buf[aligned..total]);
-            inner.enc_len = tail_len;
-
-            let (blocks, _) = InOutBuf::from(&mut buf[..aligned]).into_chunks();
-            inner.dec.decrypt_blocks_inout(blocks);
-
-            inner.enc_remaining -= aligned as u64;
-            inner.dec_remaining -= aligned as u64;
-            if inner.dec_remaining == 0 {
-                self.0 = None;
-            }
-            return Poll::Ready(Ok(aligned));
-        }
-
-        // Staging path for unaligned prefix, small caller buffers (< 16),
-        // or unaligned range end (< 16 remaining).
-        let mut total = inner.enc_len;
-        inner.enc_len = 0;
-
-        match poll_read_at_least_16(&mut inner.resp, cx, &mut inner.rem, &mut total) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => {
-                inner.enc_len = total;
-                return Poll::Ready(Err(e));
-            }
-            Poll::Pending => {
-                inner.enc_len = total;
-                return Poll::Pending;
-            }
-        }
-        inner.enc_remaining = inner.enc_remaining.saturating_sub(16);
-
-        let (blocks, _) = InOutBuf::from(&mut inner.rem[..]).into_chunks();
-        inner.dec.decrypt_blocks_inout(blocks);
-
-        let start_in_block = inner.skip_start;
-        inner.skip_start = 0;
-        let max_avail = inner.dec_remaining.min(16) as usize;
-        let avail = (16 - start_in_block).min(max_avail);
-        inner.dec_pos = start_in_block;
-        inner.dec_len = start_in_block + avail;
-
-        let n = inner.drain_dec_rem(buf);
-        if inner.dec_remaining == 0 {
-            self.0 = None;
-        }
-        Poll::Ready(Ok(n))
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(not(target_arch = "wasm32"), test))]
 mod tests {
     use super::*;
-    use aes::cipher::BlockModeEncrypt;
+    use crate::decrypt::tests::{TEST_KEY, encrypt_pkcs7};
+    use crate::http::{MockClient, MockResponse};
+    use crate::test_util::parse_http_range;
     use futures::executor::block_on;
-    use futures::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    const TEST_KEY: [u8; 16] = [0x13; 16];
-
-    fn encrypt_test_data(plaintext: &[u8]) -> Vec<u8> {
-        let mut buf = plaintext.to_vec();
-        let mut enc = ecb::Encryptor::<aes::Aes128>::new_from_slice(&TEST_KEY).unwrap();
-        let (blocks, tail) = InOutBuf::from(buf.as_mut_slice()).into_chunks();
-        assert!(tail.is_empty());
-        enc.encrypt_blocks_inout(blocks);
-        buf
-    }
-
-    fn encrypt_pkcs7(plaintext: &[u8]) -> Vec<u8> {
-        let pad = 16 - (plaintext.len() % 16);
-        let mut padded = plaintext.to_vec();
-        padded.extend(std::iter::repeat_n(pad as u8, pad));
-        encrypt_test_data(&padded)
-    }
-
-    struct TrickleReader {
-        data: Vec<u8>,
-        pos: usize,
-        step: usize,
-        reads: usize,
-    }
-
-    impl AsyncRead for TrickleReader {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut [u8],
-        ) -> Poll<io::Result<usize>> {
-            self.reads += 1;
-            if self.reads.is_multiple_of(5) {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            if self.reads.is_multiple_of(3) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "eintr")));
-            }
-            let n = (self.data.len() - self.pos).min(self.step).min(buf.len());
-            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-            self.pos += n;
-            Poll::Ready(Ok(n))
-        }
-    }
-
-    fn read_range(
-        ciphertext: &[u8],
-        decrypted_size: u64,
-        range: impl RangeBounds<u64>,
-        step: usize,
-        buf_len: usize,
-    ) -> ((Option<u64>, Option<u64>), Vec<u8>) {
-        let aligned = AlignedRange::new(range, decrypted_size, ciphertext.len() as u64);
-        let http_range = (aligned.http_start, aligned.http_end);
-
-        let slice = if aligned.dec_remaining == 0 {
-            Vec::new()
-        } else {
-            let s = aligned.http_start.unwrap_or(0) as usize;
-            match aligned.http_end {
-                Some(e) => ciphertext[s..=e as usize].to_vec(),
-                None => ciphertext[s..].to_vec(),
-            }
-        };
-
-        let mut reader = DecryptReader::new(
-            TrickleReader {
-                data: slice,
-                pos: 0,
-                step,
-                reads: 0,
+    async fn session_from_mock(
+        client: MockClient,
+        info: BinaryInform,
+    ) -> Result<DownloadSessionCore<MockClient>> {
+        let mut session = DownloadSessionCore {
+            client: FusClientCore {
+                client,
+                auth_state: Mutex::new(AuthState::default()),
             },
-            Aes128EcbDec::new(&TEST_KEY.into()),
-            aligned,
-        );
+            info,
+            decrypted_size: 0,
+            reauth_gen: AsyncMutex::new(0),
+        };
+        session.decrypted_size = session.probe_decrypted_size().await?;
+        Ok(session)
+    }
 
-        block_on(async {
-            let mut out = Vec::new();
-            let mut buf = vec![0u8; buf_len];
-            loop {
-                let n = reader.read(&mut buf).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                out.extend_from_slice(&buf[..n]);
-            }
-            (http_range, out)
+    fn range_mock(
+        ciphertext: Arc<Vec<u8>>,
+        requests: Arc<Mutex<Vec<Option<String>>>>,
+    ) -> MockClient {
+        MockClient::from_handler(move |req| {
+            let data = Arc::clone(&ciphertext);
+            let range_hdr = req.header("Range").map(str::to_owned);
+            requests.lock().unwrap().push(range_hdr.clone());
+            let (s, e) = parse_http_range(range_hdr.as_deref(), data.len());
+            let is_partial = range_hdr.is_some();
+            Box::pin(async move {
+                let slice = data[s..e].to_vec();
+                Ok(if is_partial {
+                    MockResponse::partial_bytes(slice)
+                } else {
+                    MockResponse::ok_bytes(slice)
+                })
+            })
         })
     }
 
     #[test]
-    fn test_decrypt_reader_ranges() {
-        fn check(
-            ciphertext: &[u8],
-            range: impl RangeBounds<u64> + std::fmt::Debug + Clone,
-            exp_range: (Option<u64>, Option<u64>),
-            step: usize,
-            buf_len: usize,
-            expected: &[u8],
-        ) {
-            let (http_range, out) = read_range(
-                ciphertext,
-                ciphertext.len() as u64,
-                range.clone(),
-                step,
-                buf_len,
-            );
-            assert_eq!(http_range, exp_range, "range={range:?}");
-            assert_eq!(out, expected, "range={range:?}");
-        }
+    fn test_fus_client_handshake_inform_init_and_history_fallback() {
+        let plaintext: Vec<u8> = (0..43_u8).map(|i| i.wrapping_mul(3)).collect();
+        let ciphertext = Arc::new(encrypt_pkcs7(&plaintext));
+        let enc_len = ciphertext.len();
 
-        let plaintext: Vec<u8> = (0..128_u8).collect();
-        let ciphertext = encrypt_test_data(&plaintext);
-
-        check(&ciphertext, .., (None, None), 5, 64, &plaintext);
-        check(
-            &ciphertext,
-            ..=20,
-            (None, Some(31)),
-            64,
-            64,
-            &plaintext[..=20],
+        let inform_xml = format!(
+            r#"<FUSMsg><FUSBody>
+                <Results><Status>200</Status></Results>
+                <Put>
+                    <BINARY_NAME><Data>SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4</Data></BINARY_NAME>
+                    <BINARY_BYTE_SIZE><Data>{enc_len}</Data></BINARY_BYTE_SIZE>
+                    <BINARY_LOCAL_CODE><Data>XAA</Data></BINARY_LOCAL_CODE>
+                    <BINARY_SW_VERSION><Data>S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1/S931U1UEU1AWF1</Data></BINARY_SW_VERSION>
+                    <DEVICE_MODEL_TYPE><Data>9</Data></DEVICE_MODEL_TYPE>
+                    <MODEL_PATH><Data>/neofus/9/</Data></MODEL_PATH>
+                    <LOGIC_VALUE_FACTORY><Data>1234567890abcdef</Data></LOGIC_VALUE_FACTORY>
+                </Put>
+            </FUSBody></FUSMsg>"#
         );
-        check(
-            &ciphertext,
-            5..=73,
-            (None, Some(79)),
-            3,
-            7,
-            &plaintext[5..=73],
-        );
-        check(&ciphertext, 5.., (None, None), 7, 32, &plaintext[5..]);
-        check(
-            &ciphertext,
-            19..,
-            (Some(16), None),
-            11,
-            256,
-            &plaintext[19..],
-        );
-        #[allow(clippy::reversed_empty_ranges)]
-        check(&ciphertext, 20..10, (None, None), 16, 64, &[]);
-        check(&ciphertext, 128.., (None, None), 16, 64, &[]);
-    }
 
-    #[test]
-    fn test_decrypt_reader_pkcs7_unpadding() {
-        // Test 1-byte padding, partial-block (5-byte) padding, and full-block (16-byte) padding.
-        for plain_len in [15_usize, 43, 48] {
-            let plaintext: Vec<u8> = (0..plain_len).map(|i| (i as u8).wrapping_mul(3)).collect();
-            let ciphertext = encrypt_pkcs7(&plaintext);
-            let dec_size = plain_len as u64;
+        let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_auth_clone = Arc::clone(&seen_auth);
+        let data = Arc::clone(&ciphertext);
 
-            for (step, buf_len) in [(5, 7), (64, 64)] {
-                let (_, full) = read_range(&ciphertext, dec_size, .., step, buf_len);
-                assert_eq!(full, plaintext, "plain_len={plain_len}");
+        let client = MockClient::from_handler(move |req| {
+            let auth_hdr = req.header("Authorization").unwrap_or_default().to_owned();
+            seen_auth_clone.lock().unwrap().push(auth_hdr);
 
-                let (_, tail) = read_range(&ciphertext, dec_size, 10.., step, buf_len);
-                assert_eq!(tail, &plaintext[10..], "plain_len={plain_len}");
+            if req.url.contains("NF_SmartDownloadGenerateNonce.do") {
+                return Box::pin(async {
+                    Ok(MockResponse::ok_bytes(Vec::new()).with_header("nonce", "INITNONCE1234567"))
+                });
             }
-        }
-
-        // Ranges overlapping and inside trailing PKCS#7 padding (43 plain + 5 pad = 48 encrypted).
-        let plaintext: Vec<u8> = (0..43_u8).map(|i| i + 50).collect();
-        let ciphertext = encrypt_pkcs7(&plaintext);
-        assert_eq!(ciphertext.len(), 48);
-
-        // Straddling plaintext/padding boundary (40..=46 -> only 40..43 are real plaintext)
-        let (_, straddle) = read_range(&ciphertext, 43, 40..=46, 7, 32);
-        assert_eq!(straddle, &plaintext[40..43]);
-
-        // Entirely inside the 5-byte padding region
-        let (_, only_pad) = read_range(&ciphertext, 43, 43..=47, 16, 32);
-        assert!(only_pad.is_empty());
-
-        // Starting at the full 16-byte PKCS#7 block (48 plain + 16 pad = 64 encrypted)
-        let aligned_plain: Vec<u8> = (0..48_u8).map(|i| i + 20).collect();
-        let aligned_cipher = encrypt_pkcs7(&aligned_plain);
-        assert_eq!(aligned_cipher.len(), 64);
-        let (_, pad_block) = read_range(&aligned_cipher, 48, 48.., 16, 64);
-        assert!(pad_block.is_empty());
-    }
-
-    #[test]
-    fn test_decrypt_reader_truncated_block_errors() {
-        let plaintext = vec![0xAA; 32];
-        let ciphertext = encrypt_test_data(&plaintext);
-
-        // Truncated mid-block (25 of 32 bytes) and on a block boundary (16 of 32 bytes)
-        for trunc_len in [25_usize, 16] {
-            let aligned = AlignedRange::new(.., 32, 32);
-            let mut reader = DecryptReader::new(
-                Cursor::new(ciphertext[..trunc_len].to_vec()),
-                Aes128EcbDec::new(&TEST_KEY.into()),
-                aligned,
-            );
-            block_on(async {
-                let mut out = [0u8; 64];
-                assert_eq!(reader.read(&mut out).await.unwrap(), 16);
-                let err = reader.read(&mut out[16..]).await.unwrap_err();
-                assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-            });
-        }
-    }
-
-    #[test]
-    fn test_decrypt_reader_error_recovery_across_paths() {
-        struct FlakyReader {
-            data: Vec<u8>,
-            pos: usize,
-            reads: usize,
-            fail_next: bool,
-        }
-
-        impl AsyncRead for FlakyReader {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-                buf: &mut [u8],
-            ) -> Poll<io::Result<usize>> {
-                if self.fail_next {
-                    self.fail_next = false;
-                    self.reads += 1;
-                    if self.reads.is_multiple_of(2) {
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::WouldBlock)));
-                }
-                let n = (self.data.len() - self.pos).min(7).min(buf.len());
-                if n > 0 {
-                    self.fail_next = true;
-                }
-                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-                self.pos += n;
-                Poll::Ready(Ok(n))
+            if req.url.contains("NF_SmartDownloadBinaryInform.do") {
+                let body = inform_xml.as_bytes().to_vec();
+                return Box::pin(async move {
+                    Ok(MockResponse::ok_bytes(body).with_header("nonce", "ROTATEDNONCE1234"))
+                });
             }
-        }
+            if req.url.contains("NF_SmartDownloadBinaryInitForMass.do") {
+                let ok =
+                    b"<FUSMsg><FUSBody><Results><Status>200</Status></Results></FUSBody></FUSMsg>"
+                        .to_vec();
+                return Box::pin(async move { Ok(MockResponse::ok_bytes(ok)) });
+            }
+            if req.url.contains("SmartHistory.do") {
+                return Box::pin(async { Err(HttpError::Status(503)) });
+            }
+            if req.url.contains("version.xml") {
+                let xml = b"<versioninfo><firmware><version><latest>A/B/C</latest></version></firmware></versioninfo>".to_vec();
+                return Box::pin(async move { Ok(MockResponse::ok_bytes(xml)) });
+            }
+            let (s, e) = parse_http_range(req.header("Range"), data.len());
+            let slice = data[s..e].to_vec();
+            Box::pin(async move { Ok(MockResponse::partial_bytes(slice)) })
+        });
 
-        let plaintext: Vec<u8> = (0..37_u8).map(|i| i ^ 0x5A).collect();
-        let ciphertext = encrypt_pkcs7(&plaintext);
-        let aligned = AlignedRange::new(.., plaintext.len() as u64, ciphertext.len() as u64);
-        let mut reader = DecryptReader::new(
-            FlakyReader {
-                data: ciphertext,
-                pos: 0,
-                reads: 0,
-                fail_next: false,
-            },
-            Aes128EcbDec::new(&TEST_KEY.into()),
-            aligned,
-        );
-
-        // Alternate between 64-byte (fast path) and 3-byte (staging path) buffers across WouldBlock and Poll::Pending
         block_on(async {
-            let mut out = Vec::new();
-            let mut use_large = true;
-            loop {
-                let mut buf = vec![0u8; if use_large { 64 } else { 3 }];
-                match reader.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        out.extend_from_slice(&buf[..n]);
-                        use_large = !use_large;
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        use_large = !use_large;
-                    }
-                    Err(e) => panic!("unexpected error: {e}"),
-                }
-            }
-            assert_eq!(out, plaintext);
+            let fus = FusClientCore::new(client).await.unwrap();
+
+            // SmartHistory.do fails with 503 -> falls back cleanly to version.xml
+            let hist = fus.fetch_history("SM-S931U1", "XAA").await.unwrap();
+            assert_eq!(hist.latest, "A/B/C/A");
+
+            let info = fus
+                .fetch_binary_info(
+                    "SM-S931U1",
+                    "XAA",
+                    "S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1",
+                )
+                .await
+                .unwrap();
+            assert_eq!(info.encrypted_size(), enc_len as u64);
+
+            // Replace key with TEST_KEY so the probed ciphertext decrypts to valid PKCS#7 padding
+            let mut info = info;
+            info.key = TEST_KEY;
+            let session = fus.init_download(info).await.unwrap();
+            assert_eq!(session.size(), 43);
+
+            // Verify nonce rotation occurred between GenerateNonce -> BinaryInform -> BinaryInitForMass
+            let auths = seen_auth.lock().unwrap();
+            assert!(auths.iter().any(|h| h.contains("INITNONCE1234567")));
+            assert!(auths.iter().any(|h| h.contains("ROTATEDNONCE1234")));
         });
     }
 
     #[test]
     fn test_download_session_data_source() {
-        use crate::http::{MockClient, MockResponse};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        fn range_mock(
-            ciphertext: Arc<Vec<u8>>,
-            requests: Arc<Mutex<Vec<Option<String>>>>,
-        ) -> MockClient {
-            MockClient::from_handler(move |req| {
-                let data = Arc::clone(&ciphertext);
-                let range_hdr = req
-                    .headers
-                    .iter()
-                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Range"))
-                    .map(|&(_, v)| v.to_string());
-                requests.lock().unwrap().push(range_hdr.clone());
-                let (s, e) = match range_hdr.as_deref() {
-                    None => (0, data.len()),
-                    Some(spec) => {
-                        let spec = spec.strip_prefix("bytes=").unwrap();
-                        let (s, e) = spec.split_once('-').unwrap();
-                        let start = s.parse::<usize>().unwrap();
-                        let end = if e.is_empty() {
-                            data.len()
-                        } else {
-                            (e.parse::<usize>().unwrap() + 1).min(data.len())
-                        };
-                        (start, end)
-                    }
-                };
-                Box::pin(async move { Ok(MockResponse::ok_bytes(data[s..e].to_vec())) })
-            })
-        }
-
         let plaintext: Vec<u8> = (0..75_u8).map(|i| i.wrapping_mul(5)).collect();
         let ciphertext = Arc::new(encrypt_pkcs7(&plaintext));
         assert_eq!(ciphertext.len(), 80);
@@ -890,7 +584,7 @@ mod tests {
 
         block_on(async {
             // Probing the last 16 bytes resolves exact unpadded length (75 of 80)
-            let session = DownloadSession::from_mock(client, info).await.unwrap();
+            let session = session_from_mock(client, info).await.unwrap();
             assert_eq!(session.size(), 75);
             assert_eq!(
                 requests.lock().unwrap().as_slice(),
@@ -906,7 +600,7 @@ mod tests {
                 size: aligned_cipher.len() as u64,
                 ..session.info().clone()
             };
-            let aligned_session = DownloadSession::from_mock(
+            let aligned_session = session_from_mock(
                 range_mock(aligned_cipher, Arc::clone(&aligned_reqs)),
                 aligned_info,
             )
@@ -933,7 +627,7 @@ mod tests {
                 size: 0,
                 ..session.info().clone()
             };
-            let empty_session = DownloadSession::from_mock(
+            let empty_session = session_from_mock(
                 MockClient::from_handler(|_| {
                     Box::pin(async { unreachable!("must not issue HTTP request") })
                 }),
@@ -989,14 +683,27 @@ mod tests {
             assert_eq!(full, plaintext);
             assert_eq!(requests.lock().unwrap().as_slice(), &[None]);
 
-            // Error mapping via io::Error::other (probe succeeds, subsequent fetch returns 503)
+            // Server ignoring Range (returning 200 OK for non-zero offset) is rejected
+            let bad_200_session = session_from_mock(
+                MockClient::from_handler(|_| {
+                    Box::pin(async { Ok(MockResponse::ok_bytes(vec![0; 80])) })
+                }),
+                session.info().clone(),
+            )
+            .await;
+            assert!(matches!(
+                bad_200_session,
+                Err(Error::Http(HttpError::Status(200)))
+            ));
+
+            // Error mapping via io::Error::other (probe succeeds with 206, subsequent fetch returns 503)
             let probed = Arc::new(AtomicBool::new(false));
             let tail_block = ciphertext[64..80].to_vec();
-            let err_session = DownloadSession::from_mock(
+            let err_session = session_from_mock(
                 MockClient::from_handler(move |_| {
                     if !probed.swap(true, Ordering::Relaxed) {
                         let b = tail_block.clone();
-                        Box::pin(async move { Ok(MockResponse::ok_bytes(b)) })
+                        Box::pin(async move { Ok(MockResponse::partial_bytes(b)) })
                     } else {
                         Box::pin(async { Err(HttpError::Status(503)) })
                     }
@@ -1012,10 +719,6 @@ mod tests {
 
     #[test]
     fn test_download_session_401_reauth_and_invalid_size() {
-        use crate::http::{MockClient, MockResponse};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let plaintext: Vec<u8> = (0..43_u8).map(|i| i.wrapping_mul(7)).collect();
         let ciphertext = Arc::new(encrypt_pkcs7(&plaintext));
         let base_info = BinaryInform {
@@ -1034,7 +737,7 @@ mod tests {
                 size: 17,
                 ..base_info.clone()
             };
-            let err = DownloadSession::from_mock(
+            let err = session_from_mock(
                 MockClient::from_handler(|_| {
                     Box::pin(async { unreachable!("must reject invalid size before HTTP") })
                 }),
@@ -1048,10 +751,8 @@ mod tests {
             // Mid-download HTTP 401 rotates nonce via GenerateNonce + BinaryInitForMass
             // once across concurrent tasks and retries with the refreshed Authorization header.
             let fresh_nonce = "NEWNONCE12345678";
-            let expected_auth_hdr = format!(
-                "FUS nonce=\"{fresh_nonce}\", signature=\"{}\", nc=\"\", type=\"\", realm=\"\", newauth=\"1\"",
-                auth::decrypt_nonce(fresh_nonce)
-            );
+            let expected_auth_hdr =
+                auth::format_auth_header(fresh_nonce, &auth::decrypt_nonce(fresh_nonce));
             let nonce_calls = Arc::new(AtomicUsize::new(0));
             let init_calls = Arc::new(AtomicUsize::new(0));
             let probe_done = Arc::new(AtomicUsize::new(0));
@@ -1074,40 +775,28 @@ mod tests {
                     return Box::pin(async move { Ok(MockResponse::ok_bytes(ok_xml)) });
                 }
 
-                let auth_hdr = req
-                    .headers
-                    .iter()
-                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Authorization"))
-                    .map(|&(_, v)| v.to_string())
-                    .unwrap_or_default();
+                let auth_hdr = req.header("Authorization").unwrap_or_default();
                 let is_probe = pd.fetch_add(1, Ordering::SeqCst) == 0;
                 if !is_probe && auth_hdr != exp_auth {
                     return Box::pin(async { Err(HttpError::Status(401)) });
                 }
 
-                let range_hdr = req
-                    .headers
-                    .iter()
-                    .find(|&&(k, _)| k.eq_ignore_ascii_case("Range"))
-                    .map(|&(_, v)| v.to_string());
-                let bytes = match range_hdr.as_deref() {
-                    None => data.as_ref().clone(),
-                    Some(spec) => {
-                        let spec = spec.strip_prefix("bytes=").unwrap();
-                        let (s, e) = spec.split_once('-').unwrap();
-                        let s = s.parse::<usize>().unwrap();
-                        let e = (e.parse::<usize>().unwrap() + 1).min(data.len());
-                        data[s..e].to_vec()
-                    }
-                };
-                Box::pin(async move { Ok(MockResponse::ok_bytes(bytes)) })
+                let range_hdr = req.header("Range");
+                let (s, e) = parse_http_range(range_hdr, data.len());
+                let is_partial = range_hdr.is_some();
+                let bytes = data[s..e].to_vec();
+                Box::pin(async move {
+                    Ok(if is_partial {
+                        MockResponse::partial_bytes(bytes)
+                    } else {
+                        MockResponse::ok_bytes(bytes)
+                    })
+                })
             });
 
-            let session = DownloadSession::from_mock(client, base_info).await.unwrap();
+            let session = session_from_mock(client, base_info).await.unwrap();
             assert_eq!(session.size(), 43);
 
-            // Issue two concurrent fetches that both observe 401 on generation 0;
-            // reauth_gen serializes and deduplicates them into a single refresh.
             let (r1, r2) = futures::join!(session.fetch_range(0..20), session.fetch_range(20..43));
             let mut out1 = Vec::new();
             let mut out2 = Vec::new();

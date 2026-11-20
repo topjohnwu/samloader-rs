@@ -18,6 +18,7 @@
 
 use crate::compat::{MaybeSend, MaybeSync, WorkerSet, sleep};
 use crate::data::{DataSource, resolve_range_bounds};
+use crate::error::HttpError;
 use futures::future::poll_fn;
 use futures::io::{AsyncRead, AsyncReadExt};
 use std::collections::{BTreeMap, VecDeque};
@@ -29,7 +30,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+#[cfg(not(test))]
 const BLOCK_SIZE: usize = 2 * 1024 * 1024;
+#[cfg(test)]
+const BLOCK_SIZE: usize = 64 * 1024;
 
 const TARGET_TASK_BLOCKS: u64 = 12; // 12 x 2 MiB = 24 MiB per sub-range fetch
 
@@ -65,8 +69,27 @@ fn retry_backoff(attempt: u32) -> Duration {
     }
 }
 
+fn is_retryable_error(err: &io::Error) -> bool {
+    if let Some(HttpError::Status(status)) = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<HttpError>())
+    {
+        return matches!(*status, 401 | 408 | 429 | 500..=599);
+    }
+
+    !matches!(
+        err.kind(),
+        io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::NotFound
+    )
+}
+
 /// Diagnostic events emitted by [`ParallelDataSource`] during retries or throttling.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransferWarning {
     /// Transient stream error that will be retried with backoff.
     Retry {
@@ -103,6 +126,16 @@ pub trait TransferObserver: MaybeSend + MaybeSync {
 
 impl TransferObserver for () {}
 
+impl<O: TransferObserver + ?Sized> TransferObserver for Arc<O> {
+    fn on_bytes(&self, wire_bytes: u64, net_bytes: u64) {
+        (**self).on_bytes(wire_bytes, net_bytes);
+    }
+
+    fn on_warning(&self, warning: TransferWarning) {
+        (**self).on_warning(warning);
+    }
+}
+
 /// Parallel sliding-window wrapper around any [`DataSource`].
 pub struct ParallelDataSource<S: DataSource> {
     inner: Arc<S>,
@@ -131,7 +164,7 @@ impl<S: DataSource> ParallelDataSource<S> {
     }
 
     /// Configures this source to report progress and warnings to `observer`.
-    pub fn with_observer(mut self, observer: Arc<dyn TransferObserver>) -> Self {
+    pub fn with_observer<O: TransferObserver + 'static>(mut self, observer: Arc<O>) -> Self {
         self.observer = observer;
         self
     }
@@ -144,32 +177,29 @@ impl<S: DataSource + 'static> ParallelDataSource<S> {
             core: None,
             current: None,
         };
-        let Some((start, end)) = resolve_range_bounds(range) else {
+        let Some(clamped) = resolve_range_bounds(range, self.inner.size()) else {
             return empty_reader();
         };
-        let total_size = self.inner.size();
-        if total_size == 0 || start >= total_size {
-            return empty_reader();
-        }
+        let start = clamped.start;
+        let effective_end = clamped.end;
 
-        let effective_end = end.map_or(total_size, |e| e.min(total_size));
         let rem = effective_end - start;
         let total_blks = rem.div_ceil(BLOCK_SIZE as u64);
         let n_workers = self
             .concurrency
             .min(total_blks.min(usize::MAX as u64) as usize);
 
-        // 1.5x wave window (`1.5 * concurrency * TARGET_TASK_BLOCKS`) provides 0.5x
+        // 1.5x wave window (`1.5 * n_workers * TARGET_TASK_BLOCKS`) provides 0.5x
         // wave slack so normal per-connection jitter never stalls or triggers premature
         // socket-closing steals, while keeping -j 8 at 288 MiB (216 MiB at WASM K=6).
-        let window_blocks = ((self.concurrency as u64)
+        let window_blocks = ((n_workers as u64)
             .saturating_mul(TARGET_TASK_BLOCKS)
             .saturating_mul(3)
             / 2)
         .clamp(24, MAX_WINDOW_BLOCKS);
         let max_pooled_bufs = usize::try_from(window_blocks)
             .unwrap_or(usize::MAX)
-            .saturating_add(self.concurrency.saturating_mul(2));
+            .saturating_add(1);
 
         let core = Arc::new(SharedCore {
             base_offset: start,
@@ -180,18 +210,8 @@ impl<S: DataSource + 'static> ParallelDataSource<S> {
             delivered_blk: AtomicU64::new(0),
             rewind_debt: AtomicU64::new(0),
             state: Mutex::new(State {
-                total_blks,
-                committed_blks: 0,
-                consumed_blk: 0,
-                next_deliver_blk: 0,
-                next_dispatch_blk: 0,
-                hedged_blk: None,
-                reorder: BTreeMap::new(),
-                retry_queue: VecDeque::new(),
-                ready_queue: VecDeque::new(),
-                buf_pool: Vec::new(),
-                active_slots: vec![None; n_workers],
-                in_flight_tasks: 0,
+                scheduler: Scheduler::new(total_blks, n_workers),
+                reorder: ReorderQueue::new(),
                 live: n_workers,
                 worker_wakers: vec![None; n_workers],
                 reader_waker: None,
@@ -215,6 +235,54 @@ impl<S: DataSource + 'static> ParallelDataSource<S> {
             current: None,
         }
     }
+
+    async fn read_at_single_range(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let total = buf.len();
+        let end = offset + total as u64;
+        let mut filled = 0usize;
+        let mut retries = 0u32;
+
+        loop {
+            let resume_from = filled;
+            let err = match self.inner.fetch_range(offset + filled as u64..end).await {
+                Ok(mut reader) => loop {
+                    if filled == total {
+                        return Ok(filled);
+                    }
+                    match reader.read(&mut buf[filled..]).await {
+                        Ok(0) => {
+                            break io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "premature EOF while reading range",
+                            );
+                        }
+                        Ok(n) => filled += n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => break e,
+                    }
+                },
+                Err(e) => e,
+            };
+
+            if !is_retryable_error(&err) {
+                return Err(err);
+            }
+            if filled > resume_from {
+                retries = 0;
+            }
+            retries += 1;
+            if retries > MAX_STALL_RETRIES {
+                return Err(err);
+            }
+            self.observer.on_warning(TransferWarning::Retry {
+                offset: offset + filled as u64,
+                attempt: retries,
+                max_attempts: MAX_STALL_RETRIES,
+                error: err.to_string(),
+            });
+            sleep(retry_backoff(retries)).await;
+        }
+    }
 }
 
 impl<S: DataSource + 'static> DataSource for ParallelDataSource<S> {
@@ -224,9 +292,33 @@ impl<S: DataSource + 'static> DataSource for ParallelDataSource<S> {
 
     async fn fetch_range(
         &self,
-        range: impl RangeBounds<u64> + Send,
+        range: impl RangeBounds<u64> + MaybeSend,
     ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
         Ok(self.start_reader(range))
+    }
+
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let size = self.inner.size();
+        if buf.is_empty() || offset >= size {
+            return Ok(0);
+        }
+        let target_len = (size - offset).min(buf.len() as u64) as usize;
+        if target_len <= BLOCK_SIZE {
+            return self
+                .read_at_single_range(&mut buf[..target_len], offset)
+                .await;
+        }
+        let mut reader = self.start_reader(offset..offset + target_len as u64);
+        let mut filled = 0;
+        while filled < target_len {
+            match reader.read(&mut buf[filled..target_len]).await {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(filled)
     }
 }
 
@@ -288,69 +380,62 @@ impl AsyncRead for ParallelReader {
             Pending,
         }
 
-        loop {
-            self.workers.poll_inline(cx);
-
-            let step = {
-                let mut state = core.state.lock().unwrap();
-                if let Some(err) = state.error.take() {
-                    state.aborted = true;
-                    state.reader_waker = None;
-                    state.wake_all_workers();
-                    Step::Err(err)
-                } else if let Some(blk) = state.ready_queue.pop_front() {
-                    Step::Ready(blk)
-                } else if state.next_deliver_blk >= state.total_blks {
-                    // Every block in `0..total_blks` has been delivered; do not wait for
-                    // slow or hung hedged stragglers to exit before completing EOF.
-                    state.aborted = true;
-                    state.reader_waker = None;
-                    state.wake_all_workers();
-                    Step::Eof
-                } else if state.live == 0 {
-                    state.aborted = true;
-                    state.reader_waker = None;
-                    Step::Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "download workers terminated before stream completion",
-                    ))
-                } else {
-                    state.reader_waker = Some(cx.waker().clone());
-                    Step::Pending
-                }
-            };
-
-            match step {
-                Step::Ready(blk) => {
-                    if blk.len == 0 {
-                        core.recycle_block(blk.buf);
-                        continue;
-                    }
-                    let n = blk.len.min(buf.len());
-                    buf[..n].copy_from_slice(&blk.buf[..n]);
-                    if n == blk.len {
-                        core.recycle_block(blk.buf);
-                    } else {
-                        self.current = Some(CurrentBlock {
-                            buf: blk.buf,
-                            pos: n,
-                            len: blk.len,
-                        });
-                    }
-                    return Poll::Ready(Ok(n));
-                }
-                Step::Err(err) => {
-                    self.core = None;
-                    self.workers.abort_all();
-                    return Poll::Ready(Err(err));
-                }
-                Step::Eof => {
-                    self.core = None;
-                    self.workers.abort_all();
-                    return Poll::Ready(Ok(0));
-                }
-                Step::Pending => return Poll::Pending,
+        let step = {
+            let mut state = core.state.lock().unwrap();
+            if let Some(err) = state.error.take() {
+                state.aborted = true;
+                state.reader_waker = None;
+                state.wake_all_workers();
+                Step::Err(err)
+            } else if let Some(blk) = state.reorder.ready_queue.pop_front() {
+                Step::Ready(blk)
+            } else if state.reorder.next_deliver_blk >= state.scheduler.total_blks {
+                // Every block in `0..total_blks` has been delivered; do not wait for
+                // slow or hung hedged stragglers to exit before completing EOF.
+                state.aborted = true;
+                state.reader_waker = None;
+                state.wake_all_workers();
+                Step::Eof
+            } else if state.live == 0 {
+                state.aborted = true;
+                state.reader_waker = None;
+                Step::Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "download workers terminated before stream completion",
+                ))
+            } else {
+                state.reader_waker = Some(cx.waker().clone());
+                Step::Pending
             }
+        };
+
+        match step {
+            Step::Ready(blk) => {
+                debug_assert!(blk.len > 0);
+                let n = blk.len.min(buf.len());
+                buf[..n].copy_from_slice(&blk.buf[..n]);
+                if n == blk.len {
+                    core.recycle_block(blk.buf);
+                } else {
+                    self.current = Some(CurrentBlock {
+                        buf: blk.buf,
+                        pos: n,
+                        len: blk.len,
+                    });
+                }
+                Poll::Ready(Ok(n))
+            }
+            Step::Err(err) => {
+                self.core = None;
+                self.workers.abort_all();
+                Poll::Ready(Err(err))
+            }
+            Step::Eof => {
+                self.core = None;
+                self.workers.abort_all();
+                Poll::Ready(Ok(0))
+            }
+            Step::Pending => Poll::Pending,
         }
     }
 }
@@ -372,19 +457,227 @@ struct ReadyBlock {
     len: usize,
 }
 
-struct State {
+struct Scheduler {
     total_blks: u64,
+    next_dispatch_blk: u64,
+    hedged_blk: Option<u64>,
+    retry_queue: VecDeque<TaskRange>,
+    active_slots: Vec<Option<ActiveSlot>>,
+    in_flight_tasks: usize,
+}
+
+impl Scheduler {
+    fn new(total_blks: u64, n_workers: usize) -> Self {
+        Self {
+            total_blks,
+            next_dispatch_blk: 0,
+            hedged_blk: None,
+            retry_queue: VecDeque::new(),
+            active_slots: vec![None; n_workers],
+            in_flight_tasks: 0,
+        }
+    }
+
+    fn is_drained(&self) -> bool {
+        self.next_dispatch_blk >= self.total_blks
+            && self.in_flight_tasks == 0
+            && self.retry_queue.is_empty()
+    }
+
+    /// Inserts `task` into `retry_queue` ordered by lowest `start_blk` so head-of-line
+    /// blocks are always prioritized first.
+    fn push_retry(&mut self, task: TaskRange) {
+        let pos = self
+            .retry_queue
+            .iter()
+            .position(|existing| existing.start_blk > task.start_blk)
+            .unwrap_or(self.retry_queue.len());
+        self.retry_queue.insert(pos, task);
+    }
+
+    fn assign_slot(&mut self, worker_id: usize, task: TaskRange) -> Claim {
+        self.active_slots[worker_id] = Some(ActiveSlot {
+            curr_blk: task.start_blk,
+            end_blk: task.end_blk,
+        });
+        self.in_flight_tasks += 1;
+        Claim::Task(task)
+    }
+
+    fn take_slot(&mut self, worker_id: usize) -> Option<ActiveSlot> {
+        let slot = self.active_slots[worker_id].take();
+        if slot.is_some() {
+            self.in_flight_tasks -= 1;
+        }
+        slot
+    }
+
+    fn is_block_active(&self, blk: u64) -> bool {
+        self.active_slots
+            .iter()
+            .flatten()
+            .any(|s| s.curr_blk <= blk && blk < s.end_blk)
+    }
+
+    fn claim_task(
+        &mut self,
+        worker_id: usize,
+        live: usize,
+        window_blocks: u64,
+        consumed_blk: u64,
+        next_deliver_blk: u64,
+    ) -> Claim {
+        // Priority 1: Re-queued tasks already reside inside the active window (earliest first).
+        if let Some(task) = self.retry_queue.pop_front() {
+            return self.assign_slot(worker_id, task);
+        }
+
+        // Priority 2: Sequential dispatch of full-sized chunks within the sliding window
+        // anchored at `consumed_blk` (never fragmenting into 1-block crumbs).
+        if self.next_dispatch_blk < self.total_blks {
+            let rem_blks = self.total_blks - self.next_dispatch_blk;
+            let active_concurrency = live.max(1) as u64;
+            let step = rem_blks
+                .div_ceil(active_concurrency)
+                .clamp(1, TARGET_TASK_BLOCKS);
+            let in_window = self.next_dispatch_blk - consumed_blk;
+            let avail_in_window = window_blocks.saturating_sub(in_window);
+
+            if avail_in_window >= step || avail_in_window >= rem_blks {
+                let count = step.min(rem_blks);
+                let start_blk = self.next_dispatch_blk;
+                let end_blk = start_blk + count;
+                self.next_dispatch_blk = end_blk;
+                return self.assign_slot(worker_id, TaskRange { start_blk, end_blk });
+            }
+        }
+
+        // Priority 3: Work-stealing & head-of-line hedging. Splitting an active HTTP/1.1
+        // range drops its reader before `Content-Length` EOF, forcing the transport to close
+        // that warm TCP socket. Therefore, only steal or hedge during:
+        //   (a) Endgame (`next_dispatch_blk >= total_blks`), or
+        //   (b) A genuine head-of-line straggler (`curr_blk == next_deliver_blk`) that has
+        //       idled at least half of the live worker pool.
+        let consumer_has_room = (next_deliver_blk - consumed_blk) < window_blocks;
+        let is_endgame = self.next_dispatch_blk >= self.total_blks;
+        let hol_stalled = self.in_flight_tasks <= (live / 2).max(1);
+        if consumer_has_room && (is_endgame || hol_stalled) {
+            let victim = self
+                .active_slots
+                .iter_mut()
+                .filter_map(|s| s.as_mut())
+                .filter(|s| {
+                    let unstarted = s.end_blk.saturating_sub(s.curr_blk + 1);
+                    unstarted >= 1 && (is_endgame || s.curr_blk == next_deliver_blk)
+                })
+                .min_by_key(|s| s.curr_blk);
+
+            if let Some(slot) = victim {
+                let unstarted = slot.end_blk - (slot.curr_blk + 1);
+                let steal_len = unstarted.div_ceil(2);
+                let steal_start = slot.end_blk - steal_len;
+                let steal_end = slot.end_blk;
+                slot.end_blk = steal_start;
+                return self.assign_slot(
+                    worker_id,
+                    TaskRange {
+                        start_blk: steal_start,
+                        end_blk: steal_end,
+                    },
+                );
+            }
+
+            // Speculative backup read (hedge) if the single head-of-line block `next_deliver_blk`
+            // has no unstarted tail left to split and is still stalling half the worker pool.
+            if self.hedged_blk != Some(next_deliver_blk)
+                && self
+                    .active_slots
+                    .iter()
+                    .flatten()
+                    .any(|s| s.curr_blk == next_deliver_blk && s.end_blk == next_deliver_blk + 1)
+            {
+                self.hedged_blk = Some(next_deliver_blk);
+                return self.assign_slot(
+                    worker_id,
+                    TaskRange {
+                        start_blk: next_deliver_blk,
+                        end_blk: next_deliver_blk + 1,
+                    },
+                );
+            }
+        }
+
+        if self.is_drained() {
+            Claim::Done
+        } else {
+            Claim::Wait
+        }
+    }
+}
+
+struct ReorderQueue {
     committed_blks: u64,
     consumed_blk: u64,
     next_deliver_blk: u64,
-    next_dispatch_blk: u64,
-    hedged_blk: Option<u64>,
     reorder: BTreeMap<u64, (Vec<u8>, usize)>,
-    retry_queue: VecDeque<TaskRange>,
     ready_queue: VecDeque<ReadyBlock>,
     buf_pool: Vec<Vec<u8>>,
-    active_slots: Vec<Option<ActiveSlot>>,
-    in_flight_tasks: usize,
+}
+
+impl ReorderQueue {
+    fn new() -> Self {
+        Self {
+            committed_blks: 0,
+            consumed_blk: 0,
+            next_deliver_blk: 0,
+            reorder: BTreeMap::new(),
+            ready_queue: VecDeque::new(),
+            buf_pool: Vec::new(),
+        }
+    }
+
+    fn pool_buf(&mut self, max_pooled_bufs: usize, buf: Vec<u8>) {
+        if buf.capacity() >= BLOCK_SIZE && self.buf_pool.len() < max_pooled_bufs {
+            self.buf_pool.push(buf);
+        }
+    }
+
+    fn is_committed(&self, blk: u64) -> bool {
+        blk < self.next_deliver_blk || self.reorder.contains_key(&blk)
+    }
+
+    fn commit(
+        &mut self,
+        blk_idx: u64,
+        buf: Vec<u8>,
+        len: usize,
+        max_pooled_bufs: usize,
+        delivered_blk: &AtomicU64,
+    ) -> (bool, u64) {
+        if self.is_committed(blk_idx) {
+            self.pool_buf(max_pooled_bufs, buf);
+            return (false, len as u64);
+        }
+
+        self.committed_blks += 1;
+        self.reorder.insert(blk_idx, (buf, len));
+
+        let mut advanced = false;
+        while let Some((buf, len)) = self.reorder.remove(&self.next_deliver_blk) {
+            self.next_deliver_blk += 1;
+            advanced = true;
+            self.ready_queue.push_back(ReadyBlock { buf, len });
+        }
+        if advanced {
+            delivered_blk.store(self.next_deliver_blk, Ordering::Relaxed);
+        }
+        (advanced, 0)
+    }
+}
+
+struct State {
+    scheduler: Scheduler,
+    reorder: ReorderQueue,
     live: usize,
     worker_wakers: Vec<Option<Waker>>,
     reader_waker: Option<Waker>,
@@ -434,7 +727,7 @@ impl SharedCore {
     }
 
     fn take_buf(&self, needed_len: usize) -> Vec<u8> {
-        if let Some(mut buf) = self.state.lock().unwrap().buf_pool.pop() {
+        if let Some(mut buf) = self.state.lock().unwrap().reorder.buf_pool.pop() {
             if buf.len() < needed_len {
                 buf.resize(needed_len, 0);
             }
@@ -445,8 +738,8 @@ impl SharedCore {
 
     fn recycle_block(&self, buf: Vec<u8>) {
         let mut state = self.state.lock().unwrap();
-        state.consumed_blk += 1;
-        state.pool_buf(self.max_pooled_bufs, buf);
+        state.reorder.consumed_blk += 1;
+        state.reorder.pool_buf(self.max_pooled_bufs, buf);
         state.wake_one_worker();
     }
 }
@@ -481,27 +774,6 @@ impl State {
         }
     }
 
-    fn pool_buf(&mut self, max_pooled_bufs: usize, buf: Vec<u8>) {
-        if buf.capacity() >= BLOCK_SIZE && self.buf_pool.len() < max_pooled_bufs {
-            self.buf_pool.push(buf);
-        }
-    }
-
-    fn is_dispatch_drained(&self) -> bool {
-        self.next_dispatch_blk >= self.total_blks
-            && self.in_flight_tasks == 0
-            && self.retry_queue.is_empty()
-    }
-
-    fn assign_slot(&mut self, worker_id: usize, task: TaskRange) -> Claim {
-        self.active_slots[worker_id] = Some(ActiveSlot {
-            curr_blk: task.start_blk,
-            end_blk: task.end_blk,
-        });
-        self.in_flight_tasks += 1;
-        Claim::Task(task)
-    }
-
     fn retire_worker(&mut self, worker_id: usize) {
         self.worker_wakers[worker_id] = None;
         self.live = self.live.saturating_sub(1);
@@ -511,25 +783,9 @@ impl State {
         }
     }
 
-    fn flush_reorder(&mut self, delivered_blk: &AtomicU64) {
-        let mut advanced = false;
-        while let Some((buf, len)) = self.reorder.remove(&self.next_deliver_blk) {
-            self.next_deliver_blk += 1;
-            advanced = true;
-            self.ready_queue.push_back(ReadyBlock { buf, len });
-        }
-        if advanced {
-            delivered_blk.store(self.next_deliver_blk, Ordering::Relaxed);
-            self.wake_reader();
-            self.wake_one_worker();
-        }
-    }
-
     fn finish_worker_slot(&mut self, worker_id: usize) {
-        if self.active_slots[worker_id].take().is_some() {
-            self.in_flight_tasks -= 1;
-        }
-        if self.is_dispatch_drained() {
+        self.scheduler.take_slot(worker_id);
+        if self.scheduler.is_drained() {
             self.wake_all_workers();
             self.wake_reader();
         } else {
@@ -541,93 +797,13 @@ impl State {
         if self.aborted || self.error.is_some() {
             return Claim::Done;
         }
-
-        // Priority 1: Re-queued tasks already reside inside the active window.
-        if let Some(task) = self.retry_queue.pop_front() {
-            return self.assign_slot(worker_id, task);
-        }
-
-        // Priority 2: Sequential dispatch of full-sized chunks within the sliding window
-        // anchored at `consumed_blk` (never fragmenting into 1-block crumbs).
-        if self.next_dispatch_blk < self.total_blks {
-            let rem_blks = self.total_blks - self.next_dispatch_blk;
-            let active_concurrency = self.live.max(1) as u64;
-            let step = rem_blks
-                .div_ceil(active_concurrency)
-                .clamp(1, TARGET_TASK_BLOCKS);
-            let in_window = self.next_dispatch_blk - self.consumed_blk;
-            let avail_in_window = window_blocks.saturating_sub(in_window);
-
-            if avail_in_window >= step || avail_in_window >= rem_blks {
-                let count = step.min(rem_blks);
-                let start_blk = self.next_dispatch_blk;
-                let end_blk = start_blk + count;
-                self.next_dispatch_blk = end_blk;
-                return self.assign_slot(worker_id, TaskRange { start_blk, end_blk });
-            }
-        }
-
-        // Priority 3: Work-stealing & head-of-line hedging. Splitting an active HTTP/1.1
-        // range drops its reader before `Content-Length` EOF, forcing the transport to close
-        // that warm TCP socket. Therefore, only steal or hedge during:
-        //   (a) Endgame (`next_dispatch_blk >= total_blks`), or
-        //   (b) A genuine head-of-line straggler (`curr_blk == next_deliver_blk`) that has
-        //       idled at least half of the live worker pool.
-        let consumer_has_room = (self.next_deliver_blk - self.consumed_blk) < window_blocks;
-        let is_endgame = self.next_dispatch_blk >= self.total_blks;
-        let hol_stalled = self.in_flight_tasks <= (self.live / 2).max(1);
-        if consumer_has_room && (is_endgame || hol_stalled) {
-            let next_deliver = self.next_deliver_blk;
-            let victim = self
-                .active_slots
-                .iter_mut()
-                .filter_map(|s| s.as_mut())
-                .filter(|s| {
-                    let unstarted = s.end_blk.saturating_sub(s.curr_blk + 1);
-                    unstarted >= 1 && (is_endgame || s.curr_blk == next_deliver)
-                })
-                .min_by_key(|s| s.curr_blk);
-
-            if let Some(slot) = victim {
-                let unstarted = slot.end_blk - (slot.curr_blk + 1);
-                let steal_len = unstarted.div_ceil(2);
-                let steal_start = slot.end_blk - steal_len;
-                let steal_end = slot.end_blk;
-                slot.end_blk = steal_start;
-                return self.assign_slot(
-                    worker_id,
-                    TaskRange {
-                        start_blk: steal_start,
-                        end_blk: steal_end,
-                    },
-                );
-            }
-
-            // Speculative backup read (hedge) if the single head-of-line block `next_deliver`
-            // has no unstarted tail left to split and is still stalling half the worker pool.
-            if self.hedged_blk != Some(next_deliver)
-                && self
-                    .active_slots
-                    .iter()
-                    .flatten()
-                    .any(|s| s.curr_blk == next_deliver && s.end_blk == next_deliver + 1)
-            {
-                self.hedged_blk = Some(next_deliver);
-                return self.assign_slot(
-                    worker_id,
-                    TaskRange {
-                        start_blk: next_deliver,
-                        end_blk: next_deliver + 1,
-                    },
-                );
-            }
-        }
-
-        if self.is_dispatch_drained() {
-            Claim::Done
-        } else {
-            Claim::Wait
-        }
+        self.scheduler.claim_task(
+            worker_id,
+            self.live,
+            window_blocks,
+            self.reorder.consumed_blk,
+            self.reorder.next_deliver_blk,
+        )
     }
 }
 
@@ -662,29 +838,29 @@ fn commit_block(
     buf: Vec<u8>,
     len: usize,
 ) -> bool {
-    let mut duplicate_bytes = 0u64;
-    let done = {
+    let (done, duplicate_bytes) = {
         let mut state = core.state.lock().unwrap();
-        if blk_idx < state.next_deliver_blk || state.reorder.contains_key(&blk_idx) {
-            state.pool_buf(core.max_pooled_bufs, buf);
-            duplicate_bytes = len as u64;
-        } else {
-            state.committed_blks += 1;
-            state.reorder.insert(blk_idx, (buf, len));
-            state.flush_reorder(&core.delivered_blk);
+        let (advanced, dup) =
+            state
+                .reorder
+                .commit(blk_idx, buf, len, core.max_pooled_bufs, &core.delivered_blk);
+        if advanced {
+            state.wake_reader();
+            state.wake_one_worker();
         }
 
-        let slot = state.active_slots[worker_id]
+        let slot = state.scheduler.active_slots[worker_id]
             .as_mut()
             .expect("worker committing block owns active slot");
         let next_blk = blk_idx + 1;
-        if next_blk >= slot.end_blk {
+        let finished = if next_blk >= slot.end_blk {
             state.finish_worker_slot(worker_id);
             true
         } else {
             slot.curr_blk = next_blk;
             false
-        }
+        };
+        (finished, dup)
     };
     if duplicate_bytes > 0 {
         core.record_rewind(duplicate_bytes);
@@ -707,6 +883,23 @@ impl WorkerGuard<'_> {
         }
     }
 
+    fn fail_fatal(&mut self, err: io::Error, buf: &mut Option<Vec<u8>>) {
+        self.flush_rewind();
+        self.disarmed = true;
+
+        let mut state = self.core.state.lock().unwrap();
+        if let Some(b) = buf.take() {
+            state.reorder.pool_buf(self.core.max_pooled_bufs, b);
+        }
+        state.scheduler.take_slot(self.worker_id);
+        if state.error.is_none() {
+            state.error = Some(err);
+        }
+        state.aborted = true;
+        state.retire_worker(self.worker_id);
+        state.wake_reader();
+    }
+
     /// Handles a worker whose current task exhausted `MAX_STALL_RETRIES`: re-queues
     /// any uncovered remaining blocks, sheds excess concurrency, or fails the stream
     /// after `MAX_DEAD_STALLS` consecutive stalls without global forward progress.
@@ -715,6 +908,7 @@ impl WorkerGuard<'_> {
         &mut self,
         curr_blk: u64,
         curr_pos: u64,
+        last_err: io::Error,
         buf: &mut Option<Vec<u8>>,
         last_committed: &mut u64,
         dead_stalls: &mut u32,
@@ -723,12 +917,12 @@ impl WorkerGuard<'_> {
 
         let mut state = self.core.state.lock().unwrap();
         if let Some(b) = buf.take() {
-            state.pool_buf(self.core.max_pooled_bufs, b);
+            state.reorder.pool_buf(self.core.max_pooled_bufs, b);
         }
-        let slot = state.active_slots[self.worker_id]
-            .take()
+        let slot = state
+            .scheduler
+            .take_slot(self.worker_id)
             .expect("stalled worker owns active slot");
-        state.in_flight_tasks -= 1;
 
         if state.aborted || state.error.is_some() {
             self.disarmed = true;
@@ -737,15 +931,9 @@ impl WorkerGuard<'_> {
         }
 
         let already_covered = (curr_blk + 1 == slot.end_blk)
-            && (curr_blk < state.next_deliver_blk
-                || state.reorder.contains_key(&curr_blk)
-                || state
-                    .active_slots
-                    .iter()
-                    .flatten()
-                    .any(|s| s.curr_blk <= curr_blk && curr_blk < s.end_blk));
+            && (state.reorder.is_committed(curr_blk) || state.scheduler.is_block_active(curr_blk));
         if !already_covered {
-            state.retry_queue.push_front(TaskRange {
+            state.scheduler.push_retry(TaskRange {
                 start_blk: curr_blk,
                 end_blk: slot.end_blk,
             });
@@ -763,8 +951,8 @@ impl WorkerGuard<'_> {
             return true;
         }
 
-        if state.committed_blks > *last_committed {
-            *last_committed = state.committed_blks;
+        if state.reorder.committed_blks > *last_committed {
+            *last_committed = state.reorder.committed_blks;
             *dead_stalls = 0;
             state.wake_all_workers();
         } else {
@@ -774,7 +962,7 @@ impl WorkerGuard<'_> {
                 if state.error.is_none() {
                     state.error = Some(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        format!("download stalled at offset {curr_pos}: server stopped responding"),
+                        format!("download stalled at offset {curr_pos}: {last_err}"),
                     ));
                 }
                 state.worker_wakers[self.worker_id] = None;
@@ -795,18 +983,15 @@ impl Drop for WorkerGuard<'_> {
             return;
         }
         self.flush_rewind();
-        let mut state = match self.core.state.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(slot) = state.active_slots[self.worker_id].take() {
-            state.in_flight_tasks -= 1;
-            if !state.aborted && state.error.is_none() {
-                state.retry_queue.push_front(TaskRange {
-                    start_blk: slot.curr_blk,
-                    end_blk: slot.end_blk,
-                });
-            }
+        let mut state = self.core.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = state.scheduler.take_slot(self.worker_id)
+            && !state.aborted
+            && state.error.is_none()
+        {
+            state.scheduler.push_retry(TaskRange {
+                start_blk: slot.curr_blk,
+                end_blk: slot.end_blk,
+            });
         }
         state.retire_worker(self.worker_id);
     }
@@ -842,25 +1027,43 @@ async fn run_worker<S: DataSource + 'static>(
         let mut buf = Some(core.take_buf(core.block_len(curr_blk)));
         let mut partial_len = 0usize;
         let mut retries = 0u32;
+        let mut last_err: Option<io::Error> = None;
 
         loop {
-            let current_end_blk = {
-                let mut state = core.state.lock().unwrap();
+            enum PreFetch {
+                Proceed(u64),
+                AlreadyDelivered,
+                Abort,
+            }
+
+            let pre = {
+                let state = core.state.lock().unwrap();
                 if state.aborted || state.error.is_some() {
-                    guard.flush_rewind();
-                    guard.disarmed = true;
-                    if let Some(b) = buf.take() {
-                        state.pool_buf(core.max_pooled_bufs, b);
-                    }
-                    if state.active_slots[worker_id].take().is_some() {
-                        state.in_flight_tasks -= 1;
-                    }
-                    state.retire_worker(worker_id);
-                    return;
+                    PreFetch::Abort
+                } else if curr_blk < state.reorder.next_deliver_blk {
+                    PreFetch::AlreadyDelivered
+                } else {
+                    PreFetch::Proceed(
+                        state.scheduler.active_slots[worker_id]
+                            .expect("active worker owns slot")
+                            .end_blk,
+                    )
                 }
-                state.active_slots[worker_id]
-                    .expect("active worker owns slot")
-                    .end_blk
+            };
+
+            let current_end_blk = match pre {
+                PreFetch::Abort => return,
+                PreFetch::AlreadyDelivered => {
+                    guard.flush_rewind();
+                    let mut state = core.state.lock().unwrap();
+                    if let Some(b) = buf.take() {
+                        state.reorder.pool_buf(core.max_pooled_bufs, b);
+                    }
+                    state.finish_worker_slot(worker_id);
+                    dead_stalls = 0;
+                    break;
+                }
+                PreFetch::Proceed(end_blk) => end_blk,
             };
 
             let task_byte_end = core
@@ -938,7 +1141,7 @@ async fn run_worker<S: DataSource + 'static>(
                     guard.flush_rewind();
                     let mut state = core.state.lock().unwrap();
                     if let Some(b) = buf.take() {
-                        state.pool_buf(core.max_pooled_bufs, b);
+                        state.reorder.pool_buf(core.max_pooled_bufs, b);
                     }
                     state.finish_worker_slot(worker_id);
                     dead_stalls = 0;
@@ -947,12 +1150,18 @@ async fn run_worker<S: DataSource + 'static>(
                 RunOutcome::Stalled(err) => err,
             };
 
+            if !is_retryable_error(&stall_err) {
+                guard.fail_fatal(stall_err, &mut buf);
+                return;
+            }
+
             let curr_pos = core.block_start(curr_blk) + partial_len as u64;
             if curr_pos > resume_from {
                 retries = 0;
             }
             retries += 1;
             if retries > MAX_STALL_RETRIES {
+                last_err = Some(stall_err);
                 break;
             }
             core.observer.on_warning(TransferWarning::Retry {
@@ -964,10 +1173,11 @@ async fn run_worker<S: DataSource + 'static>(
             sleep(retry_backoff(retries)).await;
         }
 
-        if retries > MAX_STALL_RETRIES
+        if let Some(err) = last_err
             && guard.handle_stall(
                 curr_blk,
                 core.block_start(curr_blk) + partial_len as u64,
+                err,
                 &mut buf,
                 &mut last_committed,
                 &mut dead_stalls,
@@ -982,7 +1192,8 @@ async fn run_worker<S: DataSource + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
+    use crate::test_util::block_on_tokio;
+    use std::ops::Range;
     use std::sync::atomic::AtomicUsize;
 
     struct ChaosReader {
@@ -992,6 +1203,7 @@ mod tests {
         yields_per_read: usize,
         step_size: usize,
         fail_after: Option<usize>,
+        hang_after: Option<usize>,
     }
 
     impl AsyncRead for ChaosReader {
@@ -1005,6 +1217,11 @@ mod tests {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+            if let Some(limit) = self.hang_after
+                && self.pos >= limit
+            {
+                return Poll::Pending;
+            }
             if let Some(limit) = self.fail_after
                 && self.pos >= limit
             {
@@ -1014,9 +1231,10 @@ mod tests {
                     "simulated transient reset",
                 )));
             }
-            let n = (self.data.len() - self.pos)
-                .min(self.step_size)
-                .min(buf.len());
+            let cap = self
+                .hang_after
+                .map_or(self.data.len(), |l| l.min(self.data.len()));
+            let n = (cap - self.pos).min(self.step_size).min(buf.len());
             buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
             self.pos += n;
             if n > 0 && self.yields_per_read > 0 {
@@ -1032,18 +1250,19 @@ mod tests {
         Flaky,
         PrematureEofOnce,
         SlowFirstWorker,
+        HungTailBlock,
         InitialFails(usize),
         StuckAtOffset(usize),
         AlwaysFail,
+        Fatal404,
     }
-
-    type ResolvedRange = Option<(u64, Option<u64>)>;
 
     struct ChaosSource {
         data: Vec<u8>,
         mode: ChaosMode,
-        requests: Arc<Mutex<Vec<ResolvedRange>>>,
+        requests: Arc<Mutex<Vec<Option<Range<u64>>>>>,
         req_count: AtomicUsize,
+        tail_hits: AtomicUsize,
     }
 
     impl ChaosSource {
@@ -1053,6 +1272,7 @@ mod tests {
                 mode,
                 requests: Arc::new(Mutex::new(Vec::new())),
                 req_count: AtomicUsize::new(0),
+                tail_hits: AtomicUsize::new(0),
             }
         }
     }
@@ -1064,16 +1284,17 @@ mod tests {
 
         async fn fetch_range(
             &self,
-            range: impl RangeBounds<u64> + Send,
+            range: impl RangeBounds<u64> + MaybeSend,
         ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-            let resolved = resolve_range_bounds(range);
-            self.requests.lock().unwrap().push(resolved);
+            let resolved = resolve_range_bounds(range, self.data.len() as u64);
+            self.requests.lock().unwrap().push(resolved.clone());
             let idx = self.req_count.fetch_add(1, Ordering::Relaxed);
 
             match self.mode {
                 ChaosMode::Clean
                 | ChaosMode::PrematureEofOnce
                 | ChaosMode::SlowFirstWorker
+                | ChaosMode::HungTailBlock
                 | ChaosMode::StuckAtOffset(_) => {}
                 ChaosMode::Flaky => {
                     if idx == 0 {
@@ -1088,32 +1309,40 @@ mod tests {
                 ChaosMode::AlwaysFail => {
                     return Err(io::Error::other("persistent 503"));
                 }
+                ChaosMode::Fatal404 => {
+                    return Err(io::Error::other(HttpError::Status(404)));
+                }
             }
 
-            let len = self.data.len() as u64;
-            let start_off = resolved.map_or(0, |(s, _)| s);
-            let mut slice = match resolved {
-                Some((start, end)) if start < len => {
-                    let s = start as usize;
-                    let e = end.map_or(self.data.len(), |e| e.min(len) as usize);
-                    self.data[s..e].to_vec()
-                }
-                _ => Vec::new(),
+            let start_off = resolved.as_ref().map_or(0, |r| r.start);
+            let mut slice = match &resolved {
+                Some(r) => self.data[r.start as usize..r.end as usize].to_vec(),
+                None => Vec::new(),
             };
             if matches!(self.mode, ChaosMode::PrematureEofOnce) && idx == 0 && slice.len() > 128 {
                 slice.truncate(128);
             }
 
             let (yields_left, yields_per_read, step_size) = match self.mode {
-                ChaosMode::Flaky => ((idx * 3) % 7, 0, 256 * 1024),
-                ChaosMode::SlowFirstWorker if idx == 0 => (4, 4, 64 * 1024),
-                ChaosMode::StuckAtOffset(_) => (0, 0, 16 * 1024),
-                _ => (0, 0, 256 * 1024),
+                ChaosMode::Flaky => ((idx * 3) % 7, 0, BLOCK_SIZE / 4),
+                ChaosMode::SlowFirstWorker if idx == 0 => (4, 4, BLOCK_SIZE / 16),
+                ChaosMode::StuckAtOffset(_) => (0, 0, BLOCK_SIZE / 4),
+                _ => (0, 0, BLOCK_SIZE),
             };
             let fail_after = match self.mode {
-                ChaosMode::Flaky if idx.is_multiple_of(4) && slice.len() > 64_000 => Some(32_768),
+                ChaosMode::Flaky if idx.is_multiple_of(4) && slice.len() > BLOCK_SIZE / 2 => {
+                    Some(BLOCK_SIZE / 2)
+                }
                 ChaosMode::StuckAtOffset(stuck) => Some(stuck.saturating_sub(start_off as usize)),
                 _ => None,
+            };
+            let hang_after = if matches!(self.mode, ChaosMode::HungTailBlock)
+                && start_off as usize == BLOCK_SIZE
+                && self.tail_hits.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                Some(BLOCK_SIZE / 4)
+            } else {
+                None
             };
 
             Ok(ChaosReader {
@@ -1123,6 +1352,7 @@ mod tests {
                 yields_per_read,
                 step_size,
                 fail_after,
+                hang_after,
             })
         }
     }
@@ -1161,17 +1391,18 @@ mod tests {
     }
 
     #[test]
-    fn test_small_read_exact_alloc_and_empty_ranges() {
-        let payload: Vec<u8> = (0..(5 * 1024 * 1024 + 123))
+    fn test_small_read_at_exact_alloc_and_empty_ranges() {
+        let payload: Vec<u8> = (0..(3 * BLOCK_SIZE + 123))
             .map(|i| ((i * 7) % 251) as u8)
             .collect();
         let src = ChaosSource::exact(payload.clone(), ChaosMode::Clean);
         let reqs = Arc::clone(&src.requests);
-        let parallel = ParallelDataSource::new(src, 4);
+        let obs = Arc::new(RecordingObserver::new());
+        let parallel = ParallelDataSource::new(src, 4).with_observer(Arc::clone(&obs));
         assert_eq!(parallel.size(), payload.len() as u64);
 
-        block_on(async {
-            // 1. Empty slice and empty/out-of-bounds ranges make zero fetch_range calls
+        block_on_tokio(async {
+            // 1. Empty slice, empty source, and empty/OOB ranges make zero fetch_range calls
             let mut empty = [];
             assert_eq!(parallel.read_at(&mut empty, 0).await.unwrap(), 0);
             #[allow(clippy::reversed_empty_ranges)]
@@ -1197,17 +1428,37 @@ mod tests {
             assert!(oob_out.is_empty());
             assert!(reqs.lock().unwrap().is_empty());
 
-            // 2. Small 30-byte header read makes 1 exact range call, never pools < BLOCK_SIZE
-            //    buffers, and drops SharedCore immediately upon reaching EOF.
+            let empty_src = ChaosSource::exact(Vec::new(), ChaosMode::Clean);
+            let single = ParallelDataSource::new(empty_src, 1);
+            let mut empty_out = Vec::new();
+            single
+                .fetch()
+                .await
+                .unwrap()
+                .read_to_end(&mut empty_out)
+                .await
+                .unwrap();
+            assert!(empty_out.is_empty());
+
+            // 2. Small <= BLOCK_SIZE read_at runs inline without emitting transfer wire bytes
+            let mut hdr_buf = [0u8; 30];
+            assert_eq!(parallel.read_at(&mut hdr_buf, 19).await.unwrap(), 30);
+            assert_eq!(&hdr_buf, &payload[19..49]);
+            assert_eq!(reqs.lock().unwrap().as_slice(), &[Some(19..49)]);
+            assert_eq!(obs.wire_bytes.load(Ordering::Relaxed), 0);
+            reqs.lock().unwrap().clear();
+
+            // 3. Small fetch_range makes 1 exact range call, never pools < BLOCK_SIZE buffers,
+            //    and drops SharedCore immediately upon reaching EOF.
             let mut reader = parallel.start_reader(19..49);
             let core = Arc::clone(reader.core.as_ref().unwrap());
             let mut hdr = Vec::new();
             reader.read_to_end(&mut hdr).await.unwrap();
             assert_eq!(hdr, &payload[19..49]);
-            assert_eq!(reqs.lock().unwrap().as_slice(), &[Some((19, Some(49)))]);
+            assert_eq!(reqs.lock().unwrap().as_slice(), &[Some(19..49)]);
             assert!(reader.core.is_none());
-            assert!(core.state.lock().unwrap().buf_pool.is_empty());
-            assert_eq!(core.state.lock().unwrap().consumed_blk, 1);
+            assert!(core.state.lock().unwrap().reorder.buf_pool.is_empty());
+            assert_eq!(core.state.lock().unwrap().reorder.consumed_blk, 1);
         });
     }
 
@@ -1217,10 +1468,9 @@ mod tests {
         let src = ChaosSource::exact(payload.clone(), ChaosMode::PrematureEofOnce);
         let reqs = Arc::clone(&src.requests);
         let obs = Arc::new(RecordingObserver::new());
-        let parallel = ParallelDataSource::new(src, 2)
-            .with_observer(Arc::clone(&obs) as Arc<dyn TransferObserver>);
+        let parallel = ParallelDataSource::new(src, 2).with_observer(Arc::clone(&obs));
 
-        block_on(async {
+        block_on_tokio(async {
             let mut out = Vec::new();
             parallel
                 .fetch()
@@ -1230,30 +1480,37 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(out, payload);
-            // First request truncated at 128 bytes -> retried from 128..1000
             assert_eq!(
                 reqs.lock().unwrap().as_slice(),
-                &[Some((0, Some(1000))), Some((128, Some(1000)))]
+                &[Some(0..1000), Some(128..1000)]
             );
             assert_eq!(obs.warnings.load(Ordering::Relaxed), 1);
+
+            // Inline read_at also retries premature EOF and recovers cleanly
+            let src2 = ChaosSource::exact(payload.clone(), ChaosMode::PrematureEofOnce);
+            let obs2 = Arc::new(RecordingObserver::new());
+            let p2 = ParallelDataSource::new(src2, 2).with_observer(Arc::clone(&obs2));
+            let mut buf = vec![0u8; payload.len()];
+            assert_eq!(p2.read_at(&mut buf, 0).await.unwrap(), payload.len());
+            assert_eq!(buf, payload);
+            assert_eq!(obs2.warnings.load(Ordering::Relaxed), 1);
+            assert_eq!(obs2.wire_bytes.load(Ordering::Relaxed), 0);
         });
     }
 
     #[test]
     fn test_chaos_multichunk_streaming_and_buffer_recycling() {
-        let payload: Vec<u8> = (0..(5 * 1024 * 1024 + 123))
+        let payload: Vec<u8> = (0..(5 * BLOCK_SIZE + 123))
             .map(|i| ((i * 7) % 251) as u8)
             .collect();
         let src = ChaosSource::exact(payload.clone(), ChaosMode::Flaky);
         let observer = Arc::new(RecordingObserver::new());
-        let parallel = ParallelDataSource::new(src, 4)
-            .with_observer(Arc::clone(&observer) as Arc<dyn TransferObserver>);
+        let parallel = ParallelDataSource::new(src, 4).with_observer(Arc::clone(&observer));
 
-        block_on(async {
+        block_on_tokio(async {
             let mut reader = parallel.start_reader(..);
             let core = Arc::clone(reader.core.as_ref().unwrap());
             let mut out = Vec::with_capacity(payload.len());
-            // Alternate odd small buffer (7 KiB) and 2 MiB buffer reads
             let mut use_small = true;
             loop {
                 let mut buf = vec![0u8; if use_small { 7 * 1024 } else { BLOCK_SIZE }];
@@ -1265,6 +1522,9 @@ mod tests {
                 use_small = !use_small;
             }
 
+            // Let any aborted straggler workers run WorkerGuard::drop to flush rewind debt.
+            tokio::task::yield_now().await;
+
             assert_eq!(out, payload);
             assert!(observer.warnings.load(Ordering::Relaxed) > 0);
             let wire = observer.wire_bytes.load(Ordering::Relaxed);
@@ -1274,33 +1534,38 @@ mod tests {
             assert_eq!(net - debt, payload.len() as u64);
 
             let state = core.state.lock().unwrap();
-            assert_eq!(state.consumed_blk, state.total_blks);
-            assert_eq!(state.in_flight_tasks, 0);
-            assert!(state.buf_pool.len() <= core.max_pooled_bufs);
+            assert_eq!(state.reorder.consumed_blk, state.scheduler.total_blks);
+            assert_eq!(state.scheduler.in_flight_tasks, 0);
+            assert!(state.reorder.buf_pool.len() <= core.max_pooled_bufs);
         });
     }
 
     #[test]
-    fn test_straggler_work_stealing() {
-        // 16 blocks (32 MiB) across 4 workers -> 4 blocks (8 MiB) each initially.
-        // Worker 0 crawls at 64 KiB + 4 yields/read, so fast workers 1..3 finish [4..16)
-        // and steal/hedge blocks [0..4) from slow Worker 0.
-        let payload: Vec<u8> = (0..(16 * BLOCK_SIZE))
+    fn test_sliding_window_backpressure_and_midstream_stealing() {
+        // 48 blocks with concurrency = 2 -> window_blocks = 36 (< 48).
+        // Worker 0 crawls on [0..12) while Worker 1 fills the sliding window and then hits
+        // backpressure (avail_in_window < step) while next_dispatch_blk < total_blks (!is_endgame),
+        // triggering non-endgame head-of-line work-stealing/hedging and multi-wave advancement.
+        let payload: Vec<u8> = (0..(48 * BLOCK_SIZE))
             .map(|i| ((i * 13) % 253) as u8)
             .collect();
         let src = ChaosSource::exact(payload.clone(), ChaosMode::SlowFirstWorker);
         let reqs = Arc::clone(&src.requests);
         let obs = Arc::new(RecordingObserver::new());
-        let parallel = ParallelDataSource::new(src, 4)
-            .with_observer(Arc::clone(&obs) as Arc<dyn TransferObserver>);
+        let parallel = ParallelDataSource::new(src, 2).with_observer(Arc::clone(&obs));
 
-        block_on(async {
+        block_on_tokio(async {
             let mut reader = parallel.start_reader(..);
             let core = Arc::clone(reader.core.as_ref().unwrap());
-            let mut out = Vec::new();
+            assert_eq!(core.window_blocks, 36);
+            assert!(core.state.lock().unwrap().scheduler.total_blks > core.window_blocks);
+
+            let mut out = Vec::with_capacity(payload.len());
             reader.read_to_end(&mut out).await.unwrap();
+            tokio::task::yield_now().await;
             assert_eq!(out, payload);
-            // More than 4 requests prove fast workers stole/hedged blocks from slow Worker 0
+
+            // 48 blocks / 12 blocks-per-wave = 4 base waves; > 4 requests proves stealing/hedging.
             assert!(reqs.lock().unwrap().len() > 4);
             let wire = obs.wire_bytes.load(Ordering::Relaxed);
             let net = obs.net_bytes.load(Ordering::Relaxed);
@@ -1310,33 +1575,14 @@ mod tests {
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_tokio_spawn_and_drop_abort() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
+    fn test_drop_abort_and_worker_panic_handling() {
         let payload: Vec<u8> = (0..(12 * BLOCK_SIZE + 777))
             .map(|i| ((i * 17) % 241) as u8)
             .collect();
 
-        rt.block_on(async {
-            // 1. Full streaming over multi-threaded Tokio worker tasks
-            let src = ChaosSource::exact(payload.clone(), ChaosMode::Flaky);
-            let parallel = ParallelDataSource::new(src, 4);
-            let mut out = Vec::new();
-            parallel
-                .fetch()
-                .await
-                .unwrap()
-                .read_to_end(&mut out)
-                .await
-                .unwrap();
-            assert_eq!(out, payload);
-
-            // 2. Early drop aborts background tasks cleanly without hanging
+        block_on_tokio(async {
+            // 1. Early drop aborts background tasks cleanly without hanging
             let abort_src = ChaosSource::exact(payload.clone(), ChaosMode::SlowFirstWorker);
             let abort_parallel = ParallelDataSource::new(abort_src, 4);
             let mut reader = abort_parallel.start_reader(..);
@@ -1347,23 +1593,24 @@ mod tests {
             drop(reader);
             assert!(core.state.lock().unwrap().aborted);
 
-            // 3. Panicking background workers unwind cleanly via WorkerGuard and surface
+            // 2. Panicking background workers unwind cleanly via WorkerGuard and surface
             //    UnexpectedEof instead of deadlocking or silently returning Ok(0).
-            struct PanicSource;
+            struct PanicSource(bool);
             impl DataSource for PanicSource {
                 fn size(&self) -> u64 {
                     BLOCK_SIZE as u64
                 }
                 async fn fetch_range(
                     &self,
-                    _range: impl RangeBounds<u64> + Send,
+                    _range: impl RangeBounds<u64> + MaybeSend,
                 ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-                    panic!("simulated worker panic");
-                    #[allow(unreachable_code)]
+                    if self.0 {
+                        panic!("simulated worker panic");
+                    }
                     Ok(&[][..])
                 }
             }
-            let panic_parallel = ParallelDataSource::new(PanicSource, 2);
+            let panic_parallel = ParallelDataSource::new(PanicSource(true), 2);
             let mut panic_out = Vec::new();
             let err = panic_parallel
                 .fetch()
@@ -1377,18 +1624,77 @@ mod tests {
     }
 
     #[test]
+    fn test_non_retryable_error_fails_fast_and_retry_queue_orders_hol() {
+        // 1. Deterministic 404 fails immediately without retrying or warning
+        let payload = vec![0xAB; 2 * BLOCK_SIZE];
+        let src = ChaosSource::exact(payload, ChaosMode::Fatal404);
+        let reqs = Arc::clone(&src.requests);
+        let obs = Arc::new(RecordingObserver::new());
+        let parallel = ParallelDataSource::new(src, 2).with_observer(Arc::clone(&obs));
+
+        block_on_tokio(async {
+            let mut out = Vec::new();
+            let err = parallel
+                .fetch()
+                .await
+                .unwrap()
+                .read_to_end(&mut out)
+                .await
+                .unwrap_err();
+            let status = err
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<HttpError>())
+                .expect("HttpError preserved");
+            assert!(matches!(status, HttpError::Status(404)));
+            assert_eq!(obs.warnings.load(Ordering::Relaxed), 0);
+            assert!(reqs.lock().unwrap().len() <= 2);
+        });
+
+        // 2. Scheduler retry_queue always pops the lowest start_blk first
+        let mut sched = Scheduler::new(48, 2);
+        sched.push_retry(TaskRange {
+            start_blk: 24,
+            end_blk: 36,
+        });
+        sched.push_retry(TaskRange {
+            start_blk: 0,
+            end_blk: 12,
+        });
+        sched.push_retry(TaskRange {
+            start_blk: 12,
+            end_blk: 24,
+        });
+        assert!(matches!(
+            sched.claim_task(0, 2, 36, 0, 0),
+            Claim::Task(TaskRange {
+                start_blk: 0,
+                end_blk: 12
+            })
+        ));
+        assert!(matches!(
+            sched.claim_task(1, 2, 36, 0, 0),
+            Claim::Task(TaskRange {
+                start_blk: 12,
+                end_blk: 24
+            })
+        ));
+    }
+
+    #[test]
     fn test_stall_retry_queue_throttling_and_timeout() {
-        let payload: Vec<u8> = (0..(3 * 1024 * 1024 + 50))
+        let payload: Vec<u8> = (0..(3 * BLOCK_SIZE + 50))
             .map(|i| (i % 199) as u8)
             .collect();
 
-        // Case 1: 6 initial failures trigger retry_queue + Throttled warning, then recovers
-        let obs = Arc::new(RecordingObserver::new());
-        let recover_src = ChaosSource::exact(payload.clone(), ChaosMode::InitialFails(6));
-        let recover_parallel = ParallelDataSource::new(recover_src, 2)
-            .with_observer(Arc::clone(&obs) as Arc<dyn TransferObserver>);
-        let mut out = Vec::new();
-        block_on(async {
+        block_on_tokio(async {
+            // Case 1: 9 initial failures across 2 workers guarantees at least one worker
+            // exhausts MAX_STALL_RETRIES (5 failures), triggering retry_queue + Throttled
+            // warning before the surviving worker recovers.
+            let obs = Arc::new(RecordingObserver::new());
+            let recover_src = ChaosSource::exact(payload.clone(), ChaosMode::InitialFails(9));
+            let recover_parallel =
+                ParallelDataSource::new(recover_src, 2).with_observer(Arc::clone(&obs));
+            let mut out = Vec::new();
             recover_parallel
                 .fetch()
                 .await
@@ -1396,143 +1702,54 @@ mod tests {
                 .read_to_end(&mut out)
                 .await
                 .unwrap();
-        });
-        assert_eq!(out, payload);
-        assert_eq!(obs.throttled.load(Ordering::Relaxed), 1);
+            assert_eq!(out, payload);
+            assert_eq!(obs.throttled.load(Ordering::Relaxed), 1);
 
-        // Case 2: Persistent failures exhaust MAX_DEAD_STALLS -> TimedOut
-        let dead_src = ChaosSource::exact(payload.clone(), ChaosMode::AlwaysFail);
-        let dead_parallel = ParallelDataSource::new(dead_src, 2);
-        let mut dead_out = Vec::new();
-        let err = block_on(async {
-            dead_parallel
-                .fetch()
-                .await?
-                .read_to_end(&mut dead_out)
-                .await
-        })
-        .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-
-        // Case 3: Repeated partial block reads (< BLOCK_SIZE) that reset before committing
-        // a block must still hit MAX_DEAD_STALLS -> TimedOut rather than looping forever.
-        let partial_obs = Arc::new(RecordingObserver::new());
-        let stuck_src = ChaosSource::exact(payload, ChaosMode::StuckAtOffset(32_768));
-        let stuck_parallel = ParallelDataSource::new(stuck_src, 1)
-            .with_observer(Arc::clone(&partial_obs) as Arc<dyn TransferObserver>);
-        let mut stuck_out = Vec::new();
-        let (stuck_err, core) = block_on(async {
-            let mut reader = stuck_parallel.start_reader(..);
-            let core = Arc::clone(reader.core.as_ref().unwrap());
-            let err = reader.read_to_end(&mut stuck_out).await.unwrap_err();
-            (err, core)
-        });
-        assert_eq!(stuck_err.kind(), io::ErrorKind::TimedOut);
-        let wire = partial_obs.wire_bytes.load(Ordering::Relaxed);
-        let net = partial_obs.net_bytes.load(Ordering::Relaxed);
-        let debt = core.rewind_debt.load(Ordering::Relaxed);
-        assert!(wire > net);
-        assert_eq!(net, 32_768);
-        assert_eq!(net, debt);
-
-        // Case 4: Empty source with concurrency = 1
-        let empty_src = ChaosSource::exact(Vec::new(), ChaosMode::Clean);
-        let single = ParallelDataSource::new(empty_src, 1);
-        let mut empty_out = Vec::new();
-        block_on(async {
-            single
+            // Case 2: Persistent failures exhaust MAX_DEAD_STALLS -> TimedOut preserving cause
+            let dead_src = ChaosSource::exact(payload.clone(), ChaosMode::AlwaysFail);
+            let dead_parallel = ParallelDataSource::new(dead_src, 2);
+            let mut dead_out = Vec::new();
+            let err = dead_parallel
                 .fetch()
                 .await
                 .unwrap()
-                .read_to_end(&mut empty_out)
+                .read_to_end(&mut dead_out)
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            assert!(err.to_string().contains("persistent 503"), "err={err}");
+
+            // Case 3: Repeated partial block reads (< BLOCK_SIZE) that reset before committing
+            // a block must still hit MAX_DEAD_STALLS -> TimedOut rather than looping forever.
+            let partial_obs = Arc::new(RecordingObserver::new());
+            let stuck_off = BLOCK_SIZE / 2;
+            let stuck_src = ChaosSource::exact(payload, ChaosMode::StuckAtOffset(stuck_off));
+            let stuck_parallel =
+                ParallelDataSource::new(stuck_src, 1).with_observer(Arc::clone(&partial_obs));
+            let mut stuck_out = Vec::new();
+            let mut reader = stuck_parallel.start_reader(..);
+            let core = Arc::clone(reader.core.as_ref().unwrap());
+            let stuck_err = reader.read_to_end(&mut stuck_out).await.unwrap_err();
+            assert_eq!(stuck_err.kind(), io::ErrorKind::TimedOut);
+            let wire = partial_obs.wire_bytes.load(Ordering::Relaxed);
+            let net = partial_obs.net_bytes.load(Ordering::Relaxed);
+            let debt = core.rewind_debt.load(Ordering::Relaxed);
+            assert!(wire > net);
+            assert_eq!(net, stuck_off as u64);
+            assert_eq!(net, debt);
         });
-        assert!(empty_out.is_empty());
     }
 
     #[test]
     fn test_hung_last_block_hedge_completes_eof_immediately() {
-        // Two 2 MiB blocks with 2 workers: worker 0 finishes block 0 quickly, while
-        // worker 1 reads 64 KiB of the final block (block 1) and then hangs forever
-        // returning Poll::Pending. Worker 0 must hedge block 1, deliver EOF without
-        // waiting for the hung worker, and unwind its partial bytes from rewind_debt.
-        struct HangAfterPartial {
-            data: Vec<u8>,
-            pos: usize,
-            hang_after: Option<usize>,
-        }
-
-        impl AsyncRead for HangAfterPartial {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-                buf: &mut [u8],
-            ) -> Poll<io::Result<usize>> {
-                if let Some(limit) = self.hang_after
-                    && self.pos >= limit
-                {
-                    return Poll::Pending;
-                }
-                let cap = self.hang_after.unwrap_or(self.data.len());
-                let n = (cap.min(self.data.len()) - self.pos).min(buf.len());
-                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-                self.pos += n;
-                Poll::Ready(Ok(n))
-            }
-        }
-
-        struct HungTailSource {
-            data: Vec<u8>,
-            tail_hits: AtomicUsize,
-        }
-
-        impl DataSource for HungTailSource {
-            fn size(&self) -> u64 {
-                self.data.len() as u64
-            }
-
-            async fn fetch_range(
-                &self,
-                range: impl RangeBounds<u64> + Send,
-            ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-                let Some((start, end)) = resolve_range_bounds(range) else {
-                    return Ok(HangAfterPartial {
-                        data: Vec::new(),
-                        pos: 0,
-                        hang_after: None,
-                    });
-                };
-                let s = start as usize;
-                let e = end.map_or(self.data.len(), |e| (e as usize).min(self.data.len()));
-                // First request for block 1 reads 64 KiB then hangs permanently;
-                // the backup hedge request completes immediately.
-                let hang_after =
-                    if s == BLOCK_SIZE && self.tail_hits.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Some(64 * 1024)
-                    } else {
-                        None
-                    };
-                Ok(HangAfterPartial {
-                    data: self.data[s..e].to_vec(),
-                    pos: 0,
-                    hang_after,
-                })
-            }
-        }
-
         let payload: Vec<u8> = (0..(2 * BLOCK_SIZE))
             .map(|i| ((i * 19) % 251) as u8)
             .collect();
-        let src = HungTailSource {
-            data: payload.clone(),
-            tail_hits: AtomicUsize::new(0),
-        };
+        let src = ChaosSource::exact(payload.clone(), ChaosMode::HungTailBlock);
         let obs = Arc::new(RecordingObserver::new());
-        let parallel = ParallelDataSource::new(src, 2)
-            .with_observer(Arc::clone(&obs) as Arc<dyn TransferObserver>);
+        let parallel = ParallelDataSource::new(src, 2).with_observer(Arc::clone(&obs));
 
-        block_on(async {
+        block_on_tokio(async {
             let mut reader = parallel.start_reader(..);
             let core = Arc::clone(reader.core.as_ref().unwrap());
             let mut out = Vec::new();
@@ -1540,11 +1757,13 @@ mod tests {
             assert_eq!(out, payload);
             assert!(reader.core.is_none());
 
-            // Hung worker was aborted by EOF and its 64 KiB partial read was rewound.
+            // Let the aborted Tokio worker run WorkerGuard::drop to flush its partial rewind.
+            tokio::task::yield_now().await;
+
             let wire = obs.wire_bytes.load(Ordering::Relaxed);
             let net = obs.net_bytes.load(Ordering::Relaxed);
             let debt = core.rewind_debt.load(Ordering::Relaxed);
-            assert_eq!(wire, (2 * BLOCK_SIZE + 64 * 1024) as u64);
+            assert_eq!(wire, (2 * BLOCK_SIZE + BLOCK_SIZE / 4) as u64);
             assert_eq!(net - debt, payload.len() as u64);
         });
     }

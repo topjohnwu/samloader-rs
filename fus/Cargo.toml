@@ -10,7 +10,6 @@ keywords = ["samsung", "firmware"]
 
 [dependencies]
 aes = { workspace = true }
-binrw = { workspace = true }
 ecb = { workspace = true }
 fast-md5 = { workspace = true }
 roxmltree = { workspace = true }

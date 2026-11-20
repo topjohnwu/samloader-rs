@@ -22,100 +22,31 @@ mod auth;
 pub mod compat;
 mod data;
 mod decoder;
+mod decrypt;
 mod error;
 mod fusclient;
 mod http;
 mod parallel;
 mod stream;
+#[cfg(test)]
+mod test_util;
 mod xml;
 mod zip;
 
 // General-purpose data & streaming building blocks
 pub use data::DataSource;
 pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
-pub use stream::{Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream};
+pub use stream::{Checkpoint, DataStream, OffsetCheckpoint, ResumableAsyncRead, ResumableStream};
 
 // Domain implementers
 pub use decoder::ZipCheckpoint;
 pub use error::{Error, HttpError, Result};
-pub use fusclient::{DownloadSession, FusClient};
+pub use fusclient::{DownloadSession, FusClient, fetch_history};
 pub use xml::{BinaryInform, VersionInfo};
-pub use zip::{OdinComponent, ZipArchive, ZipEntry, ZipEntrySession};
+pub use zip::{ZipArchive, ZipEntry, ZipEntrySession};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
-pub use binrw;
 pub use futures;
-
-use http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
-
-/// Queries and fetches the standard firmware `version.xml` document for the specified
-/// device model and region.
-async fn fetch_version_xml(
-    client: &impl HttpClient,
-    model: &str,
-    region: &str,
-) -> Result<VersionInfo> {
-    let version_url = format!(
-        "https://fota-cloud-dn.ospserver.net:443/firmware/{}/{}/version.xml",
-        region, model
-    );
-    let headers = [("User-Agent", "Kies2.0_FUS")];
-    let version_xml = client
-        .send(HttpRequest {
-            method: HttpMethod::Get,
-            url: &version_url,
-            headers: &headers,
-            body: None,
-        })
-        .await?
-        .ensure_success()?
-        .into_text()
-        .await?;
-
-    xml::parse_version_xml(&version_xml)
-}
-
-/// Fetches the historical list of released firmware versions for the target model and region
-/// through the `SmartHistory.do` endpoint.
-async fn fetch_smart_history(
-    client: &impl HttpClient,
-    model: &str,
-    region: &str,
-) -> Result<VersionInfo> {
-    let (nonce, signature) = auth::compute_history_headers(model);
-    let auth_val = format!(
-        "FUS nonce=\"{nonce}\", signature=\"{signature}\", \
-         nc=\"00000001\", type=\"auth\", realm=\"interface\"",
-    );
-    let req_xml = xml::history_req_xml(model, region);
-    let headers = [
-        ("Authorization", auth_val.as_str()),
-        ("User-Agent", "SMART 2.0"),
-    ];
-
-    let xml = client
-        .send(HttpRequest {
-            method: HttpMethod::Post,
-            url: "https://neofussvr.sslcs.cdngc.net/SmartHistory.do",
-            headers: &headers,
-            body: Some(req_xml.as_bytes()),
-        })
-        .await?
-        .ensure_success()?
-        .into_text()
-        .await?;
-
-    xml::parse_history_xml(&xml)
-}
-
-/// Fetches the historical list of released firmware versions for the target model and region.
-pub async fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
-    let client = PlatformClient::new()?;
-    match fetch_smart_history(&client, model, region).await {
-        Ok(info) => Ok(info),
-        Err(_) => fetch_version_xml(&client, model, region).await,
-    }
-}
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

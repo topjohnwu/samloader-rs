@@ -18,12 +18,13 @@ use super::{HttpClient, HttpMethod, HttpRequest, HttpResponse};
 use crate::error::HttpError;
 use futures::io::AsyncRead;
 use futures::stream::TryStreamExt;
+use reqwest::header::CONTENT_LENGTH;
 use std::io;
 use std::time::Duration;
 
-pub(crate) struct ReqwestClient(::reqwest::Client);
+pub(crate) struct ReqwestClient(reqwest::Client);
 
-pub(crate) struct ReqwestResponse(::reqwest::Response);
+pub(crate) struct ReqwestResponse(reqwest::Response);
 
 impl HttpResponse for ReqwestResponse {
     fn status(&self) -> u16 {
@@ -46,11 +47,9 @@ impl HttpResponse for ReqwestResponse {
     }
 }
 
-impl HttpClient for ReqwestClient {
-    type Response = ReqwestResponse;
-
-    fn new() -> Result<Self, HttpError> {
-        let client = ::reqwest::Client::builder()
+impl ReqwestClient {
+    pub(crate) fn new() -> Result<Self, HttpError> {
+        let client = reqwest::Client::builder()
             .cookie_store(true)
             // `read_timeout` resets on every body chunk read rather than capping
             // the total download duration, flagging stalled connections after 30s
@@ -61,6 +60,10 @@ impl HttpClient for ReqwestClient {
             .map_err(HttpError::backend)?;
         Ok(Self(client))
     }
+}
+
+impl HttpClient for ReqwestClient {
+    type Response = ReqwestResponse;
 
     async fn send(&self, request: HttpRequest<'_>) -> Result<Self::Response, HttpError> {
         let mut builder = match request.method {
@@ -74,7 +77,7 @@ impl HttpClient for ReqwestClient {
             // Hyper omits `Content-Length` on empty POST bodies unless set
             // explicitly, which FUS rejects with `411 Length Required`.
             builder = builder
-                .header(::reqwest::header::CONTENT_LENGTH, body.len())
+                .header(CONTENT_LENGTH, body.len())
                 .body(body.to_vec());
         }
 

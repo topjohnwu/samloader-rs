@@ -15,72 +15,33 @@
 //! Streaming ZIP / ZIP64 Central Directory indexing and entry access over any [`DataSource`].
 
 use crate::data::DataSource;
-use crate::decoder::{ZipCheckpoint, ZipDecoder};
+use crate::decoder::{ZipCheckpoint, ZipEntryReader};
 use crate::error::{Error, Result};
 use crate::stream::{Checkpoint, ResumableAsyncRead, ResumableStream};
 use rawzip::{CompressionMethod, ReaderAt, ZipArchiveEntryWayfinder, ZipLocator};
 use std::io;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Covers max 65,535-byte ZIP comment + 22-byte EOCD + 20-byte ZIP64 Locator + 56-byte ZIP64 EOCD.
 const TAIL_FETCH_BYTES: u64 = 65_536 + 128;
 const MAX_CD_PREFIX_BYTES: u64 = 64 * 1024 * 1024;
 const LOCAL_HEADER_FIXED_SIZE: usize = 30;
 
-/// Recognized Samsung Odin firmware component of an archive entry.
+static NEXT_ARCHIVE_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OdinComponent {
-    /// Bootloader component (`BL_*`).
-    Bl,
-    /// Application processor / system component (`AP_*`, `CODE_*`, `PDA_*`, or `*_HOME.tar*`).
-    Ap,
-    /// Modem / baseband component (`CP_*`, `MODEM_*`, `PHONE_*`).
-    Cp,
-    /// Clean-flash region/carrier configuration component (`CSC_*`).
-    Csc,
-    /// Non-wiping region/carrier configuration component (`HOME_CSC_*`).
-    HomeCsc,
-    /// Carrier/user data component (`USERDATA_*`).
-    Userdata,
-}
-
-impl OdinComponent {
-    /// Classifies an archive entry file name by its Samsung prefix, if recognized.
-    pub fn from_entry_name(name: &str) -> Option<Self> {
-        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-        let upper = base.to_ascii_uppercase();
-
-        if upper.starts_with("HOME_CSC_") {
-            Some(Self::HomeCsc)
-        } else if upper.starts_with("CSC_") {
-            Some(Self::Csc)
-        } else if upper.starts_with("BL_") || upper.starts_with("BOOTLOADER_") {
-            Some(Self::Bl)
-        } else if upper.starts_with("AP_")
-            || upper.starts_with("CODE_")
-            || upper.starts_with("PDA_")
-        {
-            Some(Self::Ap)
-        } else if upper.starts_with("CP_")
-            || upper.starts_with("MODEM_")
-            || upper.starts_with("PHONE_")
-        {
-            Some(Self::Cp)
-        } else if upper.starts_with("USERDATA_") {
-            Some(Self::Userdata)
-        } else if upper.ends_with("_HOME.TAR.MD5") || upper.ends_with("_HOME.TAR") {
-            Some(Self::Ap)
-        } else {
-            None
-        }
-    }
+pub(crate) enum Compression {
+    Stored,
+    Deflate,
 }
 
 /// Metadata for a single file entry parsed from a [`ZipArchive`] Central Directory.
 #[derive(Debug, Clone)]
 pub struct ZipEntry {
+    archive_id: u64,
     name: String,
-    compression: CompressionMethod,
+    compression: Compression,
     crc32: u32,
     local_header_offset: u64,
     wayfinder: ZipArchiveEntryWayfinder,
@@ -100,11 +61,6 @@ impl ZipEntry {
     /// Uncompressed payload size in bytes.
     pub fn uncompressed_size(&self) -> u64 {
         self.wayfinder.uncompressed_size_hint()
-    }
-
-    /// Classifies this entry as a recognized Samsung Odin firmware component, if any.
-    pub fn component(&self) -> Option<OdinComponent> {
-        OdinComponent::from_entry_name(&self.name)
     }
 }
 
@@ -133,8 +89,8 @@ fn map_zip_error(err: rawzip::Error) -> Error {
 
 /// Parsed Central Directory index over any [`DataSource`].
 pub struct ZipArchive<S: DataSource> {
+    id: u64,
     source: S,
-    archive_len: u64,
     raw: rawzip::ZipArchive<OffsetSlice>,
     entries: Vec<ZipEntry>,
 }
@@ -184,24 +140,19 @@ impl<S: DataSource> ZipArchive<S> {
                 ));
             }
             full[prefix_usize..].copy_from_slice(&tail);
-            raw = locator
-                .locate_in_reader(
-                    OffsetSlice {
-                        base: cd_offset,
-                        bytes: full,
-                    },
-                    &mut scratch,
-                    archive_len,
-                )
-                .map_err(|(_, e)| map_zip_error(e))?;
+            *raw.get_mut() = OffsetSlice {
+                base: cd_offset,
+                bytes: full,
+            };
         }
 
-        let entries = parse_entries(&raw, &mut scratch)?;
+        let id = NEXT_ARCHIVE_ID.fetch_add(1, Ordering::Relaxed);
+        let entries = parse_entries(&raw, &mut scratch, id)?;
         *raw.get_mut() = OffsetSlice::default();
 
         Ok(Self {
+            id,
             source,
-            archive_len,
             raw,
             entries,
         })
@@ -215,10 +166,18 @@ impl<S: DataSource> ZipArchive<S> {
     /// Reads the 30-byte Local File Header for `entry` to resolve its exact payload offset
     /// and returns a [`ZipEntrySession`].
     pub async fn open_entry<'a>(&'a self, entry: &'a ZipEntry) -> Result<ZipEntrySession<'a, S>> {
+        if entry.archive_id != self.id {
+            return Err(Error::InvalidArchive(format!(
+                "ZIP entry '{}' does not belong to this archive",
+                entry.name
+            )));
+        }
+
+        let archive_len = self.source.size();
         if entry
             .local_header_offset
             .checked_add(LOCAL_HEADER_FIXED_SIZE as u64)
-            .is_none_or(|end| end > self.archive_len)
+            .is_none_or(|end| end > archive_len)
         {
             return Err(Error::InvalidArchive(format!(
                 "local file header offset out of bounds for '{}'",
@@ -247,7 +206,7 @@ impl<S: DataSource> ZipArchive<S> {
         let raw_entry = raw.get_entry(entry.wayfinder).map_err(map_zip_error)?;
         let (data_offset, data_end) = raw_entry.compressed_data_range();
 
-        if data_end > self.archive_len {
+        if data_end > archive_len {
             return Err(Error::InvalidArchive(format!(
                 "compressed payload out of bounds for '{}'",
                 entry.name
@@ -265,6 +224,7 @@ impl<S: DataSource> ZipArchive<S> {
 fn parse_entries(
     raw: &rawzip::ZipArchive<OffsetSlice>,
     scratch: &mut [u8],
+    archive_id: u64,
 ) -> Result<Vec<ZipEntry>> {
     let mut entries: Vec<ZipEntry> = Vec::new();
     let mut parsed_count = 0u64;
@@ -287,15 +247,15 @@ fn parse_entries(
             ));
         }
 
-        let compression = rec.compression_method();
-        if !matches!(
-            compression,
-            CompressionMethod::STORE | CompressionMethod::DEFLATE
-        ) {
-            return Err(Error::InvalidArchive(format!(
-                "unsupported ZIP compression method {compression} for '{name}'"
-            )));
-        }
+        let compression = match rec.compression_method() {
+            CompressionMethod::STORE => Compression::Stored,
+            CompressionMethod::DEFLATE => Compression::Deflate,
+            other => {
+                return Err(Error::InvalidArchive(format!(
+                    "unsupported ZIP compression method {other} for '{name}'"
+                )));
+            }
+        };
 
         if name.is_empty() || name.contains(['/', '\\', '\0', ':']) || name == "." || name == ".." {
             return Err(Error::InvalidArchive(format!(
@@ -310,6 +270,7 @@ fn parse_entries(
         }
 
         entries.push(ZipEntry {
+            archive_id,
             name: name.to_owned(),
             compression,
             crc32: rec.crc32(),
@@ -368,19 +329,17 @@ impl<'s, S: DataSource> ResumableStream for ZipEntrySession<'s, S> {
         )
     }
 
-    async fn open<'a>(
-        &'a self,
-    ) -> io::Result<impl ResumableAsyncRead<Checkpoint = ZipCheckpoint> + use<'a, 's, S>> {
-        let decoder = ZipDecoder::new(
-            self.entry.compression,
-            self.entry.crc32,
-            self.entry.uncompressed_size(),
-        )?;
+    async fn open(&self) -> io::Result<impl ResumableAsyncRead<Checkpoint = ZipCheckpoint>> {
         let reader = self
             .source
             .fetch_range(self.compressed_range_from(0))
             .await?;
-        Ok(decoder.into_reader(reader))
+        ZipEntryReader::new(
+            reader,
+            self.entry.compression,
+            self.entry.crc32,
+            self.entry.uncompressed_size(),
+        )
     }
 
     async fn resume<'a>(
@@ -388,66 +347,40 @@ impl<'s, S: DataSource> ResumableStream for ZipEntrySession<'s, S> {
         checkpoint: &ZipCheckpoint,
         dict: &[u8],
     ) -> io::Result<impl ResumableAsyncRead<Checkpoint = ZipCheckpoint> + use<'a, 's, S>> {
-        let decoder = ZipDecoder::resume(
+        // Validate checkpoint before opening a source range request.
+        if self.resume_dict_len(checkpoint).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid or incompatible stream checkpoint metadata",
+            ));
+        }
+        let reader = self
+            .source
+            .fetch_range(self.compressed_range_from(checkpoint.source_offset()))
+            .await?;
+        ZipEntryReader::resume(
+            reader,
             self.entry.compression,
             self.entry.crc32,
             self.entry.compressed_size(),
             self.entry.uncompressed_size(),
             *checkpoint,
             dict,
-        )?;
-        let reader = self
-            .source
-            .fetch_range(self.compressed_range_from(checkpoint.source_offset()))
-            .await?;
-        Ok(decoder.into_reader(reader))
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::tests::compress_multi_block;
     use crate::parallel::ParallelDataSource;
+    use crate::test_util::{block_on_tokio, compress_multi_block};
     use futures::executor::block_on;
     use futures::io::AsyncReadExt;
     use rawzip::extra_fields::ExtraFieldId;
     use rawzip::path::EntryPath;
     use rawzip::{Header, ZipArchiveWriter};
     use std::io::Write;
-
-    #[test]
-    fn test_odin_component_classification() {
-        assert_eq!(
-            OdinComponent::from_entry_name("BL_S931U1UES1AXB2.tar.md5"),
-            Some(OdinComponent::Bl)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("AP_S931U1UEU1AXB2.tar.md5"),
-            Some(OdinComponent::Ap)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("CP_S931U1UEU1AXB2.tar.md5"),
-            Some(OdinComponent::Cp)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("CSC_OYM_S931U1OYM1AXB2.tar.md5"),
-            Some(OdinComponent::Csc)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("HOME_CSC_OYM_S931U1OYM1AXB2.tar.md5"),
-            Some(OdinComponent::HomeCsc)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("USERDATA_XAA_S931U1.tar.md5"),
-            Some(OdinComponent::Userdata)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("I9305XXUEML8_I9305QLBEML4_HOME.tar.md5"),
-            Some(OdinComponent::Ap)
-        );
-        assert_eq!(OdinComponent::from_entry_name("SS_DL.dll"), None);
-    }
 
     #[test]
     fn test_zip_archive_streaming_and_large_central_directory() {
@@ -497,12 +430,12 @@ mod tests {
         writer.finish().unwrap();
         assert!(zip_bytes.len() as u64 > TAIL_FETCH_BYTES);
 
-        block_on(async {
+        block_on_tokio(async {
             let source = ParallelDataSource::new(zip_bytes, 4);
             let archive = ZipArchive::open(&source).await.unwrap();
             assert_eq!(archive.entries().len(), 2);
-            assert_eq!(archive.entries()[0].component(), Some(OdinComponent::Bl));
-            assert_eq!(archive.entries()[1].component(), Some(OdinComponent::Ap));
+            assert_eq!(archive.entries()[0].name(), "BL_test.tar.md5");
+            assert_eq!(archive.entries()[1].name(), "AP_test.tar.md5");
 
             let bl_sess = archive.open_entry(&archive.entries()[0]).await.unwrap();
             let ap_sess = archive.open_entry(&archive.entries()[1]).await.unwrap();
@@ -567,6 +500,13 @@ mod tests {
 
     #[test]
     fn test_entry_validation_rejects_invalid_archives() {
+        let assert_invalid = |bytes: &[u8]| {
+            block_on(async {
+                let err = ZipArchive::open(bytes).await.err().unwrap();
+                assert!(matches!(err, Error::InvalidArchive(_)));
+            });
+        };
+
         for bad_name in [&b"../evil"[..], b"/abs", b"sub/file"] {
             let mut zip_bytes = Vec::new();
             let mut writer = ZipArchiveWriter::new(&mut zip_bytes);
@@ -579,11 +519,7 @@ mod tests {
             let (_, desc) = w.finish().unwrap();
             entry.finish(desc).unwrap();
             writer.finish().unwrap();
-
-            block_on(async {
-                let err = ZipArchive::open(zip_bytes.as_slice()).await.err().unwrap();
-                assert!(matches!(err, Error::InvalidArchive(_)));
-            });
+            assert_invalid(&zip_bytes);
         }
 
         // Duplicate entry names (case-insensitive) must be rejected
@@ -597,10 +533,7 @@ mod tests {
             entry.finish(desc).unwrap();
         }
         writer.finish().unwrap();
-        block_on(async {
-            let err = ZipArchive::open(dup_bytes.as_slice()).await.err().unwrap();
-            assert!(matches!(err, Error::InvalidArchive(_)));
-        });
+        assert_invalid(&dup_bytes);
 
         // Unsupported compression method must be rejected
         let mut zstd_bytes = Vec::new();
@@ -615,9 +548,26 @@ mod tests {
         let (_, desc) = w.finish().unwrap();
         entry.finish(desc).unwrap();
         writer.finish().unwrap();
+        assert_invalid(&zstd_bytes);
+
+        // Entry belonging to a different ZipArchive must be rejected
+        let mut valid_zip = Vec::new();
+        let mut writer = ZipArchiveWriter::new(&mut valid_zip);
+        let (mut entry, config) = writer.new_file("BL_test.tar.md5").start().unwrap();
+        let mut w = config.wrap(&mut entry);
+        w.write_all(b"x").unwrap();
+        let (_, desc) = w.finish().unwrap();
+        entry.finish(desc).unwrap();
+        writer.finish().unwrap();
 
         block_on(async {
-            let err = ZipArchive::open(zstd_bytes.as_slice()).await.err().unwrap();
+            let archive_a = ZipArchive::open(valid_zip.as_slice()).await.unwrap();
+            let archive_b = ZipArchive::open(valid_zip.as_slice()).await.unwrap();
+            let err = archive_a
+                .open_entry(&archive_b.entries()[0])
+                .await
+                .err()
+                .unwrap();
             assert!(matches!(err, Error::InvalidArchive(_)));
         });
     }

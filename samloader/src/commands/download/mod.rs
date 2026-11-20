@@ -15,12 +15,12 @@
 mod part;
 mod progress;
 
-use crate::cli::{ALL_COMPONENTS, DownloadArgs, component_key};
-use part::{FooterState, PartFile, ResumeState, binary_checksum};
+use crate::cli::{ALL_COMPONENTS, DownloadArgs, OdinComponent, component_key};
+use part::{FooterState, PartFile, ResumeState};
 use progress::{CliObserver, FileLabel};
 use samloader_fus::{
-    BinaryInform, Checkpoint, FusClient, OdinComponent, ParallelDataSource, ResumableStream,
-    ZipArchive, ZipEntry, fetch_history,
+    BinaryInform, Checkpoint, DataStream, FusClient, ParallelDataSource, ResumableStream,
+    ZipArchive, ZipEntry,
 };
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -46,12 +46,20 @@ fn select_entries<'a>(
             continue;
         }
         let before = list.len();
-        list.extend(entries.iter().filter(|e| e.component() == Some(component)));
+        list.extend(
+            entries
+                .iter()
+                .filter(|e| OdinComponent::from_entry_name(e.name()) == Some(component)),
+        );
         if list.len() == before {
             let avail: Vec<_> = ALL_COMPONENTS
                 .iter()
                 .copied()
-                .filter(|&c| entries.iter().any(|e| e.component() == Some(c)))
+                .filter(|&c| {
+                    entries
+                        .iter()
+                        .any(|e| OdinComponent::from_entry_name(e.name()) == Some(c))
+                })
                 .map(component_key)
                 .collect();
             let avail_list = if avail.is_empty() {
@@ -148,16 +156,21 @@ async fn download_raw(
         return Ok(());
     }
 
-    println!("Downloading {} to {}", info.filename, final_path.display());
+    println!(
+        "Downloading {} to {}",
+        info.filename(),
+        final_path.display()
+    );
 
     let session = client
         .init_download(info)
         .await
         .map_err(|e| format!("Failed to initialize download: {e}"))?;
     let parallel =
-        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer) as _);
+        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer));
+    let stream = DataStream::new(parallel);
 
-    transfer_file(&parallel, final_path, checksum, args.force, &observer, None).await
+    transfer_file(&stream, final_path, checksum, args.force, &observer, None).await
 }
 
 async fn download_archive(
@@ -180,13 +193,13 @@ async fn download_archive(
         }
     };
 
-    let filename = info.filename.clone();
+    let filename = info.filename().to_owned();
     let session = client
         .init_download(info)
         .await
         .map_err(|e| format!("Failed to initialize download: {e}"))?;
     let parallel =
-        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer) as _);
+        ParallelDataSource::new(session, concurrency).with_observer(Arc::clone(&observer));
     let archive = ZipArchive::open(parallel)
         .await
         .map_err(|e| format!("Failed to open firmware archive: {e}"))?;
@@ -243,28 +256,28 @@ async fn download_archive(
 
 /// Downloads and decrypts (and by default extracts) a firmware from Samsung's update servers.
 pub(crate) async fn run(args: DownloadArgs, verbose: bool) -> Result<(), Box<dyn Error>> {
+    let client = FusClient::new()
+        .await
+        .map_err(|e| format!("Unable to establish FusClient: {e}"))?;
     let version = match &args.version {
         Some(v) => v.clone(),
         None => {
-            let version_info = fetch_history(&args.fus.model, &args.fus.region)
+            let version_info = client
+                .fetch_history(&args.fus.model, &args.fus.region)
                 .await
                 .map_err(|e| format!("Failed to fetch version info: {e}"))?;
             version_info.latest
         }
     };
-
-    let client = FusClient::new()
-        .await
-        .map_err(|e| format!("Unable to establish FusClient: {e}"))?;
     let info = client
         .fetch_binary_info(&args.fus.model, &args.fus.region, &version)
         .await
         .map_err(|e| format!("Failed to fetch binary info: {e}"))?;
 
-    println!("Firmware Version: {}", info.version);
+    println!("Firmware Version: {}", info.version());
 
     let concurrency = args.threads.max(1).min(usize::MAX as u64) as usize;
-    let checksum = binary_checksum(&info);
+    let checksum = info.fingerprint();
     let observer = Arc::new(CliObserver::new(verbose));
 
     if args.no_extract {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::Error;
+use fast_md5::Md5;
 use roxmltree::{Document, Node};
 use std::collections::HashMap;
 
@@ -29,8 +30,9 @@ fn get_logic_check(inp: &str, nonce: &str) -> String {
     out
 }
 
-/// Firmware version information parsed from server responses (e.g., version.xml or history.xml).
+/// Firmware version information parsed from server responses (e.g., `version.xml` or `history.xml`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VersionInfo {
     /// The latest available stable firmware version string.
     pub latest: String,
@@ -156,7 +158,7 @@ pub(crate) fn binary_init_req_xml(
 pub(crate) fn history_req_xml(model: &str, region: &str) -> String {
     format!(
         r#"<FUSMsg>
-<FUSHdr><ProtoVer>1</ProtoVer><SessionID>0</SessionID><MsgID>1</MsgID></FUSHdr>
+<FUSHdr><ProtoVer>1.0</ProtoVer><SessionID>0</SessionID><MsgID>1</MsgID></FUSHdr>
 <FUSBody>
     <Put>
         <CmdID>1</CmdID>
@@ -193,51 +195,57 @@ pub(crate) fn check_xml_status(xml: &str) -> crate::Result<()> {
     parse_xml_status(&doc)
 }
 
-fn parse_xml_data(xml: &str) -> crate::Result<HashMap<String, String>> {
-    let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
-    parse_xml_status(&doc)?;
-    Ok(get_xml_node_data(doc.root()))
-}
-
-fn get_xml_node_data(node: Node) -> HashMap<String, String> {
+fn get_xml_node_data<'a>(node: Node<'a, 'a>) -> HashMap<&'a str, &'a str> {
     let mut kv = HashMap::new();
-    node.descendants()
-        .filter(|n| n.has_tag_name("Data"))
-        .for_each(|n| {
-            if let Some(v) = n.text() {
-                let parent = n.parent().unwrap();
-                kv.insert(parent.tag_name().name().to_string(), v.to_string());
-            }
-        });
+    for n in node.descendants().filter(|n| n.has_tag_name("Data")) {
+        if let Some(v) = n.text()
+            && let Some(parent) = n.parent()
+        {
+            kv.insert(parent.tag_name().name(), v);
+        }
+    }
     kv
 }
 
-/// Detailed information about a firmware binary package.
+fn update_len_prefixed(hasher: &mut Md5, data: &[u8]) {
+    hasher.update(&(data.len() as u64).to_le_bytes());
+    hasher.update(data);
+}
+
+/// Resolved metadata for a firmware binary package returned by FUS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryInform {
-    /// The firmware build version identifier (e.g., PDA/CSC/PHONE/PHONE).
-    pub version: String,
-    /// The actual name of the firmware file on the server.
-    pub filename: String,
-    /// The relative URL path on the server to download the firmware.
-    pub path: String,
-    /// The encrypted size of the firmware binary package on the server in bytes.
-    pub size: u64,
-    /// The 128-bit key used for AES-128 decryption.
-    pub key: [u8; 16],
-    /// The device model type classification string.
-    pub model_type: String,
-    /// The local CSC or sales region code.
-    pub region: String,
+    pub(crate) version: String,
+    pub(crate) filename: String,
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) key: [u8; 16],
+    pub(crate) model_type: String,
+    pub(crate) region: String,
 }
 
 impl BinaryInform {
+    /// Returns the firmware build version identifier (e.g., `PDA/CSC/PHONE/PHONE`).
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Returns the encrypted firmware file name on the server.
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
     /// Returns the firmware file name with any trailing `.enc4` or `.enc2` suffix stripped.
     pub fn decrypted_filename(&self) -> &str {
         self.filename
             .strip_suffix(".enc4")
             .or_else(|| self.filename.strip_suffix(".enc2"))
             .unwrap_or(&self.filename)
+    }
+
+    /// Returns the encrypted size of the firmware binary package on the server in bytes.
+    pub const fn encrypted_size(&self) -> u64 {
+        self.size
     }
 
     /// Inclusive `(min_size, max_size)` byte length bounds of the decrypted payload.
@@ -252,97 +260,118 @@ impl BinaryInform {
         }
     }
 
+    /// Computes a stable 128-bit identity fingerprint for this firmware binary package,
+    /// suitable for binding persisted resume checkpoints to a specific build.
+    pub fn fingerprint(&self) -> [u8; 16] {
+        let mut hasher = Md5::new();
+        update_len_prefixed(&mut hasher, self.version.as_bytes());
+        update_len_prefixed(&mut hasher, self.filename.as_bytes());
+        update_len_prefixed(&mut hasher, self.path.as_bytes());
+        hasher.update(&self.size.to_le_bytes());
+        hasher.update(&self.key);
+        update_len_prefixed(&mut hasher, self.model_type.as_bytes());
+        update_len_prefixed(&mut hasher, self.region.as_bytes());
+        hasher.finalize()
+    }
+
     pub(crate) fn parse(xml: &str) -> crate::Result<BinaryInform> {
         let missing = |field: &str| Error::InvalidResponse(format!("missing {field}"));
-        let mut kv = parse_xml_data(xml)?;
+        let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
+        parse_xml_status(&doc)?;
+        let kv = get_xml_node_data(doc.root());
+
         let fw_ver = kv
-            .remove("BINARY_SW_VERSION")
-            .or_else(|| kv.remove("LATEST_FW_VERSION"))
+            .get("BINARY_SW_VERSION")
+            .or_else(|| kv.get("LATEST_FW_VERSION"))
+            .copied()
             .ok_or_else(|| missing("BINARY_SW_VERSION"))?;
         let filename = kv
-            .remove("BINARY_NAME")
+            .get("BINARY_NAME")
+            .copied()
             .ok_or_else(|| missing("BINARY_NAME"))?;
         let region = kv
-            .remove("BINARY_LOCAL_CODE")
-            .or_else(|| kv.remove("DEVICE_LOCAL_CODE"))
+            .get("BINARY_LOCAL_CODE")
+            .or_else(|| kv.get("DEVICE_LOCAL_CODE"))
+            .copied()
             .ok_or_else(|| missing("BINARY_LOCAL_CODE"))?;
 
         let key = if filename.ends_with(".enc2") {
             let model = kv
-                .remove("BINARY_MODEL_NAME")
-                .or_else(|| kv.remove("DEVICE_MODEL_NAME"))
-                .or_else(|| filename.split('_').next().map(str::to_string))
+                .get("BINARY_MODEL_NAME")
+                .or_else(|| kv.get("DEVICE_MODEL_NAME"))
+                .copied()
+                .or_else(|| filename.split('_').next())
                 .ok_or_else(|| missing("BINARY_MODEL_NAME"))?;
             let dec_str = format!("{region}:{model}:{fw_ver}");
             fast_md5::digest(dec_str.as_bytes())
         } else {
             let logic_val = kv
-                .remove("LOGIC_VALUE_FACTORY")
-                .or_else(|| kv.remove("LOGIC_VALUE_HOME"))
+                .get("LOGIC_VALUE_FACTORY")
+                .or_else(|| kv.get("LOGIC_VALUE_HOME"))
+                .copied()
                 .ok_or_else(|| missing("LOGIC_VALUE"))?;
-            let key = get_logic_check(&fw_ver, &logic_val);
+            let key = get_logic_check(fw_ver, logic_val);
             fast_md5::digest(key.as_bytes())
         };
 
         let path = kv
-            .remove("MODEL_PATH")
+            .get("MODEL_PATH")
+            .copied()
             .ok_or_else(|| missing("MODEL_PATH"))?;
         let size = kv
-            .remove("BINARY_BYTE_SIZE")
+            .get("BINARY_BYTE_SIZE")
+            .copied()
             .ok_or_else(|| missing("BINARY_BYTE_SIZE"))?
             .parse()
             .map_err(|_| Error::InvalidResponse("invalid BINARY_BYTE_SIZE".into()))?;
         let model_type = kv
-            .remove("DEVICE_MODEL_TYPE")
+            .get("DEVICE_MODEL_TYPE")
+            .copied()
             .ok_or_else(|| missing("DEVICE_MODEL_TYPE"))?;
 
         Ok(Self {
-            version: fw_ver,
-            filename,
-            path,
+            version: fw_ver.to_owned(),
+            filename: filename.to_owned(),
+            path: path.to_owned(),
             size,
             key,
-            model_type,
-            region,
+            model_type: model_type.to_owned(),
+            region: region.to_owned(),
         })
     }
 }
 
-struct BinaryInfo {
-    sw_version: String,
-    index: String,
+struct BinaryInfo<'a> {
+    sw_version: &'a str,
+    index: &'a str,
     sequence: i64,
-    open_date: String,
+    open_date: &'a str,
 }
 
-impl BinaryInfo {
-    fn parse(mut kv: HashMap<String, String>) -> Option<Self> {
+impl<'a> BinaryInfo<'a> {
+    fn parse(kv: &HashMap<&'a str, &'a str>) -> Option<Self> {
         Some(Self {
-            sw_version: kv.remove("BINARY_SW_VERSION")?,
-            index: kv.remove("BINARY_INDEX")?,
-            sequence: kv.remove("BINARY_SEQUENCE")?.parse().ok()?,
-            open_date: kv.remove("BINARY_OPEN_DATE").unwrap_or_default(),
+            sw_version: *kv.get("BINARY_SW_VERSION")?,
+            index: *kv.get("BINARY_INDEX")?,
+            sequence: kv.get("BINARY_SEQUENCE")?.parse().ok()?,
+            open_date: kv.get("BINARY_OPEN_DATE").copied().unwrap_or(""),
         })
     }
 }
 
 pub(crate) fn parse_history_xml(xml: &str) -> crate::Result<VersionInfo> {
     let doc = Document::parse(xml).map_err(|e| Error::InvalidResponse(e.to_string()))?;
-    let mut consolidated: HashMap<(String, String, i64), BinaryInfo> = HashMap::new();
+    let mut consolidated: HashMap<(&str, &str, i64), BinaryInfo<'_>> = HashMap::new();
 
     for node in doc.descendants().filter(|n| n.has_tag_name("BINARY_INFO")) {
         let kv = get_xml_node_data(node);
-        if let Some(entry) = BinaryInfo::parse(kv) {
-            let key = (
-                entry.sw_version.clone(),
-                entry.index.clone(),
-                entry.sequence,
-            );
+        if let Some(entry) = BinaryInfo::parse(&kv) {
+            let key = (entry.sw_version, entry.index, entry.sequence);
             consolidated
                 .entry(key)
                 .and_modify(|existing| {
                     if entry.open_date > existing.open_date {
-                        existing.open_date = entry.open_date.clone();
+                        existing.open_date = entry.open_date;
                     }
                 })
                 .or_insert(entry);
@@ -356,25 +385,25 @@ pub(crate) fn parse_history_xml(xml: &str) -> crate::Result<VersionInfo> {
     }
 
     // Chronological Sorting (Newest First)
-    let mut sorted_entries: Vec<BinaryInfo> = consolidated.into_values().collect();
+    let mut sorted_entries: Vec<BinaryInfo<'_>> = consolidated.into_values().collect();
     sorted_entries.sort_unstable_by(|a, b| {
         b.sequence
             .cmp(&a.sequence)
-            .then_with(|| b.open_date.cmp(&a.open_date))
+            .then_with(|| b.open_date.cmp(a.open_date))
     });
 
-    let (stable_entries, beta_entries): (Vec<BinaryInfo>, Vec<BinaryInfo>) =
+    let (stable_entries, beta_entries): (Vec<BinaryInfo<'_>>, Vec<BinaryInfo<'_>>) =
         sorted_entries.into_iter().partition(|e| e.index != "90");
 
     let mut previous: Vec<String> = stable_entries
         .into_iter()
-        .map(|e| normalize_version(&e.sw_version))
+        .map(|e| normalize_version(e.sw_version))
         .collect();
     previous.dedup();
 
     let mut beta: Vec<String> = beta_entries
         .into_iter()
-        .map(|e| normalize_version(&e.sw_version))
+        .map(|e| normalize_version(e.sw_version))
         .collect();
     beta.dedup();
 
@@ -482,14 +511,14 @@ mod tests {
 
         let info = BinaryInform::parse(xml).expect("Failed to parse enc2 inform");
         assert_eq!(
-            info.filename,
+            info.filename(),
             "GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip.enc2"
         );
         assert_eq!(
             info.decrypted_filename(),
             "GT-I9305_XSP_10_20140109111610_rk8g0x6leq_fac.zip"
         );
-        assert_eq!(info.size, 1029656336);
+        assert_eq!(info.encrypted_size(), 1029656336);
         assert_eq!(info.decrypted_size_bounds(), (1029656320, 1029656336));
         assert_eq!(info.region, "XSP");
         assert_eq!(info.model_type, "9");
@@ -501,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_binary_inform_enc4() {
+    fn test_parse_binary_inform_enc4_and_fingerprint() {
         let xml = r#"<FUSMsg>
 <FUSBody>
     <Results><Status>S00</Status></Results>
@@ -520,17 +549,26 @@ mod tests {
 
         let info = BinaryInform::parse(xml).expect("Failed to parse enc4 inform");
         assert_eq!(
-            info.filename,
+            info.version(),
+            "S931U1UEU1AWF1/S931U1OYM1AWF1/S931U1UEU1AWF1/S931U1UEU1AWF1"
+        );
+        assert_eq!(
+            info.filename(),
             "SM-S931U1_1_20240101000000_abcdefghij_fac.zip.enc4"
         );
         assert_eq!(
             info.decrypted_filename(),
             "SM-S931U1_1_20240101000000_abcdefghij_fac.zip"
         );
-        assert_eq!(info.size, 5000000000);
+        assert_eq!(info.encrypted_size(), 5000000000);
         assert_eq!(info.decrypted_size_bounds(), (4999999984, 5000000000));
         assert_eq!(info.region, "XAA");
         assert_eq!(info.key, fast_md5::digest(b"931U1UEU1S931U1U"));
+
+        let mut mutated = info.clone();
+        mutated.size += 16;
+        assert_eq!(info.fingerprint(), info.fingerprint());
+        assert_ne!(info.fingerprint(), mutated.fingerprint());
     }
 
     #[test]

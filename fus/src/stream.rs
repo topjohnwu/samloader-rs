@@ -12,17 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! General-purpose resumable sequential streaming abstractions: [`Checkpoint`],
-//! [`ResumableAsyncRead`], [`ResumableStream`], and [`OffsetCheckpoint`].
+//! Resumable sequential streaming abstractions: [`Checkpoint`], [`ResumableAsyncRead`],
+//! [`ResumableStream`], [`OffsetCheckpoint`], and [`DataStream`].
 
 use crate::compat::{MaybeSend, MaybeSync};
 use crate::data::DataSource;
-use binrw::binrw;
 use futures::io::AsyncRead;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
+
+/// Polls `reader.poll_read(cx, buf)`, automatically retrying `ErrorKind::Interrupted`.
+pub(crate) fn poll_read_retry_eintr<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    loop {
+        match Pin::new(&mut *reader).poll_read(cx, buf) {
+            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
 
 /// Mid-stream resume checkpoint emitted by a [`ResumableAsyncRead`].
 pub trait Checkpoint: MaybeSend + MaybeSync {
@@ -52,9 +65,9 @@ pub trait ResumableAsyncRead: AsyncRead + MaybeSend + Unpin {
 
 /// Resumable, checkpointable sequential stream.
 ///
-/// Implemented automatically for every random-access [`DataSource`] (streaming raw
-/// bytes with [`OffsetCheckpoint`]) as well as [`ZipEntrySession`](crate::ZipEntrySession)
-/// (streaming decompressed, CRC-verified archive entries with [`ZipCheckpoint`](crate::ZipCheckpoint)).
+/// Implemented by [`DataStream`] (wrapping any random-access [`DataSource`] with
+/// [`OffsetCheckpoint`]) and [`ZipEntrySession`](crate::ZipEntrySession) (streaming
+/// decompressed, CRC-verified archive entries with [`ZipCheckpoint`](crate::ZipCheckpoint)).
 pub trait ResumableStream: MaybeSend + MaybeSync {
     /// Mid-stream checkpoint type for this stream.
     type Checkpoint: Checkpoint;
@@ -65,19 +78,21 @@ pub trait ResumableStream: MaybeSend + MaybeSync {
     /// Total byte length of the underlying (possibly compressed) source stream.
     fn source_size(&self) -> u64;
 
-    /// Validates `checkpoint` against this stream and returns the number of trailing
-    /// output bytes (ending at `checkpoint.output_offset()`) required as the resume
-    /// dictionary for [`resume`](Self::resume).
+    /// Validates that `checkpoint` is a resumable mid-stream position for this stream
+    /// and returns the number of trailing output bytes (ending at `checkpoint.output_offset()`)
+    /// required as the resume dictionary for [`resume`](Self::resume).
     ///
-    /// Returns `None` if `checkpoint` is out of bounds or incompatible with this stream.
+    /// Returns `None` if `checkpoint` is at the start/end, out of bounds, or incompatible
+    /// with this stream. When `Some(dict_len)` is returned, callers can rely on
+    /// `0 < checkpoint.source_offset()`, `checkpoint.output_offset() < self.output_size()`,
+    /// and `dict_len as u64 <= checkpoint.output_offset()`.
     fn resume_dict_len(&self, checkpoint: &Self::Checkpoint) -> Option<usize>;
 
     /// Opens a checkpointable reader starting from the beginning of the stream.
-    fn open<'a>(
-        &'a self,
-    ) -> impl Future<
-        Output = io::Result<impl ResumableAsyncRead<Checkpoint = Self::Checkpoint> + use<'a, Self>>,
-    > + MaybeSend;
+    fn open(
+        &self,
+    ) -> impl Future<Output = io::Result<impl ResumableAsyncRead<Checkpoint = Self::Checkpoint>>>
+    + MaybeSend;
 
     /// Resumes streaming from `checkpoint`.
     ///
@@ -92,9 +107,7 @@ pub trait ResumableStream: MaybeSend + MaybeSync {
     > + MaybeSend;
 }
 
-/// Offset-only [`Checkpoint`] for random-access [`DataSource`] streams.
-#[binrw]
-#[brw(little, magic = 0u8)]
+/// Offset-only [`Checkpoint`] for [`DataStream`] transfers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OffsetCheckpoint {
     offset: u64,
@@ -104,6 +117,25 @@ impl OffsetCheckpoint {
     /// Creates an offset-only checkpoint at byte `offset`.
     pub const fn new(offset: u64) -> Self {
         Self { offset }
+    }
+
+    /// Serializes this checkpoint as an 8-byte little-endian offset.
+    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        writer.write_all(&self.offset.to_le_bytes())
+    }
+
+    /// Deserializes a non-zero checkpoint previously written by [`write_to`](Self::write_to).
+    pub fn read_from(reader: &mut impl io::Read) -> io::Result<Self> {
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf)?;
+        let offset = u64::from_le_bytes(buf);
+        if offset == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "offset checkpoint must be non-zero",
+            ));
+        }
+        Ok(Self { offset })
     }
 }
 
@@ -154,14 +186,7 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for OffsetResumableReader<R> {
             return Poll::Ready(Ok(0));
         }
 
-        let n = loop {
-            match Pin::new(&mut self.reader).poll_read(cx, buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(n)) => break n,
-            }
-        };
+        let n = ready!(poll_read_retry_eintr(&mut self.reader, cx, buf))?;
 
         if n == 0 {
             self.eof = true;
@@ -194,26 +219,41 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for OffsetResumableReader<R> {
     }
 }
 
-impl<S: DataSource + ?Sized> ResumableStream for S {
+/// Adapter exposing any random-access [`DataSource`] as a [`ResumableStream`]
+/// with [`OffsetCheckpoint`]s.
+#[derive(Debug, Clone)]
+pub struct DataStream<S: DataSource>(S);
+
+impl<S: DataSource> DataStream<S> {
+    /// Wraps `source` as a checkpointable sequential stream.
+    pub const fn new(source: S) -> Self {
+        Self(source)
+    }
+
+    /// Consumes this adapter and returns the underlying [`DataSource`].
+    pub fn into_inner(self) -> S {
+        self.0
+    }
+}
+
+impl<S: DataSource> ResumableStream for DataStream<S> {
     type Checkpoint = OffsetCheckpoint;
 
     fn output_size(&self) -> u64 {
-        self.size()
+        self.0.size()
     }
 
     fn source_size(&self) -> u64 {
-        self.size()
+        self.0.size()
     }
 
     fn resume_dict_len(&self, checkpoint: &OffsetCheckpoint) -> Option<usize> {
-        (checkpoint.offset <= self.size()).then_some(0)
+        (checkpoint.offset > 0 && checkpoint.offset < self.0.size()).then_some(0)
     }
 
-    async fn open<'a>(
-        &'a self,
-    ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint> + use<'a, S>> {
-        let size = self.size();
-        let reader = self.fetch_range(..).await?;
+    async fn open(&self) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint>> {
+        let size = self.0.size();
+        let reader = self.0.fetch_range(..).await?;
         Ok(OffsetResumableReader::new(reader, size, 0))
     }
 
@@ -222,14 +262,14 @@ impl<S: DataSource + ?Sized> ResumableStream for S {
         checkpoint: &OffsetCheckpoint,
         _dict: &[u8],
     ) -> io::Result<impl ResumableAsyncRead<Checkpoint = OffsetCheckpoint> + use<'a, S>> {
-        let size = self.size();
-        if checkpoint.offset > size {
+        if self.resume_dict_len(checkpoint).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "offset checkpoint exceeds source size",
+                "invalid or out-of-bounds offset checkpoint",
             ));
         }
-        let reader = self.fetch_range(checkpoint.offset..).await?;
+        let size = self.0.size();
+        let reader = self.0.fetch_range(checkpoint.offset..).await?;
         Ok(OffsetResumableReader::new(reader, size, checkpoint.offset))
     }
 }
@@ -237,7 +277,6 @@ impl<S: DataSource + ?Sized> ResumableStream for S {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binrw::{BinRead, BinWrite};
     use futures::executor::block_on;
     use futures::io::{AsyncReadExt, Cursor};
 
@@ -245,27 +284,37 @@ mod tests {
     fn test_offset_checkpoint_wire_round_trip() {
         let cp = OffsetCheckpoint::new(2048);
         let mut bytes = Vec::new();
-        cp.write(&mut std::io::Cursor::new(&mut bytes)).unwrap();
-        assert_eq!(bytes.len(), 9);
-        assert_eq!(bytes[0], 0);
-        let decoded = OffsetCheckpoint::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+        cp.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), 8);
+        let decoded = OffsetCheckpoint::read_from(&mut io::Cursor::new(&bytes)).unwrap();
         assert_eq!(decoded, cp);
         assert_eq!(decoded.source_offset(), 2048);
         assert_eq!(decoded.output_offset(), 2048);
 
-        // Wrong magic tag must be rejected
-        bytes[0] = 1;
-        assert!(OffsetCheckpoint::read(&mut std::io::Cursor::new(&bytes)).is_err());
+        // Zero offset and truncated input must be rejected
+        assert_eq!(
+            OffsetCheckpoint::read_from(&mut io::Cursor::new(&[0u8; 8]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            OffsetCheckpoint::read_from(&mut io::Cursor::new(&[1u8; 7]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
-    fn test_offset_resumable_stream_resume_and_errors() {
+    fn test_data_stream_resume_and_errors() {
         let payload: Vec<u8> = (0..4096).map(|i| ((i * 31) ^ (i >> 7)) as u8).collect();
-        assert_eq!(payload.output_size(), 4096);
-        assert_eq!(payload.source_size(), 4096);
+        let stream = DataStream::new(payload.as_slice());
+        assert_eq!(stream.output_size(), 4096);
+        assert_eq!(stream.source_size(), 4096);
 
         block_on(async {
-            let mut r = payload.open().await.unwrap();
+            let mut r = stream.open().await.unwrap();
             assert_eq!(r.checkpoint(), None);
             let mut head = vec![0u8; 1000];
             let n = r.read(&mut head).await.unwrap();
@@ -273,32 +322,32 @@ mod tests {
             assert_eq!(n, 1000);
             assert_eq!(cp.source_offset(), 1000);
             assert_eq!(cp.output_offset(), 1000);
-            assert_eq!(payload.resume_dict_len(&cp), Some(0));
-            assert_eq!(payload.resume_dict_len(&OffsetCheckpoint::new(4097)), None);
+            assert_eq!(stream.resume_dict_len(&cp), Some(0));
+            assert_eq!(stream.resume_dict_len(&OffsetCheckpoint::new(0)), None);
+            assert_eq!(stream.resume_dict_len(&OffsetCheckpoint::new(4096)), None);
+            assert_eq!(stream.resume_dict_len(&OffsetCheckpoint::new(4097)), None);
 
+            // Returned reader does not borrow the checkpoint or dictionary past `.await`.
+            let mut resumed_reader = {
+                let dict = Vec::new();
+                stream.resume(&cp, &dict).await.unwrap()
+            };
             let mut resumed = head;
-            payload
-                .resume(&cp, &[])
-                .await
-                .unwrap()
-                .read_to_end(&mut resumed)
-                .await
-                .unwrap();
+            resumed_reader.read_to_end(&mut resumed).await.unwrap();
             assert_eq!(resumed, payload);
 
-            // Resuming right at EOF succeeds with 0 bytes, and the returned reader does not
-            // borrow the checkpoint or dictionary past `.await`.
-            let mut tail_reader = {
-                let eof_cp = OffsetCheckpoint::new(4096);
-                let dict = Vec::new();
-                payload.resume(&eof_cp, &dict).await.unwrap()
-            };
-            let mut tail = Vec::new();
-            tail_reader.read_to_end(&mut tail).await.unwrap();
-            assert!(tail.is_empty());
+            // Resuming at 0 or EOF is rejected with InvalidInput
+            for bad in [0, 4096, 4097] {
+                let err = stream
+                    .resume(&OffsetCheckpoint::new(bad), &[])
+                    .await
+                    .err()
+                    .unwrap();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            }
 
             // Reading the final byte suppresses checkpoint() before EOF is polled
-            let mut full_reader = payload.open().await.unwrap();
+            let mut full_reader = stream.open().await.unwrap();
             let mut all = vec![0u8; 4096];
             full_reader.read_exact(&mut all).await.unwrap();
             assert_eq!(full_reader.checkpoint(), None);
