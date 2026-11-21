@@ -16,7 +16,7 @@ mod part;
 mod progress;
 
 use crate::cli::{ALL_COMPONENTS, DownloadArgs, OdinComponent, component_key};
-use part::{FooterState, PartFile, ResumeState, part_path_for, wait_cancelled};
+use part::{CheckpointState, PartFile, ResumeState, part_path_for, wait_cancelled};
 use progress::{CliObserver, FileLabel};
 use samloader_fus::futures::future::{self, Either, try_join_all};
 use samloader_fus::{
@@ -143,14 +143,14 @@ async fn transfer_file<S>(
 ) -> Result<(), Box<dyn Error>>
 where
     S: ResumableStream,
-    S::Checkpoint: Into<FooterState> + TryFrom<FooterState>,
+    S::Checkpoint: Into<CheckpointState> + TryFrom<CheckpointState>,
 {
     if *cancel_rx.borrow() {
         return Err("Download interrupted".into());
     }
 
     let target_size = source.output_size();
-    let (part, resume) = PartFile::open(final_path, checksum, source, force).await?;
+    let (part, resume) = PartFile::open(final_path, checksum, source, force)?;
 
     let (resumed_wire, resumed_out) = match &resume {
         ResumeState::Resumed { checkpoint, .. } => {

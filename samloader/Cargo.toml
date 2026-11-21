@@ -21,9 +21,6 @@ tokio = { workspace = true, default-features = false, features = ["rt-multi-thre
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_IO", "Win32_System_Ioctl"] }
-
 [features]
 default = ["nusb", "serialport"]
 rusb = ["samloader-odin/rusb"]

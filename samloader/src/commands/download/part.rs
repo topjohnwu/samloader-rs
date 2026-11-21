@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Resumable `.part` file management, `SAMLOADR` v4 checkpoint footers, and
-//! coalesced blocking disk writing.
+//! Resumable `.part` file management, `SAMLOADR` v5 sidecar checkpoint metadata,
+//! and coalesced blocking disk writing.
 
 use binrw::{BinRead, BinWrite, binrw};
 use samloader_fus::futures::future::{self, Either};
@@ -22,14 +22,13 @@ use samloader_fus::{
     Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream, ZipCheckpoint,
 };
 use std::fs::{File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-const FOOTER_VERSION: u32 = 4;
-const FOOTER_SIZE: usize = 64;
+const META_VERSION: u32 = 5;
 const CHECKPOINT_INTERVAL: u64 = 32 * 1024 * 1024;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
 const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
@@ -37,44 +36,42 @@ const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FooterState {
-    #[brw(magic = 0u8)]
-    Fresh,
+pub(crate) enum CheckpointState {
     #[brw(magic = 1u8)]
     Offset(OffsetCheckpoint),
     #[brw(magic = 2u8)]
     Zip(ZipCheckpoint),
 }
 
-impl From<OffsetCheckpoint> for FooterState {
+impl From<OffsetCheckpoint> for CheckpointState {
     fn from(cp: OffsetCheckpoint) -> Self {
         Self::Offset(cp)
     }
 }
 
-impl TryFrom<FooterState> for OffsetCheckpoint {
+impl TryFrom<CheckpointState> for OffsetCheckpoint {
     type Error = ();
 
-    fn try_from(state: FooterState) -> Result<Self, ()> {
+    fn try_from(state: CheckpointState) -> Result<Self, ()> {
         match state {
-            FooterState::Offset(cp) => Ok(cp),
+            CheckpointState::Offset(cp) => Ok(cp),
             _ => Err(()),
         }
     }
 }
 
-impl From<ZipCheckpoint> for FooterState {
+impl From<ZipCheckpoint> for CheckpointState {
     fn from(cp: ZipCheckpoint) -> Self {
         Self::Zip(cp)
     }
 }
 
-impl TryFrom<FooterState> for ZipCheckpoint {
+impl TryFrom<CheckpointState> for ZipCheckpoint {
     type Error = ();
 
-    fn try_from(state: FooterState) -> Result<Self, ()> {
+    fn try_from(state: CheckpointState) -> Result<Self, ()> {
         match state {
-            FooterState::Zip(cp) => Ok(cp),
+            CheckpointState::Zip(cp) => Ok(cp),
             _ => Err(()),
         }
     }
@@ -82,156 +79,54 @@ impl TryFrom<FooterState> for ZipCheckpoint {
 
 #[binrw]
 #[brw(little, magic = b"SAMLOADR")]
-#[br(import(expected_checksum: [u8; 16]))]
+#[br(import(expected_checksum: [u8; 16], expected_size: u64))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Footer {
-    #[br(temp, assert(version == FOOTER_VERSION))]
-    #[bw(calc = FOOTER_VERSION)]
+struct CheckpointMeta {
+    #[br(temp, assert(version == META_VERSION))]
+    #[bw(calc = META_VERSION)]
     version: u32,
 
     #[br(assert(checksum == expected_checksum))]
     checksum: [u8; 16],
 
-    state: FooterState,
+    #[br(assert(target_size == expected_size))]
+    target_size: u64,
+
+    state: CheckpointState,
 }
 
-impl Footer {
-    fn new(checksum: [u8; 16]) -> Self {
-        Self::with_state(checksum, FooterState::Fresh)
-    }
-
-    fn with_state(checksum: [u8; 16], state: FooterState) -> Self {
-        Self { checksum, state }
-    }
-
-    fn to_bytes(self) -> [u8; FOOTER_SIZE] {
-        let mut buf = [0u8; FOOTER_SIZE];
-        let mut cursor = Cursor::new(&mut buf[..]);
+impl CheckpointMeta {
+    fn to_bytes(self) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::with_capacity(64));
         self.write(&mut cursor)
-            .expect("footer serialization fits within FOOTER_SIZE");
-        buf
+            .expect("in-memory checkpoint serialization cannot fail");
+        cursor.into_inner()
     }
 
-    fn from_bytes(bytes: &[u8; FOOTER_SIZE], expected_checksum: [u8; 16]) -> Option<Self> {
-        let mut cursor = Cursor::new(&bytes[..]);
-        let footer = Self::read_args(&mut cursor, (expected_checksum,)).ok()?;
-        let end = cursor.position() as usize;
-        if bytes[end..].iter().any(|&b| b != 0) {
-            return None;
-        }
-        Some(footer)
-    }
-
-    fn read_from_part<R: Read + Seek>(
-        reader: &mut R,
-        expected_checksum: [u8; 16],
-        target_size: u64,
-    ) -> Option<Self> {
-        let expected_len = target_size.checked_add(FOOTER_SIZE as u64)?;
-        if reader.seek(SeekFrom::End(0)).ok()? != expected_len {
-            return None;
-        }
-        reader.seek(SeekFrom::Start(target_size)).ok()?;
-        let mut buf = [0u8; FOOTER_SIZE];
-        reader.read_exact(&mut buf).ok()?;
-        Self::from_bytes(&buf, expected_checksum)
+    fn from_bytes(bytes: &[u8], expected_checksum: [u8; 16], expected_size: u64) -> Option<Self> {
+        let mut cursor = Cursor::new(bytes);
+        let meta = Self::read_args(&mut cursor, (expected_checksum, expected_size)).ok()?;
+        (cursor.position() as usize == bytes.len()).then_some(meta)
     }
 }
 
-fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::FileExt::write_at(file, buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::FileExt::seek_write(file, buf, offset)
-    }
-}
-
-fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
-    while !buf.is_empty() {
-        match write_at(file, buf, offset) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            Ok(n) => {
-                buf = &buf[n..];
-                offset += n as u64;
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::FileExt::read_at(file, buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
-    }
-}
-
-fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
-    while !buf.is_empty() {
-        match read_at(file, buf, offset) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to read whole buffer",
-                ));
-            }
-            Ok(n) => {
-                let (_, rest) = buf.split_at_mut(n);
-                buf = rest;
-                offset += n as u64;
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn set_sparse(file: &File, sparse: bool) {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::IO::DeviceIoControl;
-    use windows_sys::Win32::System::Ioctl::{FILE_SET_SPARSE_BUFFER, FSCTL_SET_SPARSE};
-
-    let buf = FILE_SET_SPARSE_BUFFER { SetSparse: sparse };
-    let mut returned = 0_u32;
-    // Best-effort: avoids NTFS synchronously zero-filling up to `target_size` on
-    // initial footer creation; ignored on filesystems without sparse support.
-    //
-    // SAFETY: `file` owns a valid open `HANDLE` for the duration of the call,
-    // and `buf` / `returned` outlive the synchronous `DeviceIoControl` call.
-    unsafe {
-        DeviceIoControl(
-            file.as_raw_handle(),
-            FSCTL_SET_SPARSE,
-            (&raw const buf).cast(),
-            size_of::<FILE_SET_SPARSE_BUFFER>() as u32,
-            std::ptr::null_mut(),
-            0,
-            &raw mut returned,
-            std::ptr::null_mut(),
-        );
-    }
+fn append_ext(path: &Path, ext: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(ext);
+    PathBuf::from(s)
 }
 
 pub(crate) fn part_path_for(final_path: &Path) -> PathBuf {
-    let mut s = final_path.as_os_str().to_owned();
-    s.push(".part");
-    PathBuf::from(s)
+    append_ext(final_path, ".part")
+}
+
+fn meta_path_for(part_path: &Path) -> PathBuf {
+    append_ext(part_path, ".meta")
+}
+
+fn remove_meta_files(meta_path: &Path) {
+    let _ = std::fs::remove_file(meta_path);
+    let _ = std::fs::remove_file(append_ext(meta_path, ".tmp"));
 }
 
 fn io_with_path(path: &Path, action: &str, err: io::Error) -> io::Error {
@@ -241,82 +136,55 @@ fn io_with_path(path: &Path, action: &str, err: io::Error) -> io::Error {
     )
 }
 
-fn open_and_read_footer(
-    final_path: &Path,
-    part_path: &Path,
-    expected_checksum: [u8; 16],
-    target_size: u64,
-    force: bool,
-) -> io::Result<(File, u64, Option<Footer>)> {
-    if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| io_with_path(parent, "create directory", e))?;
-    }
-
-    if force {
-        // Keep any existing `final_path` intact until the replacement download finishes
-        // cleanly and replaces it atomically in `finalize_part_file`.
-        let _ = std::fs::remove_file(part_path);
-    }
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(force)
-        .open(part_path)
-        .map_err(|e| io_with_path(part_path, "open", e))?;
-
-    let existing_len = file
-        .seek(SeekFrom::End(0))
-        .map_err(|e| io_with_path(part_path, "seek", e))?;
-    let footer = if !force && existing_len > 0 {
-        Footer::read_from_part(&mut file, expected_checksum, target_size)
-    } else {
-        None
-    };
-
-    Ok((file, existing_len, footer))
-}
-
 fn persist_checkpoint(
     file: &File,
-    part_path: &Path,
+    meta_path: &Path,
     checksum: [u8; 16],
     target_size: u64,
-    state: FooterState,
-    sync_footer: bool,
+    state: CheckpointState,
 ) -> io::Result<()> {
-    // Flush data blocks before advancing the persisted footer so power loss cannot
-    // leave a newer checkpoint pointing past unwritten data.
+    // Flush data blocks before advancing the persisted sidecar so power loss
+    // cannot leave a newer checkpoint pointing past unwritten data.
     let result = (|| {
         file.sync_data()?;
-        let footer = Footer::with_state(checksum, state);
-        write_all_at(file, &footer.to_bytes(), target_size)?;
-        if sync_footer {
-            file.sync_data()?;
+        let bytes = CheckpointMeta {
+            checksum,
+            target_size,
+            state,
+        }
+        .to_bytes();
+        let tmp_path = append_ext(meta_path, ".tmp");
+        let replace_res = (|| {
+            let mut tmp = File::create(&tmp_path)?;
+            tmp.write_all(&bytes)?;
+            tmp.sync_data()?;
+            drop(tmp);
+            std::fs::rename(&tmp_path, meta_path)
+        })();
+        if let Err(e) = replace_res {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
         }
         Ok(())
     })();
-    result.map_err(|e| io_with_path(part_path, "persist checkpoint for", e))
+    result.map_err(|e| io_with_path(meta_path, "persist checkpoint for", e))
 }
 
 fn finalize_part_file(
     file: File,
     part_path: &Path,
+    meta_path: &Path,
     final_path: &Path,
-    final_size: u64,
 ) -> io::Result<()> {
-    file.set_len(final_size)
-        .map_err(|e| io_with_path(part_path, "truncate", e))?;
-    #[cfg(windows)]
-    set_sparse(&file, false);
     file.sync_data()
         .map_err(|e| io_with_path(part_path, "sync", e))?;
     drop(file);
 
     // `std::fs::rename` replaces existing files atomically on both Unix and Windows
     // (`SetFileInformationByHandle` / `MoveFileExW` with replace-if-exists).
-    std::fs::rename(part_path, final_path).map_err(|e| io_with_path(final_path, "finalize", e))
+    std::fs::rename(part_path, final_path).map_err(|e| io_with_path(final_path, "finalize", e))?;
+    remove_meta_files(meta_path);
+    Ok(())
 }
 
 /// Resolves once `cancel_rx` becomes `true`, staying pending forever if the sender is dropped.
@@ -337,65 +205,22 @@ pub(crate) enum ResumeState<C: Checkpoint> {
     Resumed { checkpoint: C, dict: Vec<u8> },
 }
 
-/// An open `.part` file prepared to receive a [`ResumableAsyncRead`] and atomically
-/// rename to its final destination upon verified completion.
+/// An open sequential `.part` file paired with a `.part.meta` checkpoint sidecar,
+/// prepared to receive a [`ResumableAsyncRead`] and atomically rename on completion.
 pub(crate) struct PartFile {
     file: File,
     part_path: PathBuf,
+    meta_path: PathBuf,
     final_path: PathBuf,
     checksum: [u8; 16],
     start_pos: u64,
     target_size: u64,
 }
 
-enum SetupAction {
-    KeepFresh,
-    ReadDict { start_pos: u64, dict_len: usize },
-    InitFresh { restarted: bool },
-}
-
-fn finish_part_setup(
-    file: File,
-    part_path: &Path,
-    action: SetupAction,
-    checksum: [u8; 16],
-    target_size: u64,
-) -> io::Result<(File, Vec<u8>)> {
-    if matches!(action, SetupAction::InitFresh { restarted: true }) {
-        file.set_len(0)
-            .map_err(|e| io_with_path(part_path, "truncate", e))?;
-    }
-    #[cfg(windows)]
-    set_sparse(&file, true);
-
-    let dict = match action {
-        SetupAction::KeepFresh => Vec::new(),
-        SetupAction::ReadDict {
-            start_pos,
-            dict_len,
-        } => {
-            let mut dict = vec![0u8; dict_len];
-            if dict_len > 0 {
-                read_exact_at(&file, &mut dict, start_pos - dict_len as u64)
-                    .map_err(|e| io_with_path(part_path, "read resume dictionary from", e))?;
-            }
-            dict
-        }
-        SetupAction::InitFresh { .. } => {
-            write_all_at(&file, &Footer::new(checksum).to_bytes(), target_size)
-                .map_err(|e| io_with_path(part_path, "initialize", e))?;
-            file.sync_data()
-                .map_err(|e| io_with_path(part_path, "sync", e))?;
-            Vec::new()
-        }
-    };
-    Ok((file, dict))
-}
-
 impl PartFile {
-    /// Opens or creates `<final_path>.part`, validates any persisted `SAMLOADR` v4
-    /// checkpoint against `source`, and loads any required decompression dictionary.
-    pub(crate) async fn open<S>(
+    /// Opens or creates `<final_path>.part`, validates any persisted `SAMLOADR` v5
+    /// sidecar checkpoint against `source`, and loads any required decompression dictionary.
+    pub(crate) fn open<S>(
         final_path: PathBuf,
         checksum: [u8; 16],
         source: &S,
@@ -403,82 +228,99 @@ impl PartFile {
     ) -> io::Result<(Self, ResumeState<S::Checkpoint>)>
     where
         S: ResumableStream,
-        S::Checkpoint: TryFrom<FooterState>,
+        S::Checkpoint: TryFrom<CheckpointState>,
     {
         let target_size = source.output_size();
         let part_path = part_path_for(&final_path);
+        let meta_path = meta_path_for(&part_path);
 
-        let open_final = final_path.clone();
-        let open_part = part_path.clone();
-        let (file, existing_len, existing_footer) = tokio::task::spawn_blocking(move || {
-            open_and_read_footer(&open_final, &open_part, checksum, target_size, force)
-        })
-        .await
-        .expect("part open task panicked")?;
-
-        let restarted = !force && existing_len > 0;
-        let (action, resume_cp) = match existing_footer.map(|f| f.state) {
-            Some(FooterState::Fresh) => (SetupAction::KeepFresh, None),
-            Some(state) => match S::Checkpoint::try_from(state) {
-                Ok(cp) => match source.resume_dict_len(&cp) {
-                    Some(dict_len)
-                        if cp.source_offset() > 0
-                            && cp.output_offset() < target_size
-                            && (dict_len as u64) <= cp.output_offset() =>
-                    {
-                        let start_pos = cp.output_offset();
-                        (
-                            SetupAction::ReadDict {
-                                start_pos,
-                                dict_len,
-                            },
-                            Some(cp),
-                        )
-                    }
-                    _ => (SetupAction::InitFresh { restarted }, None),
-                },
-                Err(_) => (SetupAction::InitFresh { restarted }, None),
-            },
-            None => (SetupAction::InitFresh { restarted }, None),
-        };
-
-        let is_restarted = matches!(action, SetupAction::InitFresh { restarted: true });
-        let needs_blocking = cfg!(windows)
-            || match &action {
-                SetupAction::KeepFresh => false,
-                SetupAction::ReadDict { dict_len, .. } => *dict_len > 0,
-                SetupAction::InitFresh { .. } => true,
-            };
-
-        let (file, dict) = if needs_blocking {
-            let setup_part = part_path.clone();
-            tokio::task::spawn_blocking(move || {
-                finish_part_setup(file, &setup_part, action, checksum, target_size)
-            })
-            .await
-            .expect("part setup task panicked")?
-        } else {
-            finish_part_setup(file, &part_path, action, checksum, target_size)?
-        };
-
-        let (resume, start_pos) = match resume_cp {
-            Some(checkpoint) => {
-                let start_pos = checkpoint.output_offset();
-                (ResumeState::Resumed { checkpoint, dict }, start_pos)
+        tokio::task::block_in_place(|| {
+            if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| io_with_path(parent, "create directory", e))?;
             }
-            None if is_restarted => (ResumeState::Restarted, 0),
-            None => (ResumeState::Fresh, 0),
-        };
 
-        let part = Self {
-            file,
-            part_path,
-            final_path,
-            checksum,
-            start_pos,
-            target_size,
-        };
-        Ok((part, resume))
+            if force {
+                // Keep any existing `final_path` intact until the replacement download finishes
+                // cleanly and replaces it atomically in `finalize_part_file`.
+                let _ = std::fs::remove_file(&part_path);
+                remove_meta_files(&meta_path);
+            }
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(force)
+                .open(&part_path)
+                .map_err(|e| io_with_path(&part_path, "open", e))?;
+
+            let existing_len = file
+                .metadata()
+                .map_err(|e| io_with_path(&part_path, "stat", e))?
+                .len();
+
+            let mut resume = ResumeState::Fresh;
+            let mut start_pos = 0;
+
+            if !force {
+                let meta_bytes = std::fs::read(&meta_path).ok();
+                let valid_resume = meta_bytes
+                    .as_deref()
+                    .and_then(|b| CheckpointMeta::from_bytes(b, checksum, target_size))
+                    .and_then(|m| S::Checkpoint::try_from(m.state).ok())
+                    .and_then(|cp| {
+                        let dict_len = source.resume_dict_len(&cp)?;
+                        let out = cp.output_offset();
+                        (cp.source_offset() > 0
+                            && out < target_size
+                            && out <= existing_len
+                            && (dict_len as u64) <= out)
+                            .then_some((cp, dict_len))
+                    });
+
+                if let Some((cp, dict_len)) = valid_resume {
+                    start_pos = cp.output_offset();
+                    if existing_len > start_pos {
+                        file.set_len(start_pos)
+                            .map_err(|e| io_with_path(&part_path, "truncate", e))?;
+                    }
+                    let mut dict = vec![0u8; dict_len];
+                    file.seek(SeekFrom::Start(start_pos - dict_len as u64))
+                        .map_err(|e| io_with_path(&part_path, "seek", e))?;
+                    if dict_len > 0 {
+                        file.read_exact(&mut dict).map_err(|e| {
+                            io_with_path(&part_path, "read resume dictionary from", e)
+                        })?;
+                    }
+                    resume = ResumeState::Resumed {
+                        checkpoint: cp,
+                        dict,
+                    };
+                } else {
+                    let had_prior_state = existing_len > 0 || meta_bytes.is_some();
+                    remove_meta_files(&meta_path);
+                    if existing_len > 0 {
+                        file.set_len(0)
+                            .map_err(|e| io_with_path(&part_path, "truncate", e))?;
+                    }
+                    if had_prior_state {
+                        resume = ResumeState::Restarted;
+                    }
+                }
+            }
+
+            let part = Self {
+                file,
+                part_path,
+                meta_path,
+                final_path,
+                checksum,
+                start_pos,
+                target_size,
+            };
+            Ok((part, resume))
+        })
     }
 
     /// Streams all remaining chunks from `reader` directly to disk inside
@@ -491,7 +333,7 @@ impl PartFile {
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
-        R::Checkpoint: Into<FooterState>,
+        R::Checkpoint: Into<CheckpointState>,
     {
         self.write_from_with_interval(reader, CHECKPOINT_INTERVAL, cancel_rx, on_written)
     }
@@ -505,7 +347,7 @@ impl PartFile {
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
-        R::Checkpoint: Into<FooterState>,
+        R::Checkpoint: Into<CheckpointState>,
     {
         let handle = tokio::runtime::Handle::current();
 
@@ -521,20 +363,24 @@ impl PartFile {
             let mut latest_cp: Option<R::Checkpoint> = None;
             let min_delta = checkpoint_interval.max(1);
             let mut last_flush = Instant::now();
+            let mut file = self.file;
 
-            let flush_buf =
-                |buf: &[u8], filled: &mut usize, write_pos: &mut u64| -> io::Result<()> {
-                    if *filled == 0 {
-                        return Ok(());
-                    }
-                    let n = *filled;
-                    *filled = 0;
-                    write_all_at(&self.file, &buf[..n], *write_pos)
-                        .map_err(|e| io_with_path(&self.part_path, "write", e))?;
-                    *write_pos += n as u64;
-                    on_written(n as u64);
-                    Ok(())
-                };
+            let flush_buf = |file: &mut File,
+                             buf: &[u8],
+                             filled: &mut usize,
+                             write_pos: &mut u64|
+             -> io::Result<()> {
+                if *filled == 0 {
+                    return Ok(());
+                }
+                let n = *filled;
+                *filled = 0;
+                file.write_all(&buf[..n])
+                    .map_err(|e| io_with_path(&self.part_path, "write", e))?;
+                *write_pos += n as u64;
+                on_written(n as u64);
+                Ok(())
+            };
 
             let read_err: io::Error = loop {
                 let read_step = handle.block_on(async {
@@ -552,7 +398,7 @@ impl PartFile {
                 match read_step {
                     Ok(0) => {
                         drop(reader);
-                        flush_buf(&buf, &mut filled, &mut write_pos)?;
+                        flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
                         if write_pos != self.target_size {
                             return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
@@ -563,10 +409,10 @@ impl PartFile {
                             ));
                         }
                         return finalize_part_file(
-                            self.file,
+                            file,
                             &self.part_path,
+                            &self.meta_path,
                             &self.final_path,
-                            write_pos,
                         );
                     }
                     Ok(n) => {
@@ -597,20 +443,19 @@ impl PartFile {
 
                         if let Some(cp) = cp_due {
                             let cp_offset = cp.output_offset();
-                            flush_buf(&buf, &mut filled, &mut write_pos)?;
+                            flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
                             persist_checkpoint(
-                                &self.file,
-                                &self.part_path,
+                                &file,
+                                &self.meta_path,
                                 self.checksum,
                                 self.target_size,
                                 cp.into(),
-                                false,
                             )?;
                             last_persisted_offset = cp_offset;
                             latest_cp = None;
                             last_flush = Instant::now();
                         } else if filled == buf.len() || last_flush.elapsed() >= COALESCE_MAX_WAIT {
-                            flush_buf(&buf, &mut filled, &mut write_pos)?;
+                            flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
                             last_flush = Instant::now();
                         }
                     }
@@ -621,15 +466,14 @@ impl PartFile {
             drop(reader);
             if read_err.kind() != io::ErrorKind::InvalidData
                 && let Some(cp) = latest_cp.filter(|cp| cp.output_offset() > last_persisted_offset)
-                && flush_buf(&buf, &mut filled, &mut write_pos).is_ok()
+                && flush_buf(&mut file, &buf, &mut filled, &mut write_pos).is_ok()
             {
                 let _ = persist_checkpoint(
-                    &self.file,
-                    &self.part_path,
+                    &file,
+                    &self.meta_path,
                     self.checksum,
                     self.target_size,
                     cp.into(),
-                    true,
                 );
             }
             Err(read_err)
@@ -649,12 +493,6 @@ mod tests {
     use std::task::{Context, Poll};
 
     const TEST_CHECKSUM: [u8; 16] = [0x42; 16];
-
-    fn read_part(target_size: u64, footer_bytes: &[u8], checksum: [u8; 16]) -> Option<Footer> {
-        let mut part = vec![0u8; target_size as usize];
-        part.extend_from_slice(footer_bytes);
-        Footer::read_from_part(&mut Cursor::new(part), checksum, target_size)
-    }
 
     struct TempDir(PathBuf);
 
@@ -679,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_footer_v4_round_trip_and_rejection() {
+    fn test_checkpoint_meta_round_trip_and_rejection() {
         let checksum = TEST_CHECKSUM;
         let other_checksum = [0x99; 16];
         let target_size = 4096_u64;
@@ -701,65 +539,70 @@ mod tests {
         deflate_bytes[22] = 0x1A;
         let deflate_cp = ZipCheckpoint::read(&mut Cursor::new(&deflate_bytes)).unwrap();
 
-        let mut last_bytes = [0u8; FOOTER_SIZE];
+        let mut last_bytes = Vec::new();
         for state in [
-            FooterState::Fresh,
-            FooterState::Offset(offset_cp),
-            FooterState::Zip(stored_cp),
-            FooterState::Zip(deflate_cp),
+            CheckpointState::Offset(offset_cp),
+            CheckpointState::Zip(stored_cp),
+            CheckpointState::Zip(deflate_cp),
         ] {
-            let mut footer = Footer::new(checksum);
-            footer.state = state;
-            last_bytes = footer.to_bytes();
-            assert_eq!(last_bytes.len(), FOOTER_SIZE);
+            let meta = CheckpointMeta {
+                checksum,
+                target_size,
+                state,
+            };
+            last_bytes = meta.to_bytes();
 
-            let parsed = read_part(target_size, &last_bytes, checksum).unwrap();
+            let parsed = CheckpointMeta::from_bytes(&last_bytes, checksum, target_size).unwrap();
             assert_eq!(parsed.state, state);
         }
 
         // Cross-type checkpoint extraction must reject mismatches
         assert_eq!(
-            OffsetCheckpoint::try_from(FooterState::Offset(offset_cp)),
+            OffsetCheckpoint::try_from(CheckpointState::Offset(offset_cp)),
             Ok(offset_cp)
         );
         assert_eq!(
-            ZipCheckpoint::try_from(FooterState::Offset(offset_cp)),
+            ZipCheckpoint::try_from(CheckpointState::Offset(offset_cp)),
             Err(())
         );
         assert_eq!(
-            ZipCheckpoint::try_from(FooterState::Zip(deflate_cp)),
+            ZipCheckpoint::try_from(CheckpointState::Zip(deflate_cp)),
             Ok(deflate_cp)
         );
         assert_eq!(
-            OffsetCheckpoint::try_from(FooterState::Zip(deflate_cp)),
+            OffsetCheckpoint::try_from(CheckpointState::Zip(deflate_cp)),
             Err(())
         );
 
-        // Truncated / overlong part files must be rejected
-        assert!(read_part(target_size, &last_bytes[..FOOTER_SIZE - 1], checksum).is_none());
-        let mut overlong = last_bytes.to_vec();
+        // Truncated / trailing-garbage sidecar files must be rejected
+        assert!(
+            CheckpointMeta::from_bytes(&last_bytes[..last_bytes.len() - 1], checksum, target_size)
+                .is_none()
+        );
+        let mut overlong = last_bytes.clone();
         overlong.push(0);
-        assert!(read_part(target_size, &overlong, checksum).is_none());
+        assert!(CheckpointMeta::from_bytes(&overlong, checksum, target_size).is_none());
 
-        // Corrupt magic (0), version (8), checksum (12), state tag (28), checkpoint kind (29), trailing padding (63)
+        // Corrupt magic (0), version (8), checksum (12), target_size (28), state tag (36), checkpoint kind (37)
         for &(off, val) in &[
             (0, 0xFF),
-            (8, 0x03),
+            (8, 0x04),
             (12, 0xFF),
-            (28, 0x09),
-            (29, 0x09),
-            (FOOTER_SIZE - 1, 0x01),
+            (28, 0xFF),
+            (36, 0x09),
+            (37, 0x09),
         ] {
-            let mut tampered = last_bytes;
+            let mut tampered = last_bytes.clone();
             tampered[off] = val;
             assert!(
-                read_part(target_size, &tampered, checksum).is_none(),
+                CheckpointMeta::from_bytes(&tampered, checksum, target_size).is_none(),
                 "offset={off}"
             );
         }
 
-        // Checksum mismatch
-        assert!(read_part(target_size, &last_bytes, other_checksum).is_none());
+        // Checksum and target_size mismatches
+        assert!(CheckpointMeta::from_bytes(&last_bytes, other_checksum, target_size).is_none());
+        assert!(CheckpointMeta::from_bytes(&last_bytes, checksum, target_size + 1).is_none());
     }
 
     #[test]
@@ -845,9 +688,8 @@ mod tests {
                 data: payload.clone(),
                 fail_after: Some(64 * 1024),
             });
-            let (part, resume) = PartFile::open(final_path.clone(), checksum, &flaky, false)
-                .await
-                .unwrap();
+            let (part, resume) =
+                PartFile::open(final_path.clone(), checksum, &flaky, false).unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
             let reader = flaky.open().await.unwrap();
             let err = part
@@ -855,22 +697,37 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
             assert!(!final_path.exists());
-            assert!(part_path_for(&final_path).exists());
+            let part_path = part_path_for(&final_path);
+            let meta_path = meta_path_for(&part_path);
+            assert!(part_path.exists());
+            assert!(meta_path.exists());
+
+            // Simulate an uncommitted tail written past the last persisted checkpoint;
+            // resume must truncate it cleanly back to the checkpoint offset.
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&part_path)
+                .unwrap()
+                .write_all(b"uncommitted-tail")
+                .unwrap();
 
             // 2. Second attempt resumes from persisted checkpoint and finalizes cleanly
             let healthy = DataStream::new(ChunkedFailSource {
                 data: payload.clone(),
                 fail_after: None,
             });
-            let (part, resume) = PartFile::open(final_path.clone(), checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (part, resume) =
+                PartFile::open(final_path.clone(), checksum, &healthy, false).unwrap();
             let (cp, dict) = match resume {
                 ResumeState::Resumed { checkpoint, dict } => (checkpoint, dict),
                 _ => panic!("expected Resumed state"),
             };
             assert!(cp.output_offset() >= 16 * 1024 && cp.output_offset() <= 64 * 1024);
             assert!(dict.is_empty());
+            assert_eq!(
+                std::fs::metadata(&part_path).unwrap().len(),
+                cp.output_offset()
+            );
 
             let written = Arc::new(AtomicU64::new(0));
             let written_cb = Arc::clone(&written);
@@ -883,21 +740,20 @@ mod tests {
                 cp.output_offset() + written.load(Ordering::Relaxed),
                 payload.len() as u64
             );
-            assert!(!part_path_for(&final_path).exists());
+            assert!(!part_path.exists());
+            assert!(!meta_path.exists());
             assert_eq!(std::fs::read(&final_path).unwrap(), payload);
 
             // 3. Corrupt .part file triggers Restarted; force=true starts Fresh while keeping final_path
             let corrupt_target = dir.0.join("corrupt.bin");
             std::fs::write(&corrupt_target, b"existing good file").unwrap();
             std::fs::write(part_path_for(&corrupt_target), b"corrupt data").unwrap();
-            let (_, resume) = PartFile::open(corrupt_target.clone(), checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (_, resume) =
+                PartFile::open(corrupt_target.clone(), checksum, &healthy, false).unwrap();
             assert!(matches!(resume, ResumeState::Restarted));
 
-            let (_, resume) = PartFile::open(corrupt_target.clone(), checksum, &healthy, true)
-                .await
-                .unwrap();
+            let (_, resume) =
+                PartFile::open(corrupt_target.clone(), checksum, &healthy, true).unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
             assert_eq!(
                 std::fs::read(&corrupt_target).unwrap(),
@@ -908,9 +764,8 @@ mod tests {
             let coalesce_target = dir.0.join("coalesce.bin");
             let write_calls = Arc::new(AtomicU64::new(0));
             let write_calls_cb = Arc::clone(&write_calls);
-            let (part, _) = PartFile::open(coalesce_target.clone(), checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (part, _) =
+                PartFile::open(coalesce_target.clone(), checksum, &healthy, false).unwrap();
             let reader = healthy.open().await.unwrap();
             part.write_from_with_interval(reader, 1024 * 1024, never_cancel(), move |_| {
                 write_calls_cb.fetch_add(1, Ordering::Relaxed);
@@ -920,17 +775,13 @@ mod tests {
             assert_eq!(write_calls.load(Ordering::Relaxed), 1);
 
             let flush_target = dir.0.join("flush_on_err.bin");
-            let (part, _) = PartFile::open(flush_target.clone(), checksum, &flaky, false)
-                .await
-                .unwrap();
+            let (part, _) = PartFile::open(flush_target.clone(), checksum, &flaky, false).unwrap();
             let reader = flaky.open().await.unwrap();
             let err = part
                 .write_from_with_interval(reader, 1024 * 1024, never_cancel(), |_| {})
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
-            let (_, resume) = PartFile::open(flush_target, checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (_, resume) = PartFile::open(flush_target, checksum, &healthy, false).unwrap();
             match resume {
                 ResumeState::Resumed { checkpoint, .. } => {
                     assert_eq!(checkpoint.output_offset(), 64 * 1024);
@@ -984,9 +835,8 @@ mod tests {
 
             let cancel_target = dir.0.join("cancelled.bin");
             let (cancel_tx, cancel_rx) = watch::channel(false);
-            let (part, _) = PartFile::open(cancel_target.clone(), checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (part, _) =
+                PartFile::open(cancel_target.clone(), checksum, &healthy, false).unwrap();
             let err = part
                 .write_from_with_interval(
                     OneShotReader {
@@ -1000,9 +850,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::Interrupted);
-            let (_, resume) = PartFile::open(cancel_target, checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (_, resume) = PartFile::open(cancel_target, checksum, &healthy, false).unwrap();
             match resume {
                 ResumeState::Resumed { checkpoint, .. } => {
                     assert_eq!(checkpoint.output_offset(), 32 * 1024);
@@ -1011,9 +859,8 @@ mod tests {
             }
 
             let invalid_target = dir.0.join("invalid_data.bin");
-            let (part, _) = PartFile::open(invalid_target.clone(), checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (part, _) =
+                PartFile::open(invalid_target.clone(), checksum, &healthy, false).unwrap();
             let err = part
                 .write_from_with_interval(
                     OneShotReader {
@@ -1027,9 +874,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            let (_, resume) = PartFile::open(invalid_target, checksum, &healthy, false)
-                .await
-                .unwrap();
+            let (_, resume) = PartFile::open(invalid_target, checksum, &healthy, false).unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
 
             // 6. Writer error fails fast even if the reader stalls indefinitely on the next read
@@ -1068,9 +913,7 @@ mod tests {
                 }
             }
 
-            let (part, _) = PartFile::open(overflow_target, checksum, &big_source, false)
-                .await
-                .unwrap();
+            let (part, _) = PartFile::open(overflow_target, checksum, &big_source, false).unwrap();
             let err = tokio::time::timeout(
                 Duration::from_secs(2),
                 tokio::task::spawn_blocking(move || {
@@ -1145,20 +988,21 @@ mod tests {
             dict_len: 512,
         };
 
-        // Pre-populate .part with first 4096 bytes and an offset checkpoint at 4096.
+        // Pre-populate .part with first 4096 bytes and sidecar checkpoint at 4096.
         let cp = OffsetCheckpoint::new(4096);
-        let mut footer = Footer::new(checksum);
-        footer.state = FooterState::Offset(cp);
+        let meta = CheckpointMeta {
+            checksum,
+            target_size: payload.len() as u64,
+            state: CheckpointState::Offset(cp),
+        };
 
-        let mut part_bytes = vec![0u8; payload.len()];
-        part_bytes[..4096].copy_from_slice(&payload[..4096]);
-        part_bytes.extend_from_slice(&footer.to_bytes());
-        std::fs::write(part_path_for(&final_path), &part_bytes).unwrap();
+        let part_path = part_path_for(&final_path);
+        let meta_path = meta_path_for(&part_path);
+        std::fs::write(&part_path, &payload[..4096]).unwrap();
+        std::fs::write(&meta_path, meta.to_bytes()).unwrap();
 
         rt.block_on(async {
-            let (_, resume) = PartFile::open(final_path.clone(), checksum, &src, false)
-                .await
-                .unwrap();
+            let (_, resume) = PartFile::open(final_path.clone(), checksum, &src, false).unwrap();
             match resume {
                 ResumeState::Resumed { checkpoint, dict } => {
                     assert_eq!(checkpoint, cp);
@@ -1166,6 +1010,16 @@ mod tests {
                 }
                 _ => panic!("expected Resumed state with dictionary"),
             }
+
+            // Truncated .part (shorter than persisted checkpoint offset) safely restarts.
+            std::fs::write(&part_path, &payload[..1024]).unwrap();
+            let (_, resume) = PartFile::open(final_path.clone(), checksum, &src, false).unwrap();
+            assert!(matches!(resume, ResumeState::Restarted));
+            assert!(!meta_path.exists());
+
+            // Restore valid files so BadDictSource exercises dict_len > output_offset rejection.
+            std::fs::write(&part_path, &payload[..4096]).unwrap();
+            std::fs::write(&meta_path, meta.to_bytes()).unwrap();
 
             // A source reporting an invalid dict_len > output_offset safely restarts
             // instead of panicking on offset subtraction.
@@ -1203,16 +1057,14 @@ mod tests {
                 &BadDictSource(DataStream::new(payload)),
                 false,
             )
-            .await
             .unwrap();
             assert!(matches!(resume, ResumeState::Restarted));
 
             // 0-byte stream opens, writes, and finalizes cleanly without empty-buffer stalls.
             let empty_path = dir.0.join("empty.bin");
             let empty_src = DataStream::new(Vec::<u8>::new());
-            let (part, resume) = PartFile::open(empty_path.clone(), checksum, &empty_src, false)
-                .await
-                .unwrap();
+            let (part, resume) =
+                PartFile::open(empty_path.clone(), checksum, &empty_src, false).unwrap();
             assert!(matches!(resume, ResumeState::Fresh));
             let reader = empty_src.open().await.unwrap();
             part.write_from(reader, watch::channel(false).1, |_| {})

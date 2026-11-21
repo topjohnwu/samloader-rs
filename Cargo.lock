@@ -1397,7 +1397,6 @@ dependencies = [
  "samloader-odin",
  "samloader-pit",
  "tokio",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
