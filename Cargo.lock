@@ -1405,6 +1405,7 @@ name = "samloader-fus"
 version = "3.0.0"
 dependencies = [
  "aes",
+ "binrw",
  "ecb",
  "fast-md5",
  "futures",

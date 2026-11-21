@@ -15,14 +15,14 @@
 //! Resumable `.part` file management, `SAMLOADR` v4 checkpoint footers, and
 //! ring-buffered background disk writing.
 
-use binrw::{BinRead, BinResult, BinWrite, Endian, binrw};
+use binrw::{BinRead, BinWrite, binrw};
 use samloader_fus::futures::future::{self, Either};
 use samloader_fus::futures::io::AsyncReadExt;
 use samloader_fus::{
     Checkpoint, OffsetCheckpoint, ResumableAsyncRead, ResumableStream, ZipCheckpoint,
 };
 use std::fs::{File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::time::{Duration, Instant};
@@ -35,40 +35,6 @@ const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
 const RING_SLOTS: usize = 16;
 const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
 
-fn read_offset_cp<R: Read + Seek>(
-    reader: &mut R,
-    _endian: Endian,
-    _args: (),
-) -> BinResult<OffsetCheckpoint> {
-    OffsetCheckpoint::read_from(reader).map_err(binrw::Error::Io)
-}
-
-fn write_offset_cp<W: Write + Seek>(
-    cp: &OffsetCheckpoint,
-    writer: &mut W,
-    _endian: Endian,
-    _args: (),
-) -> BinResult<()> {
-    cp.write_to(writer).map_err(binrw::Error::Io)
-}
-
-fn read_zip_cp<R: Read + Seek>(
-    reader: &mut R,
-    _endian: Endian,
-    _args: (),
-) -> BinResult<ZipCheckpoint> {
-    ZipCheckpoint::read_from(reader).map_err(binrw::Error::Io)
-}
-
-fn write_zip_cp<W: Write + Seek>(
-    cp: &ZipCheckpoint,
-    writer: &mut W,
-    _endian: Endian,
-    _args: (),
-) -> BinResult<()> {
-    cp.write_to(writer).map_err(binrw::Error::Io)
-}
-
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,17 +42,9 @@ pub(crate) enum FooterState {
     #[brw(magic = 0u8)]
     Fresh,
     #[brw(magic = 1u8)]
-    Offset(
-        #[br(parse_with = read_offset_cp)]
-        #[bw(write_with = write_offset_cp)]
-        OffsetCheckpoint,
-    ),
+    Offset(OffsetCheckpoint),
     #[brw(magic = 2u8)]
-    Zip(
-        #[br(parse_with = read_zip_cp)]
-        #[bw(write_with = write_zip_cp)]
-        ZipCheckpoint,
-    ),
+    Zip(ZipCheckpoint),
 }
 
 impl From<OffsetCheckpoint> for FooterState {
@@ -825,7 +783,7 @@ mod tests {
         stored_bytes[0] = 0; // Stored
         stored_bytes[1..9].copy_from_slice(&1536u64.to_le_bytes());
         stored_bytes[9..13].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
-        let stored_cp = ZipCheckpoint::read_from(&mut Cursor::new(&stored_bytes)).unwrap();
+        let stored_cp = ZipCheckpoint::read(&mut Cursor::new(&stored_bytes)).unwrap();
 
         let mut deflate_bytes = [0u8; 23];
         deflate_bytes[0] = 1; // Deflate
@@ -834,7 +792,7 @@ mod tests {
         deflate_bytes[17..21].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         deflate_bytes[21] = 5;
         deflate_bytes[22] = 0x1A;
-        let deflate_cp = ZipCheckpoint::read_from(&mut Cursor::new(&deflate_bytes)).unwrap();
+        let deflate_cp = ZipCheckpoint::read(&mut Cursor::new(&deflate_bytes)).unwrap();
 
         let mut last_bytes = [0u8; FOOTER_SIZE];
         for state in [

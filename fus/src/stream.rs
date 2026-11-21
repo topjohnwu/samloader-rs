@@ -17,6 +17,7 @@
 
 use crate::compat::{MaybeSend, MaybeSync};
 use crate::data::DataSource;
+use binrw::binrw;
 use futures::io::AsyncRead;
 use std::future::Future;
 use std::io;
@@ -108,8 +109,14 @@ pub trait ResumableStream: MaybeSend + MaybeSync {
 }
 
 /// Offset-only [`Checkpoint`] for [`DataStream`] transfers.
+///
+/// Implements [`binrw::BinRead`] and [`binrw::BinWrite`] as an 8-byte little-endian
+/// non-zero offset.
+#[binrw]
+#[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OffsetCheckpoint {
+    #[br(assert(offset > 0, "offset checkpoint must be non-zero"))]
     offset: u64,
 }
 
@@ -117,25 +124,6 @@ impl OffsetCheckpoint {
     /// Creates an offset-only checkpoint at byte `offset`.
     pub const fn new(offset: u64) -> Self {
         Self { offset }
-    }
-
-    /// Serializes this checkpoint as an 8-byte little-endian offset.
-    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        writer.write_all(&self.offset.to_le_bytes())
-    }
-
-    /// Deserializes a non-zero checkpoint previously written by [`write_to`](Self::write_to).
-    pub fn read_from(reader: &mut impl io::Read) -> io::Result<Self> {
-        let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf)?;
-        let offset = u64::from_le_bytes(buf);
-        if offset == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "offset checkpoint must be non-zero",
-            ));
-        }
-        Ok(Self { offset })
     }
 }
 
@@ -277,6 +265,7 @@ impl<S: DataSource> ResumableStream for DataStream<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use binrw::{BinRead, BinWrite};
     use futures::executor::block_on;
     use futures::io::{AsyncReadExt, Cursor};
 
@@ -284,26 +273,16 @@ mod tests {
     fn test_offset_checkpoint_wire_round_trip() {
         let cp = OffsetCheckpoint::new(2048);
         let mut bytes = Vec::new();
-        cp.write_to(&mut bytes).unwrap();
+        cp.write(&mut io::Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), 8);
-        let decoded = OffsetCheckpoint::read_from(&mut io::Cursor::new(&bytes)).unwrap();
+        let decoded = OffsetCheckpoint::read(&mut io::Cursor::new(&bytes)).unwrap();
         assert_eq!(decoded, cp);
         assert_eq!(decoded.source_offset(), 2048);
         assert_eq!(decoded.output_offset(), 2048);
 
         // Zero offset and truncated input must be rejected
-        assert_eq!(
-            OffsetCheckpoint::read_from(&mut io::Cursor::new(&[0u8; 8]))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            OffsetCheckpoint::read_from(&mut io::Cursor::new(&[1u8; 7]))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert!(OffsetCheckpoint::read(&mut io::Cursor::new(&[0u8; 8])).is_err());
+        assert!(OffsetCheckpoint::read(&mut io::Cursor::new(&[1u8; 7])).is_err());
     }
 
     #[test]

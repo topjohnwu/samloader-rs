@@ -46,6 +46,7 @@ pub use xml::{BinaryInform, VersionInfo};
 pub use zip::{ZipArchive, ZipEntry, ZipEntryStream};
 
 // Re-export public dependencies to avoid type mismatch and SemVer issues in public APIs.
+pub use binrw;
 pub use futures;
 
 #[cfg(doctest)]

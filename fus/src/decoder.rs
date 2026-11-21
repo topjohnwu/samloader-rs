@@ -17,6 +17,7 @@
 use crate::compat::MaybeSend;
 use crate::stream::{Checkpoint, ResumableAsyncRead, poll_read_retry_eintr};
 use crate::zip::Compression;
+use binrw::binrw;
 use core::ffi::c_int;
 use futures::io::AsyncRead;
 use std::io;
@@ -26,20 +27,28 @@ use std::task::{Context, Poll, ready};
 const DEFLATE_IN_BUF_SIZE: usize = 64 * 1024;
 const MAX_DICT_SIZE: usize = 32_768;
 
-const TAG_STORED: u8 = 0;
-const TAG_DEFLATE: u8 = 1;
-
+#[binrw]
+#[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZipCheckpointKind {
+    #[brw(magic = 0u8)]
     Stored {
+        #[br(assert(offset > 0, "stored checkpoint offset must be non-zero"))]
         offset: u64,
         crc32: u32,
     },
+    #[brw(magic = 1u8)]
     Deflate {
+        #[br(assert(comp_offset > 0, "deflate checkpoint offset must be non-zero"))]
         comp_offset: u64,
         uncomp_offset: u64,
         crc32: u32,
+        #[br(assert(prime_bits <= 7, "invalid deflate checkpoint prime_bits"))]
         prime_bits: u8,
+        #[br(assert(
+            prime_value < (1u8 << prime_bits),
+            "invalid deflate checkpoint prime_value"
+        ))]
         prime_value: u8,
     },
 }
@@ -47,11 +56,13 @@ enum ZipCheckpointKind {
 /// Opaque, serializable mid-stream [`Checkpoint`] for [`ZipEntryStream`](crate::ZipEntryStream)
 /// transfers (`Stored` or `Deflate`).
 ///
-/// Serialize with [`write_to`](Self::write_to) and deserialize with
-/// [`read_from`](Self::read_from), then pass to
+/// Implements [`binrw::BinRead`] and [`binrw::BinWrite`] in a compact little-endian
+/// binary format (13 bytes for `Stored`, 23 bytes for `Deflate`), and can be passed to
 /// [`ResumableStream::resume`](crate::ResumableStream::resume) along with the trailing
 /// uncompressed dictionary bytes indicated by
 /// [`ResumableStream::resume_dict_len`](crate::ResumableStream::resume_dict_len).
+#[binrw]
+#[brw(little)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZipCheckpoint(ZipCheckpointKind);
 
@@ -72,83 +83,6 @@ impl Checkpoint for ZipCheckpoint {
 }
 
 impl ZipCheckpoint {
-    /// Serializes this checkpoint in a compact little-endian binary format
-    /// (13 bytes for `Stored`, 23 bytes for `Deflate`).
-    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        match self.0 {
-            ZipCheckpointKind::Stored { offset, crc32 } => {
-                let mut buf = [0u8; 13];
-                buf[0] = TAG_STORED;
-                buf[1..9].copy_from_slice(&offset.to_le_bytes());
-                buf[9..13].copy_from_slice(&crc32.to_le_bytes());
-                writer.write_all(&buf)
-            }
-            ZipCheckpointKind::Deflate {
-                comp_offset,
-                uncomp_offset,
-                crc32,
-                prime_bits,
-                prime_value,
-            } => {
-                let mut buf = [0u8; 23];
-                buf[0] = TAG_DEFLATE;
-                buf[1..9].copy_from_slice(&comp_offset.to_le_bytes());
-                buf[9..17].copy_from_slice(&uncomp_offset.to_le_bytes());
-                buf[17..21].copy_from_slice(&crc32.to_le_bytes());
-                buf[21] = prime_bits;
-                buf[22] = prime_value;
-                writer.write_all(&buf)
-            }
-        }
-    }
-
-    /// Deserializes and validates a checkpoint previously written by [`write_to`](Self::write_to).
-    pub fn read_from(reader: &mut impl io::Read) -> io::Result<Self> {
-        let mut tag = [0u8; 1];
-        reader.read_exact(&mut tag)?;
-        match tag[0] {
-            TAG_STORED => {
-                let mut buf = [0u8; 12];
-                reader.read_exact(&mut buf)?;
-                let offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-                let crc32 = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-                if offset == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "stored checkpoint offset must be non-zero",
-                    ));
-                }
-                Ok(Self(ZipCheckpointKind::Stored { offset, crc32 }))
-            }
-            TAG_DEFLATE => {
-                let mut buf = [0u8; 22];
-                reader.read_exact(&mut buf)?;
-                let comp_offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-                let uncomp_offset = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-                let crc32 = u32::from_le_bytes(buf[16..20].try_into().unwrap());
-                let prime_bits = buf[20];
-                let prime_value = buf[21];
-                if comp_offset == 0 || prime_bits > 7 || prime_value >= (1u8 << prime_bits) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid deflate checkpoint state",
-                    ));
-                }
-                Ok(Self(ZipCheckpointKind::Deflate {
-                    comp_offset,
-                    uncomp_offset,
-                    crc32,
-                    prime_bits,
-                    prime_value,
-                }))
-            }
-            other => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown ZIP checkpoint tag: {other}"),
-            )),
-        }
-    }
-
     pub(crate) fn resume_dict_len(
         &self,
         compression: Compression,
@@ -720,6 +654,7 @@ impl<R: AsyncRead + MaybeSend + Unpin> AsyncRead for ZipEntryReader<R> {
 mod tests {
     use super::*;
     use crate::test_util::{TrickleReader, compress_multi_block};
+    use binrw::{BinRead, BinWrite};
     use futures::executor::block_on;
     use futures::io::{AsyncReadExt, Cursor};
 
@@ -832,9 +767,9 @@ mod tests {
             (deflate_cp, 23, 1024, 3072),
         ] {
             let mut bytes = Vec::new();
-            cp.write_to(&mut bytes).unwrap();
+            cp.write(&mut io::Cursor::new(&mut bytes)).unwrap();
             assert_eq!(bytes.len(), expected_len);
-            let decoded = ZipCheckpoint::read_from(&mut io::Cursor::new(&bytes)).unwrap();
+            let decoded = ZipCheckpoint::read(&mut io::Cursor::new(&bytes)).unwrap();
             assert_eq!(decoded, cp);
             assert_eq!(decoded.source_offset(), exp_src);
             assert_eq!(decoded.output_offset(), exp_out);
@@ -842,26 +777,28 @@ mod tests {
 
         // Invalid Deflate prime_bits (> 7) and prime_value (>= 1 << prime_bits)
         let mut def_bytes = Vec::new();
-        deflate_cp.write_to(&mut def_bytes).unwrap();
+        deflate_cp
+            .write(&mut io::Cursor::new(&mut def_bytes))
+            .unwrap();
         let mut bad_bits = def_bytes.clone();
         bad_bits[21] = 8;
-        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&bad_bits)).is_err());
+        assert!(ZipCheckpoint::read(&mut io::Cursor::new(&bad_bits)).is_err());
 
         let mut bad_val = def_bytes;
         bad_val[22] = 0x20;
-        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&bad_val)).is_err());
+        assert!(ZipCheckpoint::read(&mut io::Cursor::new(&bad_val)).is_err());
 
         // Zero offsets must be rejected for both Stored and Deflate
         let mut zero_stored = [0u8; 13];
-        zero_stored[0] = TAG_STORED;
-        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&zero_stored)).is_err());
+        zero_stored[0] = 0;
+        assert!(ZipCheckpoint::read(&mut io::Cursor::new(&zero_stored)).is_err());
 
         let mut zero_deflate = [0u8; 23];
-        zero_deflate[0] = TAG_DEFLATE;
-        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&zero_deflate)).is_err());
+        zero_deflate[0] = 1;
+        assert!(ZipCheckpoint::read(&mut io::Cursor::new(&zero_deflate)).is_err());
 
         // Unknown tags must be rejected
-        assert!(ZipCheckpoint::read_from(&mut io::Cursor::new(&[9u8; 23])).is_err());
+        assert!(ZipCheckpoint::read(&mut io::Cursor::new(&[9u8; 23])).is_err());
 
         // Stored vs Deflate compatibility and bounds checks
         assert_eq!(
