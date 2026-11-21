@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Terminal progress bars, wire-speed estimation, and [`TransferObserver`] integration
-//! for firmware downloads.
+//! Terminal progress bars, sliding-window speed/ETA estimation, and [`TransferObserver`]
+//! integration for firmware downloads.
 
-use indicatif::style::ProgressTracker;
 use indicatif::{
     FormattedDuration, HumanBytes, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle,
 };
 use samloader_fus::{TransferObserver, TransferWarning};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -30,104 +30,98 @@ const RAW_PROGRESS_TEMPLATE: &str =
 const FILE_PROGRESS_TEMPLATE: &str =
     "{msg}\n[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}) [{eta_precise}]";
 
-const SPEED_SMOOTHING_SECS: f64 = 3.0;
+const SPEED_WINDOW: Duration = Duration::from_secs(3);
+const SAMPLE_STEP: Duration = Duration::from_millis(250);
 
-fn exp_weight(age_secs: f64) -> f64 {
-    0.1_f64.powf(age_secs / SPEED_SMOOTHING_SECS)
+#[derive(Clone, Copy)]
+struct RateSample {
+    at: Instant,
+    wire: u64,
+    net: u64,
+    out: u64,
 }
 
-#[derive(Clone)]
-struct RateEstimator {
-    smoothed: f64,
-    double_smoothed: f64,
-    prev_bytes: u64,
-    prev_time: Instant,
-    start_time: Instant,
+#[derive(Clone, Copy)]
+struct Rates {
+    wire_bps: f64,
+    net_bps: f64,
+    out_bps: f64,
 }
 
-impl RateEstimator {
-    fn new(now: Instant) -> Self {
-        Self {
-            smoothed: 0.0,
-            double_smoothed: 0.0,
-            prev_bytes: 0,
-            prev_time: now,
-            start_time: now,
+struct RateWindow {
+    samples: VecDeque<RateSample>,
+}
+
+impl RateWindow {
+    fn new(now: Instant, initial_out: u64) -> Self {
+        let mut samples = VecDeque::with_capacity(16);
+        samples.push_back(RateSample {
+            at: now,
+            wire: 0,
+            net: 0,
+            out: initial_out,
+        });
+        Self { samples }
+    }
+
+    fn record(&mut self, now: Instant, wire: u64, net: u64, out: u64) {
+        if self
+            .samples
+            .back()
+            .is_none_or(|last| now.saturating_duration_since(last.at) >= SAMPLE_STEP)
+        {
+            self.samples.push_back(RateSample {
+                at: now,
+                wire,
+                net,
+                out,
+            });
+            while self.samples.len() > 2
+                && now.saturating_duration_since(self.samples[1].at) >= SPEED_WINDOW
+            {
+                self.samples.pop_front();
+            }
         }
     }
 
-    fn reset(&mut self, bytes: u64, now: Instant) {
-        self.smoothed = 0.0;
-        self.double_smoothed = 0.0;
-        self.prev_bytes = bytes;
-        self.prev_time = now;
-        self.start_time = now;
-    }
-
-    fn record(&mut self, bytes: u64, now: Instant) {
-        if bytes <= self.prev_bytes || now <= self.prev_time {
-            return;
+    fn rates(&self, now: Instant, wire: u64, net: u64, out: u64) -> Rates {
+        let Some(oldest) = self.samples.front() else {
+            return Rates {
+                wire_bps: 0.0,
+                net_bps: 0.0,
+                out_bps: 0.0,
+            };
+        };
+        let dt = now.saturating_duration_since(oldest.at).as_secs_f64();
+        if dt <= f64::EPSILON {
+            return Rates {
+                wire_bps: 0.0,
+                net_bps: 0.0,
+                out_bps: 0.0,
+            };
         }
-        let dt = (now - self.prev_time).as_secs_f64();
-        let instant_rate = (bytes - self.prev_bytes) as f64 / dt;
-        let w = exp_weight(dt);
-        self.smoothed = self.smoothed * w + instant_rate * (1.0 - w);
-
-        let total_w = 1.0 - exp_weight((now - self.start_time).as_secs_f64());
-        if total_w > f64::EPSILON {
-            let norm_smoothed = self.smoothed / total_w;
-            self.double_smoothed = self.double_smoothed * w + norm_smoothed * (1.0 - w);
-        }
-        self.prev_bytes = bytes;
-        self.prev_time = now;
-    }
-
-    fn bytes_per_sec(&self, now: Instant) -> f64 {
-        let total_w =
-            1.0 - exp_weight(now.saturating_duration_since(self.start_time).as_secs_f64());
-        if total_w <= f64::EPSILON {
-            return 0.0;
-        }
-        let dt = now.saturating_duration_since(self.prev_time).as_secs_f64();
-        let rw = exp_weight(dt);
-        let sps = self.smoothed * rw / total_w;
-        let dsps = self.double_smoothed * rw + sps * (1.0 - rw);
-        dsps / total_w
-    }
-}
-
-struct RateEstimators {
-    wire: RateEstimator,
-    net: RateEstimator,
-    out: RateEstimator,
-}
-
-impl RateEstimators {
-    fn new(now: Instant) -> Self {
-        Self {
-            wire: RateEstimator::new(now),
-            net: RateEstimator::new(now),
-            out: RateEstimator::new(now),
+        Rates {
+            wire_bps: wire.saturating_sub(oldest.wire) as f64 / dt,
+            net_bps: net.saturating_sub(oldest.net) as f64 / dt,
+            out_bps: out.saturating_sub(oldest.out) as f64 / dt,
         }
     }
 }
 
 struct TransferMetrics {
     rem_total_comp: u64,
-    resumed_out: u64,
     wire_bytes: AtomicU64,
     net_comp_bytes: AtomicU64,
-    est: Mutex<RateEstimators>,
+    window: Mutex<RateWindow>,
 }
 
 impl TransferMetrics {
     fn new(rem_total_comp: u64, resumed_out: u64) -> Self {
         Self {
             rem_total_comp,
-            resumed_out,
             wire_bytes: AtomicU64::new(0),
             net_comp_bytes: AtomicU64::new(0),
-            est: Mutex::new(RateEstimators::new(Instant::now())),
+            window: Mutex::new(RateWindow::new(Instant::now(), resumed_out)),
         }
     }
 
@@ -138,22 +132,30 @@ impl TransferMetrics {
         }
     }
 
-    fn eta(&self, state: &ProgressState) -> Option<Duration> {
+    fn sample_rates(&self, state: &ProgressState, now: Instant) -> Rates {
+        let wire = self.wire_bytes.load(Ordering::Relaxed);
+        let net = self.net_comp_bytes.load(Ordering::Relaxed);
+        let out = state.pos();
+        let mut window = self.window.lock().unwrap();
+        window.record(now, wire, net, out);
+        window.rates(now, wire, net, out)
+    }
+
+    fn eta(&self, state: &ProgressState, now: Instant) -> Option<Duration> {
         if state.is_finished() {
             return Some(Duration::ZERO);
         }
-        let now = Instant::now();
         let done_comp = self.net_comp_bytes.load(Ordering::Relaxed);
         let rem_comp = self.rem_total_comp.saturating_sub(done_comp);
         let rem_out = state.len().unwrap_or(0).saturating_sub(state.pos());
-        let est = self.est.lock().unwrap();
+        let rates = self.sample_rates(state, now);
 
         let (remaining, rate) = if rem_comp > 0 {
             // Use net compressed goodput so retried traffic does not make ETA optimistic.
-            (rem_comp, est.net.bytes_per_sec(now))
+            (rem_comp, rates.net_bps)
         } else if rem_out > 0 {
             // Network prefetch finished; estimate remaining decompression/disk drain time.
-            (rem_out, est.out.bytes_per_sec(now))
+            (rem_out, rates.out_bps)
         } else {
             return Some(Duration::ZERO);
         };
@@ -162,7 +164,7 @@ impl TransferMetrics {
             .then(|| Duration::from_secs_f64((remaining as f64 / rate).min(u32::MAX as f64)))
     }
 
-    fn speed(&self, state: &ProgressState) -> f64 {
+    fn speed(&self, state: &ProgressState, now: Instant) -> f64 {
         if state.is_finished() {
             let secs = state.elapsed().as_secs_f64();
             if secs > 0.0 {
@@ -171,63 +173,8 @@ impl TransferMetrics {
                 0.0
             }
         } else {
-            self.est.lock().unwrap().wire.bytes_per_sec(Instant::now())
+            self.sample_rates(state, now).wire_bps
         }
-    }
-}
-
-#[derive(Clone)]
-struct SpeedTracker {
-    metrics: Arc<TransferMetrics>,
-}
-
-impl SpeedTracker {
-    fn new(metrics: Arc<TransferMetrics>) -> Self {
-        Self { metrics }
-    }
-
-    fn eta_tracker(&self) -> impl ProgressTracker + use<> {
-        let metrics = Arc::clone(&self.metrics);
-        move |state: &ProgressState, w: &mut dyn fmt::Write| match metrics.eta(state) {
-            Some(dur) => {
-                let _ = write!(w, "{}", FormattedDuration(dur));
-            }
-            None => {
-                let _ = w.write_str("--:--:--");
-            }
-        }
-    }
-}
-
-impl ProgressTracker for SpeedTracker {
-    fn clone_box(&self) -> Box<dyn ProgressTracker> {
-        Box::new(self.clone())
-    }
-
-    fn tick(&mut self, state: &ProgressState, now: Instant) {
-        if !state.is_finished() {
-            let wire = self.metrics.wire_bytes.load(Ordering::Relaxed);
-            let net = self.metrics.net_comp_bytes.load(Ordering::Relaxed);
-            let out = state.pos().saturating_sub(self.metrics.resumed_out);
-            let mut est = self.metrics.est.lock().unwrap();
-            est.wire.record(wire, now);
-            est.net.record(net, now);
-            est.out.record(out, now);
-        }
-    }
-
-    fn reset(&mut self, state: &ProgressState, now: Instant) {
-        let wire = self.metrics.wire_bytes.load(Ordering::Relaxed);
-        let net = self.metrics.net_comp_bytes.load(Ordering::Relaxed);
-        let out = state.pos().saturating_sub(self.metrics.resumed_out);
-        let mut est = self.metrics.est.lock().unwrap();
-        est.wire.reset(wire, now);
-        est.net.reset(net, now);
-        est.out.reset(out, now);
-    }
-
-    fn write(&self, state: &ProgressState, w: &mut dyn fmt::Write) {
-        let _ = write!(w, "{}/s", HumanBytes(self.metrics.speed(state) as u64));
     }
 }
 
@@ -290,8 +237,8 @@ impl CliObserver {
         target: ProgressDrawTarget,
     ) -> TransferProgress<'a> {
         let metrics = Arc::new(TransferMetrics::new(rem_total_comp, resumed_out));
-        let speed_tracker = SpeedTracker::new(Arc::clone(&metrics));
-        let eta_tracker = speed_tracker.eta_tracker();
+        let speed_metrics = Arc::clone(&metrics);
+        let eta_metrics = Arc::clone(&metrics);
         let template = if label.is_some() {
             FILE_PROGRESS_TEMPLATE
         } else {
@@ -299,8 +246,26 @@ impl CliObserver {
         };
         let style = ProgressStyle::with_template(template)
             .unwrap()
-            .with_key("bytes_per_sec", speed_tracker)
-            .with_key("eta_precise", eta_tracker);
+            .with_key(
+                "bytes_per_sec",
+                move |state: &ProgressState, w: &mut dyn fmt::Write| {
+                    let speed = speed_metrics.speed(state, Instant::now());
+                    let _ = write!(w, "{}/s", HumanBytes(speed as u64));
+                },
+            )
+            .with_key(
+                "eta_precise",
+                move |state: &ProgressState, w: &mut dyn fmt::Write| match eta_metrics
+                    .eta(state, Instant::now())
+                {
+                    Some(dur) => {
+                        let _ = write!(w, "{}", FormattedDuration(dur));
+                    }
+                    None => {
+                        let _ = w.write_str("--:--:--");
+                    }
+                },
+            );
 
         let pb = ProgressBar::with_draw_target(Some(target_size), target).with_style(style);
 
@@ -324,12 +289,12 @@ impl CliObserver {
             } else {
                 100.0
             };
+            pb.set_position(resumed_out);
             pb.println(format!(
                 "Resuming: {} / {} ({pct:.1}%) already on disk",
                 HumanBytes(resumed_out),
                 HumanBytes(target_size),
             ));
-            pb.set_position(resumed_out);
         }
         if !pb.is_hidden() {
             pb.enable_steady_tick(Duration::from_secs(1));
@@ -476,6 +441,27 @@ impl Drop for TransferProgress<'_> {
 mod tests {
     use super::*;
 
+    fn format_eta(pb: &ProgressBar, metrics: &TransferMetrics, now: Instant) -> String {
+        let mut out = String::new();
+        pb.update(|state| match metrics.eta(state, now) {
+            Some(dur) => {
+                use fmt::Write;
+                let _ = write!(out, "{}", FormattedDuration(dur));
+            }
+            None => out.push_str("--:--:--"),
+        });
+        out
+    }
+
+    fn format_speed(pb: &ProgressBar, metrics: &TransferMetrics, now: Instant) -> String {
+        let mut out = String::new();
+        pb.update(|state| {
+            use fmt::Write;
+            let _ = write!(out, "{}/s", HumanBytes(metrics.speed(state, now) as u64));
+        });
+        out
+    }
+
     #[test]
     fn test_cli_observer_multi_file_isolation_and_resumed_speed() {
         let gib = 1024 * 1024 * 1024_u64;
@@ -503,12 +489,9 @@ mod tests {
         );
         let pb1 = p1.pb.clone();
         let m1 = Arc::clone(&p1.metrics);
-        let eta1 = SpeedTracker::new(Arc::clone(&m1)).eta_tracker();
 
         // Before any bytes/rate arrive, ETA displays "--:--:--" instead of "00:00:00".
-        let mut initial_eta = String::new();
-        pb1.update(|state| eta1.write(state, &mut initial_eta));
-        assert_eq!(initial_eta, "--:--:--");
+        assert_eq!(format_eta(&pb1, &m1, Instant::now()), "--:--:--");
 
         // Simulate 4 MiB net compressed + 4 MiB retried wire traffic (8 MiB wire total over 2s).
         // Net goodput is 2 MiB/s -> remaining 6 MiB compressed yields ETA of 3s (not skewed by retries).
@@ -517,17 +500,10 @@ mod tests {
         assert_eq!(m1.wire_bytes.load(Ordering::Relaxed), 8 * mib);
         assert_eq!(m1.net_comp_bytes.load(Ordering::Relaxed), 4 * mib);
 
-        {
-            let now = Instant::now();
-            let mut est = m1.est.lock().unwrap();
-            est.wire.reset(0, now - Duration::from_secs(2));
-            est.wire.record(8 * mib, now);
-            est.net.reset(0, now - Duration::from_secs(2));
-            est.net.record(4 * mib, now);
-        }
-        let mut live_eta = String::new();
-        pb1.update(|state| eta1.write(state, &mut live_eta));
-        assert_eq!(live_eta, "00:00:03");
+        let now = Instant::now();
+        *m1.window.lock().unwrap() = RateWindow::new(now - Duration::from_secs(2), resumed_uncomp);
+        assert_eq!(format_eta(&pb1, &m1, now), "00:00:03");
+        assert!(format_speed(&pb1, &m1, now).starts_with("4.0"));
 
         // Network finishes prefetching remaining 6 MiB compressed while 20 MiB of output
         // still remain to drain at 10 MiB/s -> ETA falls back to output drain rate (2s).
@@ -536,25 +512,15 @@ mod tests {
         assert_eq!(m1.net_comp_bytes.load(Ordering::Relaxed), 10 * mib);
         let on_written1 = p1.on_written();
         on_written1(10 * mib);
-        {
-            let now = Instant::now();
-            let mut est = m1.est.lock().unwrap();
-            est.out.reset(0, now - Duration::from_secs(1));
-            est.out.record(10 * mib, now);
-        }
-        let mut drain_eta = String::new();
-        pb1.update(|state| eta1.write(state, &mut drain_eta));
-        assert_eq!(drain_eta, "00:00:02");
+        *m1.window.lock().unwrap() = RateWindow::new(now - Duration::from_secs(1), resumed_uncomp);
+        assert_eq!(format_eta(&pb1, &m1, now), "00:00:02");
 
         on_written1(20 * mib);
         assert_eq!(pb1.position(), target_uncomp);
         pb1.set_elapsed(Duration::from_secs(2));
         p1.finish();
         assert!(obs.active.read().unwrap().is_none());
-
-        let mut finished_eta = String::new();
-        pb1.update(|state| eta1.write(state, &mut finished_eta));
-        assert_eq!(finished_eta, "00:00:00");
+        assert_eq!(format_eta(&pb1, &m1, Instant::now()), "00:00:00");
 
         // File 2: Starts with completely fresh, isolated metrics.
         let p2 = obs.start_transfer_with_target(
@@ -581,17 +547,13 @@ mod tests {
         assert!(obs.active.read().unwrap().is_none());
 
         // File 1's finished speed remains intact (7.0 MiB/s) even after File 2 completed!
-        let tracker1 = SpeedTracker::new(m1);
-        let mut formatted1 = String::new();
-        pb1.update(|state| tracker1.write(state, &mut formatted1));
+        let formatted1 = format_speed(&pb1, &m1, Instant::now());
         assert!(
             formatted1.starts_with("7.0") && formatted1.ends_with("MiB/s"),
             "unexpected file 1 final speed: {formatted1}"
         );
 
-        let tracker2 = SpeedTracker::new(m2);
-        let mut formatted2 = String::new();
-        pb2.update(|state| tracker2.write(state, &mut formatted2));
+        let formatted2 = format_speed(&pb2, &m2, Instant::now());
         assert!(
             formatted2.starts_with("8.0") && formatted2.ends_with("MiB/s"),
             "unexpected file 2 final speed: {formatted2}"
@@ -625,29 +587,48 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_estimator_short_window_convergence() {
+    fn test_rate_window_high_frequency_convergence_and_stall() {
         let mib = 1024 * 1024_u64;
         let t0 = Instant::now();
-        let mut est = RateEstimator::new(t0);
+        let mut window = RateWindow::new(t0, 0);
         let mut total = 0_u64;
 
-        // 5 seconds at 400 MiB/s (sampled at 1 Hz)
-        for sec in 1..=5 {
-            total += 400 * mib;
-            est.record(total, t0 + Duration::from_secs(sec));
+        // 5 seconds at 400 MiB/s sampled at 20 Hz (every 50 ms, faster than SAMPLE_STEP).
+        for step in 1..=100 {
+            total += 20 * mib;
+            let now = t0 + Duration::from_millis(50 * step);
+            window.record(now, total, total, total);
         }
-        let burst = est.bytes_per_sec(t0 + Duration::from_secs(5)) / mib as f64;
+        let burst = window
+            .rates(t0 + Duration::from_secs(5), total, total, total)
+            .wire_bps
+            / mib as f64;
         assert!((burst - 400.0).abs() < 1.0, "burst={burst}");
 
-        // Drop abruptly to 80 MiB/s: within 5s, 3s double-EWA converges near 80 MiB/s
-        for sec in 6..=10 {
-            total += 80 * mib;
-            est.record(total, t0 + Duration::from_secs(sec));
+        // Drop abruptly to 80 MiB/s at 20 Hz: after 3s, sliding window must still slide
+        // and settle directly at 80 MiB/s (not stay anchored at t0).
+        for step in 101..=160 {
+            total += 4 * mib;
+            let now = t0 + Duration::from_millis(50 * step);
+            window.record(now, total, total, total);
         }
-        let settled = est.bytes_per_sec(t0 + Duration::from_secs(10)) / mib as f64;
+        let settled = window
+            .rates(t0 + Duration::from_secs(8), total, total, total)
+            .wire_bps
+            / mib as f64;
         assert!(
-            (80.0..=120.0).contains(&settled),
-            "expected rapid convergence near 80 MiB/s, got {settled}"
+            (settled - 80.0).abs() < 1.0,
+            "expected convergence at 80 MiB/s, got {settled}"
         );
+
+        // Complete stall for 3s drops rate back to 0 B/s.
+        for step in 161..=220 {
+            let now = t0 + Duration::from_millis(50 * step);
+            window.record(now, total, total, total);
+        }
+        let stalled = window
+            .rates(t0 + Duration::from_secs(11), total, total, total)
+            .wire_bps;
+        assert_eq!(stalled, 0.0);
     }
 }
