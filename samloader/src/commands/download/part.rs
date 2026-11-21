@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Resumable `.part` file management, `SAMLOADR` v4 checkpoint footers, and
-//! ring-buffered background disk writing.
+//! coalesced blocking disk writing.
 
 use binrw::{BinRead, BinWrite, binrw};
 use samloader_fus::futures::future::{self, Either};
@@ -26,13 +26,12 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::watch;
 
 const FOOTER_VERSION: u32 = 4;
 const FOOTER_SIZE: usize = 64;
 const CHECKPOINT_INTERVAL: u64 = 32 * 1024 * 1024;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
-const RING_SLOTS: usize = 16;
 const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
 
 #[binrw]
@@ -327,21 +326,6 @@ pub(crate) async fn wait_cancelled(cancel_rx: &mut watch::Receiver<bool>) {
     }
 }
 
-enum StopReason {
-    WriterDead,
-    Cancelled,
-}
-
-async fn wait_stop(
-    writer_dead_rx: &mut oneshot::Receiver<()>,
-    cancel_rx: &mut watch::Receiver<bool>,
-) -> StopReason {
-    match future::select(writer_dead_rx, pin!(wait_cancelled(cancel_rx))).await {
-        Either::Left(_) => StopReason::WriterDead,
-        Either::Right(_) => StopReason::Cancelled,
-    }
-}
-
 fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "download interrupted")
 }
@@ -351,12 +335,6 @@ pub(crate) enum ResumeState<C: Checkpoint> {
     Fresh,
     Restarted,
     Resumed { checkpoint: C, dict: Vec<u8> },
-}
-
-enum WriteMsg {
-    Data(Vec<u8>, usize, Option<FooterState>),
-    Checkpoint(FooterState),
-    Eof,
 }
 
 /// An open `.part` file prepared to receive a [`ResumableAsyncRead`] and atomically
@@ -503,95 +481,78 @@ impl PartFile {
         Ok((part, resume))
     }
 
-    /// Streams all remaining chunks from `reader` onto a dedicated blocking writer thread,
-    /// persisting periodic checkpoints and finalizing the file on EOF.
-    pub(crate) async fn write_from<R>(
+    /// Streams all remaining chunks from `reader` directly to disk inside
+    /// `block_in_place`, persisting periodic checkpoints and finalizing the file on EOF.
+    pub(crate) fn write_from<R>(
         self,
         reader: R,
         cancel_rx: watch::Receiver<bool>,
-        on_written: impl Fn(u64) + Send + 'static,
+        on_written: impl Fn(u64),
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
         R::Checkpoint: Into<FooterState>,
     {
         self.write_from_with_interval(reader, CHECKPOINT_INTERVAL, cancel_rx, on_written)
-            .await
     }
 
-    async fn write_from_with_interval<R>(
+    fn write_from_with_interval<R>(
         self,
         mut reader: R,
         checkpoint_interval: u64,
         mut cancel_rx: watch::Receiver<bool>,
-        on_written: impl Fn(u64) + Send + 'static,
+        on_written: impl Fn(u64),
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
         R::Checkpoint: Into<FooterState>,
     {
-        let start_pos = self.start_pos;
-        let target_size = self.target_size;
-        let remaining = target_size.saturating_sub(start_pos);
-        // Keep `buf_size >= 1` so `reader.read` still polls EOF/CRC verification
-        // even on 0-byte streams or streams already resumed at `target_size`.
-        let buf_size = (remaining.min(WRITE_BUF_SIZE as u64) as usize).max(1);
-        let slots = (remaining.div_ceil(buf_size as u64) as usize).clamp(1, RING_SLOTS);
-        let (data_tx, mut data_rx) = mpsc::channel::<WriteMsg>(slots);
-        let (free_tx, mut free_rx) = mpsc::channel::<Vec<u8>>(slots);
-        let (writer_alive_tx, mut writer_dead_rx) = oneshot::channel::<()>();
-        for _ in 0..slots {
-            free_tx
-                .try_send(vec![0u8; buf_size])
-                .expect("fresh bounded channel has capacity for slots");
-        }
+        let handle = tokio::runtime::Handle::current();
 
-        let writer_handle = tokio::task::spawn_blocking(move || -> io::Result<()> {
-            let _writer_alive = writer_alive_tx;
+        tokio::task::block_in_place(move || {
+            let remaining = self.target_size.saturating_sub(self.start_pos);
+            // Keep `buf_size >= 1` so `reader.read` still polls EOF/CRC verification
+            // even on 0-byte streams or streams already resumed at `target_size`.
+            let buf_size = (remaining.min(WRITE_BUF_SIZE as u64) as usize).max(1);
+            let mut buf = vec![0u8; buf_size];
+            let mut filled = 0usize;
             let mut write_pos = self.start_pos;
+            let mut last_persisted_offset = self.start_pos;
+            let mut latest_cp: Option<R::Checkpoint> = None;
+            let min_delta = checkpoint_interval.max(1);
+            let mut last_flush = Instant::now();
 
-            while let Some(msg) = data_rx.blocking_recv() {
-                match msg {
-                    WriteMsg::Data(buf, n, state) => {
-                        let blk_len = n as u64;
-                        let end_pos = write_pos
-                            .checked_add(blk_len)
-                            .filter(|&end| end <= self.target_size)
-                            .ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "stream exceeded declared target size",
-                                )
-                            })?;
-                        write_all_at(&self.file, &buf[..n], write_pos)
-                            .map_err(|e| io_with_path(&self.part_path, "write", e))?;
-                        write_pos = end_pos;
-
-                        let _ = free_tx.blocking_send(buf);
-                        on_written(blk_len);
-
-                        if let Some(state) = state {
-                            persist_checkpoint(
-                                &self.file,
-                                &self.part_path,
-                                self.checksum,
-                                self.target_size,
-                                state,
-                                false,
-                            )?;
-                        }
+            let flush_buf =
+                |buf: &[u8], filled: &mut usize, write_pos: &mut u64| -> io::Result<()> {
+                    if *filled == 0 {
+                        return Ok(());
                     }
-                    WriteMsg::Checkpoint(state) => {
-                        persist_checkpoint(
-                            &self.file,
-                            &self.part_path,
-                            self.checksum,
-                            self.target_size,
-                            state,
-                            true,
-                        )?;
+                    let n = *filled;
+                    *filled = 0;
+                    write_all_at(&self.file, &buf[..n], *write_pos)
+                        .map_err(|e| io_with_path(&self.part_path, "write", e))?;
+                    *write_pos += n as u64;
+                    on_written(n as u64);
+                    Ok(())
+                };
+
+            let read_err: io::Error = loop {
+                let read_step = handle.block_on(async {
+                    match future::select(
+                        pin!(wait_cancelled(&mut cancel_rx)),
+                        pin!(reader.read(&mut buf[filled..])),
+                    )
+                    .await
+                    {
+                        Either::Left(_) => Err(cancelled_error()),
+                        Either::Right((res, _)) => res,
                     }
-                    WriteMsg::Eof => {
+                });
+
+                match read_step {
+                    Ok(0) => {
+                        drop(reader);
+                        flush_buf(&buf, &mut filled, &mut write_pos)?;
                         if write_pos != self.target_size {
                             return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
@@ -601,132 +562,78 @@ impl PartFile {
                                 ),
                             ));
                         }
-                        finalize_part_file(
+                        return finalize_part_file(
                             self.file,
                             &self.part_path,
                             &self.final_path,
                             write_pos,
-                        )?;
-                        return Ok(());
+                        );
                     }
-                }
-            }
-            Ok(())
-        });
-
-        let read_res: io::Result<()> = async {
-            let mut last_persisted_offset = start_pos;
-            let mut latest_cp: Option<R::Checkpoint> = None;
-            let min_delta = checkpoint_interval.max(1);
-            let mut pending_flush: Option<(Vec<u8>, usize)> = None;
-            let mut flush_cp = false;
-
-            let loop_res: io::Result<()> = 'outer: loop {
-                let mut buf = match future::select(
-                    pin!(wait_stop(&mut writer_dead_rx, &mut cancel_rx)),
-                    pin!(free_rx.recv()),
-                )
-                .await
-                {
-                    Either::Left((StopReason::WriterDead, _)) | Either::Right((None, _)) => {
-                        break 'outer Ok(());
-                    }
-                    Either::Left((StopReason::Cancelled, _)) => {
-                        flush_cp = true;
-                        break 'outer Err(cancelled_error());
-                    }
-                    Either::Right((Some(buf), _)) => buf,
-                };
-
-                let mut filled = 0;
-                let mut hit_eof = false;
-                let mut pending_state: Option<FooterState> = None;
-                let fill_start = Instant::now();
-
-                while filled < buf.len() {
-                    let read_step = match future::select(
-                        pin!(wait_stop(&mut writer_dead_rx, &mut cancel_rx)),
-                        pin!(reader.read(&mut buf[filled..])),
-                    )
-                    .await
-                    {
-                        Either::Left((StopReason::WriterDead, _)) => break 'outer Ok(()),
-                        Either::Left((StopReason::Cancelled, _)) => {
-                            if filled > 0 {
-                                pending_flush = Some((buf, filled));
-                            }
-                            flush_cp = true;
-                            break 'outer Err(cancelled_error());
+                    Ok(n) => {
+                        let new_filled = filled + n;
+                        if write_pos
+                            .checked_add(new_filled as u64)
+                            .is_none_or(|end| end > self.target_size)
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "stream exceeded declared target size",
+                            ));
                         }
-                        Either::Right((res, _)) => res,
-                    };
+                        filled = new_filled;
 
-                    match read_step {
-                        Ok(0) => {
-                            hit_eof = true;
-                            break;
-                        }
-                        Ok(n) => {
-                            filled += n;
-                            if let Some(cp) = reader
-                                .checkpoint()
-                                .filter(|cp| cp.output_offset() < target_size)
+                        let mut cp_due = None;
+                        if let Some(cp) = reader
+                            .checkpoint()
+                            .filter(|cp| cp.output_offset() < self.target_size)
+                        {
+                            if cp.output_offset() >= last_persisted_offset.saturating_add(min_delta)
                             {
-                                let cp_offset = cp.output_offset();
-                                if cp_offset >= last_persisted_offset.saturating_add(min_delta) {
-                                    last_persisted_offset = cp_offset;
-                                    latest_cp = None;
-                                    pending_state = Some(cp.into());
-                                    break;
-                                }
+                                cp_due = Some(cp);
+                            } else {
                                 latest_cp = Some(cp);
                             }
-                            if fill_start.elapsed() >= COALESCE_MAX_WAIT {
-                                break;
-                            }
                         }
-                        Err(e) => {
-                            if e.kind() != io::ErrorKind::InvalidData {
-                                if filled > 0 {
-                                    pending_flush = Some((buf, filled));
-                                }
-                                flush_cp = true;
-                            }
-                            break 'outer Err(e);
+
+                        if let Some(cp) = cp_due {
+                            let cp_offset = cp.output_offset();
+                            flush_buf(&buf, &mut filled, &mut write_pos)?;
+                            persist_checkpoint(
+                                &self.file,
+                                &self.part_path,
+                                self.checksum,
+                                self.target_size,
+                                cp.into(),
+                                false,
+                            )?;
+                            last_persisted_offset = cp_offset;
+                            latest_cp = None;
+                            last_flush = Instant::now();
+                        } else if filled == buf.len() || last_flush.elapsed() >= COALESCE_MAX_WAIT {
+                            flush_buf(&buf, &mut filled, &mut write_pos)?;
+                            last_flush = Instant::now();
                         }
                     }
-                }
-
-                if filled > 0
-                    && data_tx
-                        .send(WriteMsg::Data(buf, filled, pending_state))
-                        .await
-                        .is_err()
-                {
-                    break 'outer Ok(());
-                }
-                if hit_eof {
-                    let _ = data_tx.send(WriteMsg::Eof).await;
-                    break 'outer Ok(());
+                    Err(e) => break e,
                 }
             };
 
-            if let Some((buf, filled)) = pending_flush {
-                let _ = data_tx.send(WriteMsg::Data(buf, filled, None)).await;
-            }
-            if flush_cp
+            drop(reader);
+            if read_err.kind() != io::ErrorKind::InvalidData
                 && let Some(cp) = latest_cp.filter(|cp| cp.output_offset() > last_persisted_offset)
+                && flush_buf(&buf, &mut filled, &mut write_pos).is_ok()
             {
-                let _ = data_tx.send(WriteMsg::Checkpoint(cp.into())).await;
+                let _ = persist_checkpoint(
+                    &self.file,
+                    &self.part_path,
+                    self.checksum,
+                    self.target_size,
+                    cp.into(),
+                    true,
+                );
             }
-            loop_res
-        }
-        .await;
-
-        drop(reader);
-        drop(data_tx);
-        let write_res = writer_handle.await.expect("disk writer thread panicked");
-        write_res.and(read_res)
+            Err(read_err)
+        })
     }
 }
 
@@ -945,7 +852,6 @@ mod tests {
             let reader = flaky.open().await.unwrap();
             let err = part
                 .write_from_with_interval(reader, 16 * 1024, never_cancel(), |_| {})
-                .await
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
             assert!(!final_path.exists());
@@ -972,7 +878,6 @@ mod tests {
             part.write_from_with_interval(reader, 16 * 1024, never_cancel(), move |n| {
                 written_cb.fetch_add(n, Ordering::Relaxed);
             })
-            .await
             .unwrap();
             assert_eq!(
                 cp.output_offset() + written.load(Ordering::Relaxed),
@@ -1010,7 +915,6 @@ mod tests {
             part.write_from_with_interval(reader, 1024 * 1024, never_cancel(), move |_| {
                 write_calls_cb.fetch_add(1, Ordering::Relaxed);
             })
-            .await
             .unwrap();
             // 128_000 bytes delivered in 16 KiB chunks coalesces into a single disk write.
             assert_eq!(write_calls.load(Ordering::Relaxed), 1);
@@ -1022,7 +926,6 @@ mod tests {
             let reader = flaky.open().await.unwrap();
             let err = part
                 .write_from_with_interval(reader, 1024 * 1024, never_cancel(), |_| {})
-                .await
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
             let (_, resume) = PartFile::open(flush_target, checksum, &healthy, false)
@@ -1095,7 +998,6 @@ mod tests {
                     cancel_rx,
                     |_| {},
                 )
-                .await
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::Interrupted);
             let (_, resume) = PartFile::open(cancel_target, checksum, &healthy, false)
@@ -1123,7 +1025,6 @@ mod tests {
                     never_cancel(),
                     |_| {},
                 )
-                .await
                 .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             let (_, resume) = PartFile::open(invalid_target, checksum, &healthy, false)
@@ -1150,8 +1051,8 @@ mod tests {
                             Poll::Ready(Ok(buf.len()))
                         }
                         2 => {
-                            // Exceeds 4 MiB target_size; fill the slot so it flushes to the
-                            // writer while the reader grabs the second slot and hangs on step 3.
+                            // Exceeds 4 MiB target_size; verify overflow is rejected
+                            // synchronously before step 3 is ever polled.
                             self.step += 1;
                             buf.fill(0xBB);
                             Poll::Ready(Ok(buf.len()))
@@ -1172,15 +1073,18 @@ mod tests {
                 .unwrap();
             let err = tokio::time::timeout(
                 Duration::from_secs(2),
-                part.write_from_with_interval(
-                    OverflowThenHang { step: 0 },
-                    CHECKPOINT_INTERVAL,
-                    never_cancel(),
-                    |_| {},
-                ),
+                tokio::task::spawn_blocking(move || {
+                    part.write_from_with_interval(
+                        OverflowThenHang { step: 0 },
+                        CHECKPOINT_INTERVAL,
+                        never_cancel(),
+                        |_| {},
+                    )
+                }),
             )
             .await
-            .expect("writer failure must wake stalled reader without timing out")
+            .expect("writer failure must fail fast without timing out")
+            .unwrap()
             .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         });
@@ -1312,7 +1216,6 @@ mod tests {
             assert!(matches!(resume, ResumeState::Fresh));
             let reader = empty_src.open().await.unwrap();
             part.write_from(reader, watch::channel(false).1, |_| {})
-                .await
                 .unwrap();
             assert_eq!(std::fs::read(&empty_path).unwrap(), b"");
         });

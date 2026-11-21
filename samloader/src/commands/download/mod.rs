@@ -174,12 +174,10 @@ where
                 let reader = cancellable_io(cancel_rx, source.resume(&checkpoint, &dict)).await?;
                 drop(dict);
                 part.write_from(reader, write_cancel, progress.on_written())
-                    .await
             }
             ResumeState::Fresh | ResumeState::Restarted => {
                 let reader = cancellable_io(cancel_rx, source.open()).await?;
                 part.write_from(reader, write_cancel, progress.on_written())
-                    .await
             }
         }
     }
