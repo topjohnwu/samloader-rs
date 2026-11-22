@@ -58,7 +58,8 @@ pub enum HttpError {
 }
 
 impl HttpError {
-    pub(crate) fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+    /// Wraps a backend-specific HTTP transport error.
+    pub fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(err))
     }
 }

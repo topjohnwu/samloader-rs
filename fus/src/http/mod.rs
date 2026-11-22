@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Internal HTTP transport abstraction and platform backend selection.
+//! HTTP transport abstraction and platform backend.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod reqwest;
@@ -23,27 +23,33 @@ use futures::io::AsyncRead;
 use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use self::reqwest::ReqwestClient as PlatformClient;
+pub use self::reqwest::{ReqwestClient, ReqwestResponse};
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) use self::wasm_stub::WasmStubClient as PlatformClient;
-
-#[cfg(all(not(target_arch = "wasm32"), test))]
+#[cfg(test)]
 pub(crate) use self::mock::{MockClient, MockResponse};
 
-pub(crate) enum HttpMethod {
+/// HTTP method used by FUS requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    /// HTTP `GET` request.
     Get,
+    /// HTTP `POST` request.
     Post,
 }
 
-pub(crate) struct HttpRequest<'a> {
+/// Outgoing HTTP request executed by an [`HttpClient`].
+pub struct HttpRequest<'a> {
+    /// HTTP method (`GET` or `POST`).
     pub method: HttpMethod,
+    /// Full request URL.
     pub url: &'a str,
+    /// Request headers as `(name, value)` pairs.
     pub headers: &'a [(&'a str, &'a str)],
+    /// Optional request body bytes.
     pub body: Option<&'a [u8]>,
 }
 
-#[cfg(all(not(target_arch = "wasm32"), test))]
+#[cfg(test)]
 impl HttpRequest<'_> {
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -53,12 +59,21 @@ impl HttpRequest<'_> {
     }
 }
 
-pub(crate) trait HttpResponse: Sized + MaybeSend {
+/// Response returned by an [`HttpClient`].
+pub trait HttpResponse: Sized + MaybeSend {
+    /// Returns the HTTP status code.
     fn status(&self) -> u16;
+
+    /// Looks up the first response header matching `name` (case-insensitively).
     fn header(&self, name: &str) -> Option<&str>;
+
+    /// Consumes the response body as a UTF-8 string.
     fn into_text(self) -> impl Future<Output = Result<String, HttpError>> + MaybeSend;
+
+    /// Consumes the response body as an asynchronous byte stream.
     fn into_reader(self) -> impl AsyncRead + MaybeSend + Unpin;
 
+    /// Returns `Ok(self)` if the status code is in `200..300`, or `Err(HttpError::Status(_))`.
     fn ensure_success(self) -> Result<Self, HttpError> {
         let status = self.status();
         if (200..300).contains(&status) {
@@ -69,68 +84,19 @@ pub(crate) trait HttpResponse: Sized + MaybeSend {
     }
 }
 
-pub(crate) trait HttpClient: Sized + MaybeSend + MaybeSync {
+/// Asynchronous HTTP transport backend for [`crate::FusClient`].
+pub trait HttpClient: Sized + MaybeSend + MaybeSync {
+    /// Response type yielded by [`HttpClient::send`].
     type Response: HttpResponse;
 
+    /// Sends an HTTP request and resolves once the response headers are received.
     fn send(
         &self,
         request: HttpRequest<'_>,
     ) -> impl Future<Output = Result<Self::Response, HttpError>> + MaybeSend;
 }
 
-#[cfg(target_arch = "wasm32")]
-mod wasm_stub {
-    use super::{HttpClient, HttpRequest, HttpResponse};
-    use crate::error::HttpError;
-    use futures::io::{AsyncRead, empty};
-    use std::io;
-
-    pub(crate) struct WasmStubClient;
-    pub(crate) enum WasmStubResponse {}
-
-    impl WasmStubClient {
-        pub(crate) fn new() -> Result<Self, HttpError> {
-            Err(HttpError::backend(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "FUS HTTP client is not yet implemented on WebAssembly",
-            )))
-        }
-    }
-
-    impl HttpResponse for WasmStubResponse {
-        fn status(&self) -> u16 {
-            match *self {}
-        }
-
-        fn header(&self, _name: &str) -> Option<&str> {
-            match *self {}
-        }
-
-        async fn into_text(self) -> Result<String, HttpError> {
-            match self {}
-        }
-
-        fn into_reader(self) -> impl AsyncRead + Unpin {
-            match self {}
-            #[allow(unreachable_code)]
-            empty()
-        }
-    }
-
-    impl HttpClient for WasmStubClient {
-        type Response = WasmStubResponse;
-
-        async fn send(&self, request: HttpRequest<'_>) -> Result<Self::Response, HttpError> {
-            let _ = (&request.method, request.url, request.headers, request.body);
-            Err(HttpError::backend(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "FUS HTTP client is not yet implemented on WebAssembly",
-            )))
-        }
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), test))]
+#[cfg(test)]
 mod mock {
     use super::{HttpClient, HttpRequest, HttpResponse};
     use crate::error::HttpError;

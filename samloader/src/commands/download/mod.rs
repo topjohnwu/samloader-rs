@@ -21,7 +21,7 @@ use progress::{CliObserver, FileLabel};
 use samloader_fus::futures::future::{self, Either, try_join_all};
 use samloader_fus::{
     BinaryInform, Checkpoint, DataStream, DownloadSession, FusClient, ParallelDataSource,
-    ResumableStream, ZipArchive, ZipEntry,
+    ReqwestClient, ResumableStream, ZipArchive, ZipEntry,
 };
 use std::error::Error;
 use std::future::Future;
@@ -76,11 +76,11 @@ async fn cancellable_io<T>(
 }
 
 async fn init_parallel_source(
-    client: FusClient,
+    client: FusClient<ReqwestClient>,
     info: BinaryInform,
     concurrency: usize,
     observer: &Arc<CliObserver>,
-) -> Result<ParallelDataSource<DownloadSession>, Box<dyn Error>> {
+) -> Result<ParallelDataSource<DownloadSession<ReqwestClient>>, Box<dyn Error>> {
     let session = client
         .init_download(info)
         .await
@@ -200,7 +200,7 @@ where
 }
 
 async fn download_raw(
-    client: FusClient,
+    client: FusClient<ReqwestClient>,
     info: BinaryInform,
     args: &DownloadArgs,
     concurrency: usize,
@@ -245,7 +245,7 @@ async fn download_raw(
 }
 
 async fn download_archive(
-    client: FusClient,
+    client: FusClient<ReqwestClient>,
     info: BinaryInform,
     args: &DownloadArgs,
     concurrency: usize,

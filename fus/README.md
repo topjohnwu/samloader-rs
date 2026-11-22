@@ -19,14 +19,14 @@ Callers must run on an active Tokio runtime (required by `reqwest` for async I/O
 
 ```rust,no_run
 use samloader_fus::{
-    DataSource, FusClient, fetch_history,
+    DataSource, FusClient, ReqwestClient, fetch_history,
     futures::io::{AllowStdIo, copy},
 };
 use std::fs::File;
 
 async fn download_firmware() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch version info
-    let version_info = fetch_history("SM-S931U1", "XAA").await?;
+    let version_info = fetch_history(&ReqwestClient::new()?, "SM-S931U1", "XAA").await?;
     println!("Latest firmware version: {}", version_info.latest);
 
     // 2. Initialize the FUS Client and download session

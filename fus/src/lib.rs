@@ -42,6 +42,9 @@ pub use stream::{Checkpoint, DataStream, OffsetCheckpoint, ResumableAsyncRead, R
 pub use decoder::ZipCheckpoint;
 pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient, fetch_history};
+pub use http::{HttpClient, HttpMethod, HttpRequest, HttpResponse};
+#[cfg(not(target_arch = "wasm32"))]
+pub use http::{ReqwestClient, ReqwestResponse};
 pub use xml::{BinaryInform, VersionInfo};
 pub use zip::{ZipArchive, ZipEntry, ZipEntryStream};
 

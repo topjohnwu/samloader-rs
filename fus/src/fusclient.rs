@@ -18,7 +18,9 @@ use crate::compat::MaybeSend;
 use crate::data::DataSource;
 use crate::decrypt::{AlignedRange, DecryptReader, decryptor, unpadded_block_len};
 use crate::error::{Error, HttpError, Result};
-use crate::http::{HttpClient, HttpMethod, HttpRequest, HttpResponse, PlatformClient};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::ReqwestClient;
+use crate::http::{HttpClient, HttpMethod, HttpRequest, HttpResponse};
 use crate::{auth, xml};
 use aes::cipher::BlockModeDecrypt;
 use aes::cipher::inout::InOutBuf;
@@ -86,7 +88,9 @@ async fn fetch_smart_history(
     xml::parse_history_xml(&xml)
 }
 
-async fn fetch_history_with(
+/// Fetches the historical list of released firmware versions for the target model and region
+/// using the supplied [`HttpClient`].
+pub async fn fetch_history(
     client: &impl HttpClient,
     model: &str,
     region: &str,
@@ -95,12 +99,6 @@ async fn fetch_history_with(
         Ok(info) => Ok(info),
         Err(_) => fetch_version_xml(client, model, region).await,
     }
-}
-
-/// Fetches the historical list of released firmware versions for the target model and region.
-pub async fn fetch_history(model: &str, region: &str) -> Result<VersionInfo> {
-    let client = PlatformClient::new()?;
-    fetch_history_with(&client, model, region).await
 }
 
 /// Authentication token state. The download GET signs every request with
@@ -120,13 +118,26 @@ impl AuthState {
     }
 }
 
-struct FusClientCore<C: HttpClient> {
+/// Client coordinating API communication and security authentication
+/// with the Samsung Firmware Update Server (FUS).
+pub struct FusClient<C> {
     client: C,
     auth_state: Mutex<AuthState>,
 }
 
-impl<C: HttpClient> FusClientCore<C> {
-    async fn new(client: C) -> Result<Self> {
+#[cfg(not(target_arch = "wasm32"))]
+impl FusClient<ReqwestClient> {
+    /// Creates a new `FusClient` using the default `ReqwestClient` and initiates
+    /// the standard FUS handshake to generate a session nonce.
+    pub async fn new() -> Result<Self> {
+        Self::with_client(ReqwestClient::new()?).await
+    }
+}
+
+impl<C: HttpClient> FusClient<C> {
+    /// Creates a new `FusClient` backed by `client` and initiates the standard FUS
+    /// handshake to generate a session nonce.
+    pub async fn with_client(client: C) -> Result<Self> {
         let fus = Self {
             client,
             auth_state: Mutex::new(AuthState::default()),
@@ -135,11 +146,14 @@ impl<C: HttpClient> FusClientCore<C> {
         Ok(fus)
     }
 
-    async fn fetch_history(&self, model: &str, region: &str) -> Result<VersionInfo> {
-        fetch_history_with(&self.client, model, region).await
+    /// Fetches the historical list of released firmware versions for the target model and region,
+    /// reusing this client's underlying HTTP transport.
+    pub async fn fetch_history(&self, model: &str, region: &str) -> Result<VersionInfo> {
+        fetch_history(&self.client, model, region).await
     }
 
-    async fn fetch_binary_info(
+    /// Queries the server for firmware binary metadata matching the requested model, region, and version.
+    pub async fn fetch_binary_info(
         &self,
         model: &str,
         region: &str,
@@ -215,9 +229,12 @@ impl<C: HttpClient> FusClientCore<C> {
         xml::check_xml_status(&xml)
     }
 
-    async fn init_download(self, info: BinaryInform) -> Result<DownloadSessionCore<C>> {
+    /// Requests a download authorization ticket from FUS for `info`, probes the
+    /// final AES block to determine the exact unpadded payload length, and consumes
+    /// this client into an active [`DownloadSession`].
+    pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession<C>> {
         self.send_init_download(&info).await?;
-        let mut session = DownloadSessionCore {
+        let mut session = DownloadSession {
             client: self,
             info,
             decrypted_size: 0,
@@ -228,42 +245,10 @@ impl<C: HttpClient> FusClientCore<C> {
     }
 }
 
-/// Client coordinating API communication and security authentication
-/// with the Samsung Firmware Update Server (FUS).
-pub struct FusClient(FusClientCore<PlatformClient>);
-
-impl FusClient {
-    /// Creates a new `FusClient` and initiates the standard FUS handshake to generate a session nonce.
-    pub async fn new() -> Result<Self> {
-        Ok(Self(FusClientCore::new(PlatformClient::new()?).await?))
-    }
-
-    /// Fetches the historical list of released firmware versions for the target model and region,
-    /// reusing this client's underlying HTTP connection pool.
-    pub async fn fetch_history(&self, model: &str, region: &str) -> Result<VersionInfo> {
-        self.0.fetch_history(model, region).await
-    }
-
-    /// Queries the server for firmware binary metadata matching the requested model, region, and version.
-    pub async fn fetch_binary_info(
-        &self,
-        model: &str,
-        region: &str,
-        version: &str,
-    ) -> Result<BinaryInform> {
-        self.0.fetch_binary_info(model, region, version).await
-    }
-
-    /// Requests a download authorization ticket from FUS for `info`, probes the
-    /// final AES block to determine the exact unpadded payload length, and consumes
-    /// this client into an active [`DownloadSession`].
-    pub async fn init_download(self, info: BinaryInform) -> Result<DownloadSession> {
-        Ok(DownloadSession(self.0.init_download(info).await?))
-    }
-}
-
-struct DownloadSessionCore<C: HttpClient> {
-    client: FusClientCore<C>,
+/// Active firmware download session holding an authenticated [`FusClient`]
+/// and the resolved [`BinaryInform`] metadata.
+pub struct DownloadSession<C> {
+    client: FusClient<C>,
     info: BinaryInform,
     decrypted_size: u64,
     /// Reauthentication generation counter. It also serves as the lock that
@@ -272,11 +257,7 @@ struct DownloadSessionCore<C: HttpClient> {
     reauth_gen: AsyncMutex<u64>,
 }
 
-impl<C: HttpClient> DownloadSessionCore<C> {
-    fn info(&self) -> &BinaryInform {
-        &self.info
-    }
-
+impl<C: HttpClient> DownloadSession<C> {
     async fn probe_decrypted_size(&self) -> Result<u64> {
         let enc_size = self.info.size;
         if enc_size == 0 {
@@ -366,7 +347,7 @@ impl<C: HttpClient> DownloadSessionCore<C> {
     }
 }
 
-impl<C: HttpClient> DataSource for DownloadSessionCore<C> {
+impl<C: HttpClient> DataSource for DownloadSession<C> {
     fn size(&self) -> u64 {
         self.decrypted_size
     }
@@ -403,31 +384,7 @@ impl<C: HttpClient> DataSource for DownloadSessionCore<C> {
     }
 }
 
-/// Active firmware download session holding an authenticated [`FusClient`]
-/// and the resolved [`BinaryInform`] metadata.
-pub struct DownloadSession(DownloadSessionCore<PlatformClient>);
-
-impl DownloadSession {
-    /// Returns the firmware binary metadata associated with this download session.
-    pub fn info(&self) -> &BinaryInform {
-        self.0.info()
-    }
-}
-
-impl DataSource for DownloadSession {
-    fn size(&self) -> u64 {
-        self.0.size()
-    }
-
-    async fn fetch_range(
-        &self,
-        range: impl RangeBounds<u64> + MaybeSend,
-    ) -> io::Result<impl AsyncRead + MaybeSend + Unpin> {
-        self.0.fetch_range(range).await
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), test))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::decrypt::tests::{TEST_KEY, encrypt_pkcs7};
@@ -440,9 +397,9 @@ mod tests {
     async fn session_from_mock(
         client: MockClient,
         info: BinaryInform,
-    ) -> Result<DownloadSessionCore<MockClient>> {
-        let mut session = DownloadSessionCore {
-            client: FusClientCore {
+    ) -> Result<DownloadSession<MockClient>> {
+        let mut session = DownloadSession {
+            client: FusClient {
                 client,
                 auth_state: Mutex::new(AuthState::default()),
             },
@@ -534,7 +491,7 @@ mod tests {
         });
 
         block_on(async {
-            let fus = FusClientCore::new(client).await.unwrap();
+            let fus = FusClient::with_client(client).await.unwrap();
 
             // SmartHistory.do fails with 503 -> falls back cleanly to version.xml
             let hist = fus.fetch_history("SM-S931U1", "XAA").await.unwrap();
@@ -598,7 +555,7 @@ mod tests {
             let aligned_reqs = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
             let aligned_info = BinaryInform {
                 size: aligned_cipher.len() as u64,
-                ..session.info().clone()
+                ..session.info.clone()
             };
             let aligned_session = session_from_mock(
                 range_mock(aligned_cipher, Arc::clone(&aligned_reqs)),
@@ -625,7 +582,7 @@ mod tests {
             // Empty session makes zero HTTP requests even during probe
             let empty_info = BinaryInform {
                 size: 0,
-                ..session.info().clone()
+                ..session.info.clone()
             };
             let empty_session = session_from_mock(
                 MockClient::from_handler(|_| {
@@ -688,7 +645,7 @@ mod tests {
                 MockClient::from_handler(|_| {
                     Box::pin(async { Ok(MockResponse::ok_bytes(vec![0; 80])) })
                 }),
-                session.info().clone(),
+                session.info.clone(),
             )
             .await;
             assert!(matches!(
@@ -708,7 +665,7 @@ mod tests {
                         Box::pin(async { Err(HttpError::Status(503)) })
                     }
                 }),
-                session.info().clone(),
+                session.info.clone(),
             )
             .await
             .unwrap();

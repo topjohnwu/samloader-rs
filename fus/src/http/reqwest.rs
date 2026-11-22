@@ -22,9 +22,11 @@ use reqwest::header::CONTENT_LENGTH;
 use std::io;
 use std::time::Duration;
 
-pub(crate) struct ReqwestClient(reqwest::Client);
+/// Native [`HttpClient`] implementation backed by `reqwest`.
+pub struct ReqwestClient(reqwest::Client);
 
-pub(crate) struct ReqwestResponse(reqwest::Response);
+/// Response returned by [`ReqwestClient`].
+pub struct ReqwestResponse(reqwest::Response);
 
 impl HttpResponse for ReqwestResponse {
     fn status(&self) -> u16 {
@@ -48,7 +50,8 @@ impl HttpResponse for ReqwestResponse {
 }
 
 impl ReqwestClient {
-    pub(crate) fn new() -> Result<Self, HttpError> {
+    /// Creates a new `ReqwestClient` configured with a cookie store and FUS timeouts.
+    pub fn new() -> Result<Self, HttpError> {
         let client = reqwest::Client::builder()
             .cookie_store(true)
             // `read_timeout` resets on every body chunk read rather than capping

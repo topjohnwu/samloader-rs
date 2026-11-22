@@ -15,12 +15,14 @@
 // limitations under the License.
 
 use crate::cli::CheckUpdateArgs;
-use samloader_fus::fetch_history;
+use samloader_fus::{ReqwestClient, fetch_history};
 use std::error::Error;
 
 /// Prints the firmware versions available for a model and region.
 pub(crate) async fn run(args: CheckUpdateArgs) -> Result<(), Box<dyn Error>> {
-    let info = fetch_history(&args.fus.model, &args.fus.region)
+    let client =
+        ReqwestClient::new().map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
+    let info = fetch_history(&client, &args.fus.model, &args.fus.region)
         .await
         .map_err(|e| format!("Failed to fetch version info: {e}"))?;
 
