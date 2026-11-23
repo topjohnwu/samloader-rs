@@ -152,17 +152,12 @@ fn run_bindgen(
 const WEB_STATIC_FILES: &[&str] = &[
     "index.html",
     "styles.css",
-    "app.js",
-    "bridge.js",
-    "fus_bridge.js",
-    "download_worker.js",
-    "md5_worker.js",
     "samloader-fus-bridge.user.js",
     "favicon.svg",
     "logo.svg",
 ];
 /// Static directories of the web app, relative to `web/`.
-const WEB_STATIC_DIRS: &[&str] = &["fonts", "ui"];
+const WEB_STATIC_DIRS: &[&str] = &["app", "fonts", "ui", "workers"];
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;

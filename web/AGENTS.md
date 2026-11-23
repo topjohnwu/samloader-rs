@@ -20,7 +20,7 @@
 
 - **Syntax check** all JS files:
   ```bash
-  for f in web/*.js web/ui/*.js web/tests/*.mjs; do node --check "$f" || exit 1; done
+  for f in web/*.js web/app/*.js web/ui/*.js web/workers/*.js web/tests/*.mjs; do node --check "$f" || exit 1; done
   ```
 - **Run unit tests** (userscript allowlist, direct main-thread transport, worker `MessagePort` credit-based backpressure, coalescing, abort/401 handling, and buffer helpers):
   ```bash
@@ -43,5 +43,5 @@ Then open **`http://127.0.0.1:8088/`** (use `127.0.0.1` or `localhost` so the br
 
 What `dev_fus_relay.py` does:
 - Serves `web/` statically with `Cache-Control: no-store` and proper `.wasm`/`.js` MIME types.
-- Injects a `window.GM = { xmlHttpRequest }` shim and `<script src="/samloader-fus-bridge.user.js"></script>` into `index.html` in memory so the real userscript, `fus_bridge.js`, workers, and WASM run unmodified.
+- Injects a `window.GM = { xmlHttpRequest }` shim and `<script src="/samloader-fus-bridge.user.js"></script>` into `index.html` in memory so the real userscript, `app/fus_bridge.js`, workers, and WASM run unmodified.
 - Relays `POST /__fus_relay` to Samsung's 3 allowlisted FUS hosts with a per-host cookie jar and `64 KiB` streaming responses.

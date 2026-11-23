@@ -19,8 +19,8 @@ import {
   clearOpfsCache,
   getOpfsBuildFiles,
   getOpfsCacheInfo,
-} from "../bridge.js";
-import { openBridgePort } from "../fus_bridge.js";
+} from "../app/bridge.js";
+import { openBridgePort } from "../app/fus_bridge.js";
 import { state } from "./state.js";
 import { announce, formatBytes, formatDuration } from "./util.js";
 import { appendLog, reportError } from "./log.js";
@@ -122,7 +122,7 @@ export async function runDownloadWorker({ target, params }) {
   const port = await openBridgePort();
   let worker;
   try {
-    worker = new Worker(new URL("../download_worker.js", import.meta.url), {
+    worker = new Worker(new URL("../workers/download.js", import.meta.url), {
       type: "module",
     });
   } catch (err) {

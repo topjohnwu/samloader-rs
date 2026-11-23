@@ -14,14 +14,14 @@
 
 // Samsung FUS bridge status, firmware lookup, archive inspection, and component selector.
 
-import { fusFetchHistory, fusInspectFirmware } from "../bridge.js";
+import { fusFetchHistory, fusInspectFirmware } from "../app/bridge.js";
 import {
   EXPECTED_BRIDGE_VERSION,
   detectFusBridge,
   getMainThreadFusTransport,
   isBridgeOutdated,
   onFusBridgeReady,
-} from "../fus_bridge.js";
+} from "../app/fus_bridge.js";
 import { state } from "./state.js";
 import { formatBytes } from "./util.js";
 import { appendLog, reportError } from "./log.js";

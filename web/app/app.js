@@ -24,8 +24,8 @@ import {
   isWebUsbSupported,
   isWebSerialSupported,
 } from "./bridge.js";
-import { state } from "./ui/state.js";
-import { detectBrowserCapabilities } from "./ui/capabilities.js";
+import { state } from "../ui/state.js";
+import { detectBrowserCapabilities } from "../ui/capabilities.js";
 import {
   setupLogScroller,
   setupLogPanel,
@@ -33,18 +33,18 @@ import {
   reportError,
   clearLog,
   saveLog,
-} from "./ui/log.js";
+} from "../ui/log.js";
 import {
   applyCapabilityLayout,
   updateControlsState,
   setupExclusiveGuards,
-} from "./ui/controls.js";
+} from "../ui/controls.js";
 import {
   renderPackageSlots,
   handleSkipMd5Change,
   clearFirmwareSelections,
   setupDropzones,
-} from "./ui/slots.js";
+} from "../ui/slots.js";
 import {
   queryAndShowDeviceInfo,
   refreshPairedDevicesStatus,
@@ -54,10 +54,10 @@ import {
   handleRebootOdin,
   handleDumpPit,
   savePit,
-} from "./ui/device.js";
-import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "./ui/flash.js";
-import { setupServerPanel } from "./ui/server.js";
-import { setupThemeToggle } from "./ui/theme.js";
+} from "../ui/device.js";
+import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "../ui/flash.js";
+import { setupServerPanel } from "../ui/server.js";
+import { setupThemeToggle } from "../ui/theme.js";
 
 // Use Web Serial (vcom) by default on Windows, since WebUSB requires replacing
 // Samsung/usbser.sys drivers with WinUSB, whereas Web Serial works out of the box.

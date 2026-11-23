@@ -18,8 +18,8 @@ import {
   setVerbose,
   takeWasmLogs,
   fusDownload,
-} from "./bridge.js";
-import { createFusHttpTransport } from "./fus_bridge.js";
+} from "../app/bridge.js";
+import { createFusHttpTransport } from "../app/fus_bridge.js";
 
 let activeAbortController = null;
 let isRunning = false;

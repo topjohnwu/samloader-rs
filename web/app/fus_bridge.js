@@ -578,7 +578,7 @@ export function attachBridgePortHost(port, bridge) {
 
 /**
  * Opens a `MessageChannel` whose host end executes requests through the userscript bridge,
- * returning the client `MessagePort` for `download_worker.js`.
+ * returning the client `MessagePort` for `workers/download.js`.
  * @returns {Promise<MessagePort>}
  */
 export async function openBridgePort() {

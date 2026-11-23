@@ -24,7 +24,7 @@ import {
   rebootFromOdin,
   printPit,
   deviceMode,
-} from "../bridge.js";
+} from "../app/bridge.js";
 import { state } from "./state.js";
 import { downloadFile } from "./util.js";
 import { appendLog, reportError, openLog } from "./log.js";

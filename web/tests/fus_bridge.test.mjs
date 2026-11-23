@@ -43,7 +43,7 @@ const {
   onFusBridgeReady,
   openBridgePort,
   toTransferableBuffer,
-} = await import("../fus_bridge.js");
+} = await import("../app/fus_bridge.js");
 
 let gmHandler = () => {
   throw new Error("No mock GM.xmlHttpRequest handler configured");

@@ -21,7 +21,7 @@ import {
   lastWasmLogLine,
   renderLogViewport,
   logLineHeight,
-} from "../bridge.js";
+} from "../app/bridge.js";
 import { downloadFile, localTimestampForFilename } from "./util.js";
 
 // --- Virtualized Activity Log Scroller ---

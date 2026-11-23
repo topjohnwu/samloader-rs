@@ -14,7 +14,7 @@
 
 // Package slots, MD5 verification, and individual partition files.
 
-import { appendRawWasmLogs } from "../bridge.js";
+import { appendRawWasmLogs } from "../app/bridge.js";
 import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
 import { formatBytes, setBarPercent, isActivationKey } from "./util.js";
 import { appendLog } from "./log.js";
@@ -107,7 +107,7 @@ function pumpMd5Queue() {
     return;
   }
 
-  const worker = new Worker(new URL("../md5_worker.js", import.meta.url), { type: "module" });
+  const worker = new Worker(new URL("../workers/md5.js", import.meta.url), { type: "module" });
   md5Active = { slot, worker };
 
   const finish = (status, error) => {

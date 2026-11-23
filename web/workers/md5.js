@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { setProgressCallback, takeWasmLogs, verifyPackageMd5 } from "./bridge.js";
+import { setProgressCallback, takeWasmLogs, verifyPackageMd5 } from "../app/bridge.js";
 
 // Verifies the MD5 footer of a single package file, then reports the result.
 // Each verification runs in its own worker; the main thread cancels it with terminate().

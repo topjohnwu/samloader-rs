@@ -43,7 +43,7 @@ import init, {
   take_logs,
   verify_package_md5,
   version,
-} from "./pkg/samloader_web.js";
+} from "../pkg/samloader_web.js";
 
 let initPromise = null;
 let wasmReady = false;

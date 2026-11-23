@@ -19,7 +19,7 @@ Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and ser
 2. Click **Install Userscript** (or **Copy Script** / **Download `.user.js`** for manual installation) in the web UI banner.
 3. Click **Reload Page** so Tampermonkey injects the bridge into the tab. The badge switches to `FUS Bridge v1.0.0`.
 
-The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
+The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/app/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
 
 ## Browser Compatibility & Storage
 
@@ -83,12 +83,14 @@ Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Bra
 web/
 ├── index.html                   # App shell (Samsung Server & Local Files panels)
 ├── styles.css                   # Material Design 3 styling (light/dark tokens)
-├── app.js                       # Entry point, WASM init, device hotplug & events
-├── bridge.js                    # JS facade over wasm-bindgen exports in pkg/
-├── fus_bridge.js                # Main-thread & Worker MessagePort transport over userscript
 ├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
-├── download_worker.js           # Module Web Worker running concurrent FUS downloads & DEFLATE
-├── md5_worker.js                # Module Web Worker running streaming .tar.md5 checks
+├── app/
+│   ├── app.js                   # Entry point, WASM init, device hotplug & events
+│   ├── bridge.js                # JS facade over wasm-bindgen exports in pkg/
+│   └── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
+├── workers/
+│   ├── download.js              # Module Web Worker running concurrent FUS downloads & DEFLATE
+│   └── md5.js                   # Module Web Worker running streaming .tar.md5 checks
 ├── ui/
 │   ├── state.js                 # Shared client UI state and Odin slot metadata
 │   ├── controls.js              # View visibility, button enablement, wake lock & beforeunload

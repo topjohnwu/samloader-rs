@@ -14,7 +14,7 @@
 
 // Flashing, with overall progress, transfer speed and ETA.
 
-import { prepareFlash } from "../bridge.js";
+import { prepareFlash } from "../app/bridge.js";
 import { PACKAGE_SLOTS, state } from "./state.js";
 import { formatBytes, setBarPercent, announce, formatDuration } from "./util.js";
 import { scheduleLogFlush, appendLog, reportError, openLog } from "./log.js";
