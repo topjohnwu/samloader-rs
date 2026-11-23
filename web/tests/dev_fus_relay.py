@@ -3,8 +3,8 @@
 Local dev server + live Samsung FUS CORS relay for testing samloader-web
 in a browser when Tampermonkey cannot be installed (e.g. headless/sandboxed browsers).
 
-Serves web/ on http://127.0.0.1:<port>/ and injects a GM.xmlHttpRequest shim
-alongside the real web/samloader-fus-bridge.user.js so the production JS/WASM/Worker/OPFS
+Serves web/site/ on http://127.0.0.1:<port>/ and injects a GM.xmlHttpRequest shim
+alongside the real web/site/samloader-fus-bridge.user.js so the production JS/WASM/Worker/OPFS
 stack runs unmodified against Samsung's live FUS endpoints.
 
 Usage:
@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-WEB_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SITE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "site"))
 PORT = int(sys.argv[1] if len(sys.argv) > 1 else "8088")
 
 ALLOWED_TARGETS = {
@@ -171,7 +171,7 @@ class FusRelayHandler(http.server.SimpleHTTPRequestHandler):
     }
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=WEB_DIR, **kwargs)
+        super().__init__(*args, directory=SITE_DIR, **kwargs)
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[relay] {self.address_string()} - {format % args}\n")
@@ -183,7 +183,7 @@ class FusRelayHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         clean_path = urllib.parse.urlsplit(self.path).path
         if clean_path in ("/", "/index.html"):
-            index_path = os.path.join(WEB_DIR, "index.html")
+            index_path = os.path.join(SITE_DIR, "index.html")
             with open(index_path, "rb") as f:
                 html = f.read().decode("utf-8")
             marker = "</body>"
@@ -342,7 +342,7 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("127.0.0.1", PORT), FusRelayHandler)
-    print(f"Serving {WEB_DIR} with live FUS relay on http://127.0.0.1:{PORT}/", flush=True)
+    print(f"Serving {SITE_DIR} with live FUS relay on http://127.0.0.1:{PORT}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

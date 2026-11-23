@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_SCRIPT_PATH = path.resolve(__dirname, "../samloader-fus-bridge.user.js");
+const USER_SCRIPT_PATH = path.resolve(__dirname, "../site/samloader-fus-bridge.user.js");
 
 const unhandled = [];
 process.on("unhandledRejection", (err) => unhandled.push(err));
@@ -43,7 +43,7 @@ const {
   onFusBridgeReady,
   openBridgePort,
   toTransferableBuffer,
-} = await import("../app/fus_bridge.js");
+} = await import("../site/app/fus_bridge.js");
 
 let gmHandler = () => {
   throw new Error("No mock GM.xmlHttpRequest handler configured");

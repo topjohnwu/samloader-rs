@@ -44,7 +44,7 @@ struct BuildWebArgs {
     #[arg(long, conflicts_with = "release")]
     dev: bool,
 
-    /// Output directory for generated WebAssembly bindings [default: web/pkg]
+    /// Output directory for generated WebAssembly bindings [default: web/site/pkg]
     #[arg(long)]
     out_dir: Option<PathBuf>,
 
@@ -71,8 +71,8 @@ struct WasmBindgenArgs {
     /// Input WebAssembly file
     input: PathBuf,
 
-    /// Output directory for generated bindings [default: web/pkg]
-    #[arg(long, default_value = "web/pkg")]
+    /// Output directory for generated bindings [default: web/site/pkg]
+    #[arg(long, default_value = "web/site/pkg")]
     out_dir: PathBuf,
 
     /// Target environment (web, nodejs, bundler, no-modules, deno) [default: web]
@@ -148,7 +148,7 @@ fn run_bindgen(
     Ok(())
 }
 
-/// Static files of the web app, relative to `web/`, deployed alongside the bindings.
+/// Static files of the web app, relative to `web/site/`, deployed alongside the bindings.
 const WEB_STATIC_FILES: &[&str] = &[
     "index.html",
     "styles.css",
@@ -156,7 +156,7 @@ const WEB_STATIC_FILES: &[&str] = &[
     "favicon.svg",
     "logo.svg",
 ];
-/// Static directories of the web app, relative to `web/`.
+/// Static directories of the web app, relative to `web/site/`.
 const WEB_STATIC_DIRS: &[&str] = &["app", "fonts", "ui", "workers"];
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
@@ -181,14 +181,14 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 
 /// Stages the static web app and its generated bindings into `dist`.
 fn stage_dist(root: &Path, pkg_dir: &Path, dist: &Path) -> Result<()> {
-    let web = root.join("web");
+    let site = root.join("web").join("site");
     fs::create_dir_all(dist).with_context(|| format!("Failed to create {}", dist.display()))?;
     for file in WEB_STATIC_FILES {
-        fs::copy(web.join(file), dist.join(file))
-            .with_context(|| format!("Failed to copy web/{file}"))?;
+        fs::copy(site.join(file), dist.join(file))
+            .with_context(|| format!("Failed to copy web/site/{file}"))?;
     }
     for dir in WEB_STATIC_DIRS {
-        copy_dir(&web.join(dir), &dist.join(dir))?;
+        copy_dir(&site.join(dir), &dist.join(dir))?;
     }
     copy_dir(pkg_dir, &dist.join("pkg"))
 }
@@ -234,7 +234,9 @@ fn build_web(args: BuildWebArgs) -> Result<()> {
         );
     }
 
-    let out_dir = args.out_dir.unwrap_or_else(|| root.join("web").join("pkg"));
+    let out_dir = args
+        .out_dir
+        .unwrap_or_else(|| root.join("web").join("site").join("pkg"));
     println!(
         "Generating wasm-bindgen bindings into {}...",
         out_dir.display()
@@ -282,12 +284,15 @@ mod tests {
 
     #[test]
     fn web_static_assets_exist() {
-        let web = workspace_root().join("web");
+        let site = workspace_root().join("web").join("site");
         for file in WEB_STATIC_FILES {
-            assert!(web.join(file).is_file(), "missing static file web/{file}");
+            assert!(
+                site.join(file).is_file(),
+                "missing static file web/site/{file}"
+            );
         }
         for dir in WEB_STATIC_DIRS {
-            assert!(web.join(dir).is_dir(), "missing static dir web/{dir}");
+            assert!(site.join(dir).is_dir(), "missing static dir web/site/{dir}");
         }
     }
 }

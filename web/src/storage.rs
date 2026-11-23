@@ -1059,7 +1059,7 @@ impl PartHandle {
                 // Zero-copy write directly from WASM linear memory into OPFS SyncAccessHandle.
                 write_sync_all(&h.sync_handle, chunk, offset)?;
                 // Yield a 0ms macrotask so tight DEFLATE bursts never starve incoming FUS
-                // MessagePort chunks or CANCEL messages in workers/download.js.
+                // MessagePort chunks or CANCEL messages in site/workers/download.js.
                 if h.yielder.is_none() {
                     h.yielder = Some(MacrotaskYielder::new()?);
                 }

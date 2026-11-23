@@ -11,7 +11,7 @@ Browser-based Samsung firmware downloader and Odin flasher powered by [`samloade
 
 ## FUS Bridge Userscript
 
-Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and serve encrypted firmware binaries over plain HTTP (which browsers block as mixed content on HTTPS pages). To talk to Samsung FUS directly from your browser without any backend proxy, the **Samsung Server** mode uses a lightweight local userscript bridge: [`web/samloader-fus-bridge.user.js`](samloader-fus-bridge.user.js).
+Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and serve encrypted firmware binaries over plain HTTP (which browsers block as mixed content on HTTPS pages). To talk to Samsung FUS directly from your browser without any backend proxy, the **Samsung Server** mode uses a lightweight local userscript bridge: [`web/site/samloader-fus-bridge.user.js`](site/samloader-fus-bridge.user.js).
 
 ### Setup
 
@@ -19,7 +19,7 @@ Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and ser
 2. Click **Install Userscript** (or **Copy Script** / **Download `.user.js`** for manual installation) in the web UI banner.
 3. Click **Reload Page** so Tampermonkey injects the bridge into the tab. The badge switches to `FUS Bridge v1.0.0`.
 
-The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/app/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
+The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/site/app/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
 
 ## Browser Compatibility & Storage
 
@@ -45,7 +45,7 @@ rustup target add wasm32-unknown-unknown
 
 ## Building
 
-From the repository root, compile `samloader-web` for WebAssembly and generate the JS/WASM bindings into `web/pkg`:
+From the repository root, compile `samloader-web` for WebAssembly and generate the JS/WASM bindings into `web/site/pkg`:
 
 ```bash
 cargo xtask build-web
@@ -67,10 +67,10 @@ cargo xtask build-web -- --features mock
 
 ## Running Locally
 
-Serve the `web/` directory with any static HTTP server. For example, using Python:
+Serve the `web/site/` directory with any static HTTP server. For example, using Python:
 
 ```bash
-python3 -m http.server -d web 8000
+python3 -m http.server -d web/site 8000
 ```
 
 Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Brave, Opera).
@@ -81,43 +81,47 @@ Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Bra
 
 ```text
 web/
-├── index.html                   # App shell (Samsung Server & Local Files panels)
-├── styles.css                   # Material Design 3 styling (light/dark tokens)
-├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
-├── app/
-│   ├── app.js                   # Entry point, WASM init, device hotplug & UI wiring
-│   ├── bridge.js                # JS facade over wasm-bindgen exports in pkg/
-│   ├── capabilities.js          # Browser capability detection (flashing & downloading)
-│   ├── device.js                # Paired device state, DVIF queries, PIT dumps & reboots
-│   ├── download.js              # OPFS staging, worker download & Download & Flash flows
-│   ├── exclusive.js             # Exclusive operation guard, wake lock & beforeunload
-│   ├── flash.js                 # Flash job orchestration & EMA speed/ETA tracking
-│   ├── format.js                # Byte-size and duration formatting helpers
-│   ├── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
-│   ├── logger.js                # App logging and error-reporting facade over WASM buffer
-│   ├── server.js                # FUS bridge probing, history lookup, inspect & selection state
-│   ├── slots.js                 # Odin slot/partition state & sequential MD5 worker queue
-│   └── state.js                 # Shared application state and Odin slot metadata
-├── workers/
-│   ├── download.js              # Module Web Worker running concurrent FUS downloads & DEFLATE
-│   └── md5.js                   # Module Web Worker running streaming .tar.md5 checks
-├── ui/
-│   ├── controls.js              # View visibility, button enablement & header/advanced controls
-│   ├── device.js                # Device list, DVIF telemetry grid & PIT save UI
-│   ├── download.js              # OPFS cache banner, picker/wipe prompts & progress UI
-│   ├── flash.js                 # Flashing progress bar, outcome banner & action bar UI
-│   ├── log.js                   # Virtualized Rust-backed activity log panel
-│   ├── server.js                # Samsung Server panel rendering, preferences & events
-│   ├── slots.js                 # Package slot dropzones, MD5 badges & sortable partitions UI
-│   ├── theme.js                 # Light / Dark / System theme switcher
-│   └── util.js                  # DOM progress/accessibility helpers and file download trigger
-├── fonts/                       # Self-hosted DM Sans, Roboto, and Roboto Mono fonts
-└── pkg/                         # Generated wasm-bindgen JS/WASM bundle (built by xtask)
+├── Cargo.toml                   # Rust crate manifest for samloader-web
+├── src/                         # Rust/WASM implementation
+├── tests/                       # Node unit tests, benchmarks & local FUS relay
+└── site/                        # Served website document root
+    ├── index.html                   # App shell (Samsung Server & Local Files panels)
+    ├── styles.css                   # Material Design 3 styling (light/dark tokens)
+    ├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
+    ├── app/
+    │   ├── app.js                   # Entry point, WASM init, device hotplug & UI wiring
+    │   ├── bridge.js                # JS facade over wasm-bindgen exports in pkg/
+    │   ├── capabilities.js          # Browser capability detection (flashing & downloading)
+    │   ├── device.js                # Paired device state, DVIF queries, PIT dumps & reboots
+    │   ├── download.js              # OPFS staging, worker download & Download & Flash flows
+    │   ├── exclusive.js             # Exclusive operation guard, wake lock & beforeunload
+    │   ├── flash.js                 # Flash job orchestration & EMA speed/ETA tracking
+    │   ├── format.js                # Byte-size and duration formatting helpers
+    │   ├── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
+    │   ├── logger.js                # App logging and error-reporting facade over WASM buffer
+    │   ├── server.js                # FUS bridge probing, history lookup, inspect & selection state
+    │   ├── slots.js                 # Odin slot/partition state & sequential MD5 worker queue
+    │   └── state.js                 # Shared application state and Odin slot metadata
+    ├── workers/
+    │   ├── download.js              # Module Web Worker running concurrent FUS downloads & DEFLATE
+    │   └── md5.js                   # Module Web Worker running streaming .tar.md5 checks
+    ├── ui/
+    │   ├── controls.js              # View visibility, button enablement & header/advanced controls
+    │   ├── device.js                # Device list, DVIF telemetry grid & PIT save UI
+    │   ├── download.js              # OPFS cache banner, picker/wipe prompts & progress UI
+    │   ├── flash.js                 # Flashing progress bar, outcome banner & action bar UI
+    │   ├── log.js                   # Virtualized Rust-backed activity log panel
+    │   ├── server.js                # Samsung Server panel rendering, preferences & events
+    │   ├── slots.js                 # Package slot dropzones, MD5 badges & sortable partitions UI
+    │   ├── theme.js                 # Light / Dark / System theme switcher
+    │   └── util.js                  # DOM progress/accessibility helpers and file download trigger
+    ├── fonts/                       # Self-hosted DM Sans, Roboto, and Roboto Mono fonts
+    └── pkg/                         # Generated wasm-bindgen JS/WASM bundle (built by xtask)
 ```
 
 ## Deploying
 
-The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/fonts/`, so the page makes no third-party requests other than optional Samsung FUS requests via the user's installed bridge userscript.
+The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/site/fonts/`, so the page makes no third-party requests other than optional Samsung FUS requests via the user's installed bridge userscript.
 
 1. Build the release WASM bundle and stage the static site (web assets, userscript, fonts, and generated `pkg/` bindings) into `dist/`:
 
@@ -133,4 +137,4 @@ The web app is a purely static site with no backend server requirements. Fonts a
 
 This project is licensed under the Apache License, Version 2.0.
 
-The bundled fonts in `web/fonts/` (DM Sans, Roboto, and Roboto Mono) are licensed under the SIL Open Font License, Version 1.1. See the `OFL-*.txt` files next to them.
+The bundled fonts in `web/site/fonts/` (DM Sans, Roboto, and Roboto Mono) are licensed under the SIL Open Font License, Version 1.1. See the `OFL-*.txt` files next to them.

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Microbenchmark for the main-thread <-> download worker MessagePort relay in web/app/fus_bridge.js.
+// Microbenchmark for the main-thread <-> download worker MessagePort relay in web/site/app/fus_bridge.js.
 // Run with: node web/tests/bench_bridge.mjs
 
 import fs from "node:fs";
@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_SCRIPT_PATH = path.resolve(__dirname, "../samloader-fus-bridge.user.js");
+const USER_SCRIPT_PATH = path.resolve(__dirname, "../site/samloader-fus-bridge.user.js");
 
 const eventTarget = new EventTarget();
 globalThis.window = {
@@ -31,7 +31,7 @@ globalThis.window = {
   dispatchEvent: eventTarget.dispatchEvent.bind(eventTarget),
 };
 
-const { createFusHttpTransport, openBridgePort } = await import("../app/fus_bridge.js");
+const { createFusHttpTransport, openBridgePort } = await import("../site/app/fus_bridge.js");
 
 let gmHandler = null;
 vm.runInNewContext(fs.readFileSync(USER_SCRIPT_PATH, "utf8"), {

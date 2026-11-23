@@ -2,7 +2,7 @@
 
 ## Building & Linting
 
-- Rebuild WASM bindings into `web/pkg/` after editing `web/src/` or any workspace crate `samloader-web` depends on (`fus/`, `odin/`, `pit/`):
+- Rebuild WASM bindings into `web/site/pkg/` after editing `web/src/` or any workspace crate `samloader-web` depends on (`fus/`, `odin/`, `pit/`):
   ```bash
   cargo xtask build-web
   # Include the Mock Device backend when testing flashing without physical hardware:
@@ -12,7 +12,7 @@
   ```bash
   cargo clippy -p samloader-web --target wasm32-unknown-unknown -- -D warnings
   ```
-- Keep `web/samloader-fus-bridge.user.js` targeting **Tampermonkey** (`@sandbox JavaScript`, `GM.xmlHttpRequest`, `unsafeWindow`).
+- Keep `web/site/samloader-fus-bridge.user.js` targeting **Tampermonkey** (`@sandbox JavaScript`, `GM.xmlHttpRequest`, `unsafeWindow`).
 
 ## JavaScript Syntax, Unit Tests & Benchmarks
 
@@ -20,7 +20,7 @@
 
 - **Syntax check** all JS files:
   ```bash
-  for f in web/*.js web/app/*.js web/ui/*.js web/workers/*.js web/tests/*.mjs; do node --check "$f" || exit 1; done
+  for f in web/site/*.js web/site/app/*.js web/site/ui/*.js web/site/workers/*.js web/tests/*.mjs; do node --check "$f" || exit 1; done
   ```
 - **Run unit tests** (userscript allowlist, direct main-thread transport, worker `MessagePort` credit-based backpressure, coalescing, abort/401 handling, and buffer helpers):
   ```bash
@@ -42,6 +42,6 @@ python3 web/tests/dev_fus_relay.py 8088
 Then open **`http://127.0.0.1:8088/`** (use `127.0.0.1` or `localhost` so the browser treats the tab as a Secure Context for OPFS `SyncAccessHandle`, WebUSB, and Web Serial).
 
 What `dev_fus_relay.py` does:
-- Serves `web/` statically with `Cache-Control: no-store` and proper `.wasm`/`.js` MIME types.
-- Injects a `window.GM = { xmlHttpRequest }` shim and `<script src="/samloader-fus-bridge.user.js"></script>` into `index.html` in memory so the real userscript, `app/fus_bridge.js`, workers, and WASM run unmodified.
+- Serves `web/site/` statically with `Cache-Control: no-store` and proper `.wasm`/`.js` MIME types.
+- Injects a `window.GM = { xmlHttpRequest }` shim and `<script src="/samloader-fus-bridge.user.js"></script>` into `index.html` in memory so the real userscript, `site/app/fus_bridge.js`, workers, and WASM run unmodified.
 - Relays `POST /__fus_relay` to Samsung's 3 allowlisted FUS hosts with a per-host cookie jar and `64 KiB` streaming responses.
