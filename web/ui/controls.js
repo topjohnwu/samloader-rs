@@ -35,8 +35,108 @@ function updateAdvancedSummary() {
   el.hidden = active.length === 0;
 }
 
+// Applies static layout visibility and copy based on detected browser capabilities.
+// Called once at startup and again only if capabilities change after WASM loads.
+export function applyCapabilityLayout() {
+  const { canFlash, canDownload } = state.capabilities;
+  const supported = canFlash || canDownload;
+
+  const brandPill = document.getElementById("brand-pill");
+  if (brandPill) {
+    if (canFlash && canDownload) {
+      brandPill.textContent = "Downloader & Flasher";
+      brandPill.hidden = false;
+    } else if (canDownload) {
+      brandPill.textContent = "Firmware Downloader";
+      brandPill.hidden = false;
+    } else if (canFlash) {
+      brandPill.textContent = "Odin Web Flasher";
+      brandPill.hidden = false;
+    } else {
+      brandPill.hidden = true;
+    }
+  }
+
+  const backendGroup = document.getElementById("backend-selector-group");
+  if (backendGroup) backendGroup.hidden = !canFlash;
+
+  const connectionChip = document.getElementById("connection-chip");
+  if (connectionChip) connectionChip.hidden = !canFlash;
+
+  const deviceCard = document.getElementById("device-card");
+  if (deviceCard) deviceCard.hidden = !canFlash;
+
+  const deviceEmptyText = document.getElementById("device-empty-text");
+  if (deviceEmptyText) {
+    deviceEmptyText.innerHTML = canDownload
+      ? "<strong>No device connected</strong> — optional for downloading, required for flashing"
+      : "<strong>No device connected</strong> — connect a device to flash firmware";
+  }
+
+  const unsupportedCard = document.getElementById("unsupported-browser-card");
+  if (unsupportedCard) {
+    unsupportedCard.hidden = supported;
+    if (!supported && typeof window !== "undefined" && !window.isSecureContext) {
+      const titleEl = document.getElementById("unsupported-browser-title");
+      const subEl = document.getElementById("unsupported-browser-subtitle");
+      if (titleEl) titleEl.textContent = "Secure context required";
+      if (subEl) {
+        subEl.textContent =
+          "This page must be served over HTTPS (or localhost) to access WebUSB, WebSerial, and browser storage.";
+      }
+    }
+  }
+
+  const slotsCard = document.getElementById("slots-card");
+  if (slotsCard) slotsCard.hidden = !supported;
+
+  const logCard = document.getElementById("log-card");
+  if (logCard) logCard.hidden = !supported;
+
+  const firmwareTitle = document.getElementById("firmware-card-title");
+  if (firmwareTitle) {
+    firmwareTitle.textContent = !canFlash && canDownload ? "Firmware downloader" : "Firmware & flashing";
+  }
+
+  const firmwareSubtitle = document.getElementById("firmware-card-subtitle");
+  if (firmwareSubtitle) {
+    if (canFlash && canDownload) {
+      firmwareSubtitle.textContent =
+        "Download official firmware from Samsung servers or load local Odin packages";
+    } else if (canDownload) {
+      firmwareSubtitle.textContent =
+        "Download official firmware packages directly from Samsung servers";
+    } else if (canFlash) {
+      firmwareSubtitle.textContent =
+        "Select local Odin packages or individual partition files to flash";
+    }
+  }
+
+  const sourceSwitcher = document.getElementById("source-switcher");
+  if (sourceSwitcher) sourceSwitcher.hidden = !(canFlash && canDownload);
+
+  const advancedOptions = document.getElementById("advanced-options");
+  if (advancedOptions) advancedOptions.hidden = !canFlash;
+
+  const whenDoneGroup = document.getElementById("when-done-group");
+  if (whenDoneGroup) whenDoneGroup.hidden = !canFlash;
+
+  const downloadOnlyBtn = document.getElementById("btn-download-only");
+  if (downloadOnlyBtn) {
+    downloadOnlyBtn.classList.toggle("btn-primary", !canFlash);
+    downloadOnlyBtn.classList.toggle("btn-outline", canFlash);
+  }
+}
+
 export function updateControlsState() {
   updateAdvancedSummary();
+  const { canFlash, canDownload } = state.capabilities;
+  if (!canDownload && canFlash) {
+    state.firmwareSource = "local";
+  } else if (!canFlash && canDownload) {
+    state.firmwareSource = "server";
+  }
+
   const flashBtn = document.getElementById("btn-flash-firmware");
   const activeEntries = Object.entries(state.slots).filter(([_, f]) => f !== null);
   const eraseChk = document.getElementById("opt-nand-erase");
@@ -50,8 +150,9 @@ export function updateControlsState() {
     const res = state.md5Results[slot];
     return !res || ["queued", "verifying", "invalid"].includes(res.status);
   });
-  const hasDownloadDevice = state.device?.mode === "download";
-  const isServer = state.firmwareSource === "server";
+  const hasDownloadDevice = canFlash && state.device?.mode === "download";
+  const isServer = canDownload && (!canFlash || state.firmwareSource === "server");
+  const isLocal = canFlash && (!canDownload || state.firmwareSource === "local");
   const busy = state.isBusy;
   const serverBusy = busy || state.serverQuerying;
 
@@ -59,7 +160,7 @@ export function updateControlsState() {
   const serverPanel = document.getElementById("server-panel");
   const localPanel = document.getElementById("local-panel");
   if (serverPanel) serverPanel.hidden = !isServer;
-  if (localPanel) localPanel.hidden = isServer;
+  if (localPanel) localPanel.hidden = !isLocal;
 
   document.querySelectorAll('input[name="firmware-source"]').forEach((el) => {
     el.checked = el.value === state.firmwareSource;
@@ -69,23 +170,23 @@ export function updateControlsState() {
   // Action bar buttons visibility & disabled state
   const dumpPitBtn = document.getElementById("btn-dump-pit");
   if (dumpPitBtn) {
-    dumpPitBtn.hidden = isServer && !hasDownloadDevice;
+    dumpPitBtn.hidden = !canFlash || (isServer && !hasDownloadDevice);
     dumpPitBtn.disabled = busy || !hasDownloadDevice;
   }
 
   const savePitBtn = document.getElementById("btn-save-pit");
   if (savePitBtn) {
-    savePitBtn.hidden = !state.hasLastPit || (isServer && !hasDownloadDevice);
+    savePitBtn.hidden = !canFlash || !state.hasLastPit || (isServer && !hasDownloadDevice);
     savePitBtn.disabled = busy;
   }
 
   if (flashBtn) {
-    flashBtn.hidden = isServer;
+    flashBtn.hidden = !isLocal;
     flashBtn.disabled =
       !hasAction || !hasDownloadDevice || busy || hasPendingOrInvalidMd5;
   }
 
-  const bridgeReady = state.fusBridge.connected;
+  const bridgeReady = canDownload && state.fusBridge.connected;
   const modelVal = document.getElementById("server-model")?.value.trim() ?? "";
   const regionVal = document.getElementById("server-region")?.value.trim() ?? "";
   const customVerVal = document.getElementById("server-custom-version")?.value.trim() ?? "";
@@ -100,7 +201,7 @@ export function updateControlsState() {
 
   const downloadFlashBtn = document.getElementById("btn-download-flash");
   if (downloadFlashBtn) {
-    downloadFlashBtn.hidden = !isServer;
+    downloadFlashBtn.hidden = !(isServer && canFlash);
     downloadFlashBtn.disabled =
       !bridgeReady ||
       !hasDownloadDevice ||
@@ -112,7 +213,7 @@ export function updateControlsState() {
   const flashHint = document.getElementById("server-flash-hint");
   if (flashHint) {
     let hintText = "";
-    if (isServer && !busy && state.serverInspect) {
+    if (isServer && canFlash && !busy && state.serverInspect) {
       if (state.serverOutputMode === "zip") {
         hintText =
           "Full .zip archives are download-only — select Extract Components to enable Download & Flash.";
@@ -133,7 +234,7 @@ export function updateControlsState() {
   // Server panel controls
   const detectServerBtn = document.getElementById("btn-detect-server-device");
   if (detectServerBtn) {
-    detectServerBtn.hidden = !hasDownloadDevice;
+    detectServerBtn.hidden = !canFlash || !hasDownloadDevice;
     detectServerBtn.disabled = serverBusy || !hasDownloadDevice;
   }
 

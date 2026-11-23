@@ -25,14 +25,14 @@
         </div>
         <div class="brand-text">
           <span class="brand-title">samloader-rs</span>
-          <span class="brand-pill">Downloader &amp; Flasher</span>
+          <span id="brand-pill" class="brand-pill">Downloader &amp; Flasher</span>
           <!-- Filled in once WASM is initialized -->
           <span id="app-version" class="brand-version" title="samloader-web version" hidden></span>
         </div>
       </div>
 
       <div class="header-controls">
-        <div class="backend-selector-group">
+        <div id="backend-selector-group" class="backend-selector-group">
           <label for="backend-select" class="backend-label">Backend</label>
           <!-- Filled in once WASM is initialized -->
           <select id="backend-select" class="select-input" disabled></select>
@@ -70,8 +70,30 @@
   <!-- Main Content -->
   <main class="app-container">
 
+    <!-- Unsupported Browser Notice (shown when neither flashing nor downloading is supported) -->
+    <section id="unsupported-browser-card" class="card unsupported-card" role="alert" hidden>
+      <div class="card-header">
+        <div class="unsupported-header-wrap">
+          <svg class="unsupported-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 8v5M12 16.5h.01" stroke-linecap="round"/>
+          </svg>
+          <div>
+            <h2 id="unsupported-browser-title" class="card-title">Browser not supported</h2>
+            <p id="unsupported-browser-subtitle" class="card-subtitle">This browser does not support WebUSB/WebSerial flashing or a compatible Tampermonkey bridge for Samsung FUS downloads.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+        <ul class="unsupported-list">
+          <li><strong>Downloading &amp; Flashing:</strong> Use a desktop Chromium browser (Chrome, Edge, Brave, or Opera) with WebUSB/WebSerial and Tampermonkey.</li>
+          <li><strong>Why this browser isn't supported:</strong> Non-Chromium browsers (Firefox, Safari) and iOS browsers lack WebUSB/WebSerial and do not support Chromium's Tampermonkey streaming/cookie bridge.</li>
+        </ul>
+      </div>
+    </section>
+
     <!-- Connect a Device -->
-    <section class="card device-card">
+    <section id="device-card" class="card device-card">
       <div class="card-header">
         <div>
           <h2 class="card-title">Connect a device</h2>
@@ -90,7 +112,7 @@
                 <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
               </svg>
             </span>
-            <span class="device-empty-text">
+            <span id="device-empty-text" class="device-empty-text">
               <strong>No device connected</strong> — optional for downloading, required for flashing
             </span>
           </div>
@@ -167,7 +189,7 @@
     <section id="slots-card" class="card slots-card">
       <div class="card-header">
         <div>
-          <h2 class="card-title">Firmware &amp; flashing</h2>
+          <h2 id="firmware-card-title" class="card-title">Firmware &amp; flashing</h2>
           <p id="firmware-card-subtitle" class="card-subtitle">Download official firmware from Samsung servers or load local Odin packages</p>
         </div>
         <div id="source-switcher" class="source-segmented-group" role="radiogroup" aria-label="Firmware source">
@@ -532,7 +554,7 @@
     </section>
 
     <!-- Activity Log: folded by default, showing the latest line -->
-    <section class="card log-card" aria-label="Activity log">
+    <section id="log-card" class="card log-card" aria-label="Activity log">
       <div class="log-header">
         <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false" aria-controls="log-body">
           <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

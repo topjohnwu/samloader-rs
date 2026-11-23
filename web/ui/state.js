@@ -27,6 +27,10 @@ export const PACKAGE_SLOTS = [
 export const SLOTS = [...PACKAGE_SLOTS.map((s) => s.id), "PIT"];
 
 export const state = {
+  capabilities: {
+    canFlash: true,
+    canDownload: true,
+  },
   selectedBackend: null,
   rebootMode: "normal",
   skipMd5: false,

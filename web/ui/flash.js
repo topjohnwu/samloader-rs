@@ -155,7 +155,7 @@ export function showOperationResult(
   result.classList.toggle("result-warning", variant === "warning");
   text.textContent = message;
   if (showLogBtn) showLogBtn.hidden = !showLog;
-  if (loadLocalBtn) loadLocalBtn.hidden = !showLoadIntoLocal;
+  if (loadLocalBtn) loadLocalBtn.hidden = !(showLoadIntoLocal && state.capabilities.canFlash);
   result.hidden = false;
 }
 

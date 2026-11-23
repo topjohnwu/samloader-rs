@@ -23,15 +23,15 @@ The userscript activates only on pages containing `<meta name="samloader-fus-bri
 
 ## Browser Compatibility & Storage
 
-| Feature | Chromium (Chrome / Edge / Brave / Opera) | Firefox / Safari |
+| Feature | Desktop Chromium (Chrome / Edge / Brave / Opera) | Other Browsers (Firefox / Safari / iOS) |
 | --- | --- | --- |
-| Firmware Lookup, Inspect & Download Only | Direct resumable disk writes via File System Access API (`showDirectoryPicker`) | OPFS staging followed by browser file download |
+| Firmware Lookup, Inspect & Download Only | Direct resumable disk writes via File System Access API (`showDirectoryPicker`) | Not supported (requires Chromium Tampermonkey) |
 | **Load into Local Flash** (after directory download) | Loads `FileSystemFileHandle`s directly into **Local Files** slots without re-reading MD5 | — |
 | Device Flashing (Odin / AT / **Download & Flash**) | Supported via WebUSB / Web Serial in a Secure Context (`http://localhost`, `127.0.0.1`, or `https://`) | WebUSB / Web Serial unavailable (Debug `Mock Device` only if built with `--features mock`) |
 
 ### OPFS Cache & Resume Checkpoints
 
-- **Download & Flash** (and Download Only fallback on Firefox/Safari) stages decrypted files in the browser's Origin Private File System (`samloader-staging/`) with `.part` resume checkpoints and CRC-32 verification.
+- **Download & Flash** (and Download Only when `showDirectoryPicker` is unavailable, such as Edge on Android) stages decrypted files in the browser's Origin Private File System (`samloader-staging/`) with `.part` resume checkpoints and CRC-32 verification.
 - Cancelling or hitting an error keeps the partial OPFS checkpoint so re-running skips already-completed ranges/files.
 - Completed builds in the cache banner offer a **Save Files** button (useful if your browser blocked automatic multi-file downloads) and **Clear Cache** to remove staged files manually. A successful **Download & Flash** automatically clears the OPFS cache afterwards, whereas a failed/aborted flash retains it so retrying skips re-downloading.
 

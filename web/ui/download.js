@@ -118,7 +118,11 @@ export async function refreshOpfsCacheBanner() {
       : `Cached build: ${buildDesc}`;
   }
   if (metaEl) {
-    const statusLabel = info.complete ? "Ready to flash" : "Partial download — resumable";
+    const statusLabel = info.complete
+      ? state.capabilities.canFlash
+        ? "Ready to flash"
+        : "Ready to save"
+      : "Partial download — resumable";
     metaEl.textContent = `${formatBytes(info.totalBytes || 0)} · ${statusLabel}`;
   }
   if (saveBtn) {
@@ -508,14 +512,15 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 
           if (target.kind === "directory" && dirHandle) {
             const hasOdin = (result.files || []).some((f) => f.component !== null);
-            if (hasOdin) {
+            const canLoadIntoLocal = hasOdin && state.capabilities.canFlash;
+            if (canLoadIntoLocal) {
               state.lastDownloadedDir = { dirHandle, files: result.files };
             }
             const summary =
               result.files.length === 1
                 ? `Downloaded ${result.files[0].name} to "${dirHandle.name}".`
                 : `Downloaded ${result.files.length} file(s) to "${dirHandle.name}".`;
-            showOperationResult("success", summary, { showLoadIntoLocal: hasOdin });
+            showOperationResult("success", summary, { showLoadIntoLocal: canLoadIntoLocal });
           } else {
             const opfsFiles = await readWantedOpfsFiles(
               buildKey,
@@ -565,6 +570,7 @@ export async function handleDownloadAndFlash({
   hasCscWipe = false,
   hasUserdata = false,
 } = {}) {
+  if (!state.capabilities.canFlash || !state.capabilities.canDownload) return;
   if (state.isBusy || state.serverQuerying) return;
   if (!state.fusBridge.connected) return;
   if (!state.serverInspect || state.device?.mode !== "download") return;

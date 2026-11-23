@@ -107,9 +107,12 @@ function setLookupError(msg) {
 }
 
 function setFirmwareSource(source, persist = true) {
-  const normalized = source === "local" ? "local" : "server";
+  const { canFlash, canDownload } = state.capabilities;
+  let normalized = source === "local" ? "local" : "server";
+  if (!canDownload && canFlash) normalized = "local";
+  else if (!canFlash && canDownload) normalized = "server";
   state.firmwareSource = normalized;
-  if (persist) {
+  if (persist && canFlash && canDownload) {
     writeStorage(STORAGE_SOURCE, normalized);
   }
   updateControlsState();
@@ -307,7 +310,10 @@ function doesVersionMatchBootloader(versionStr, bootloaderVer) {
 function updateDeviceBootloaderPill() {
   const pill = document.getElementById("server-device-bl-pill");
   if (!pill) return;
-  const bl = state.device?.mode === "download" ? state.deviceBootloaderVersion : null;
+  const bl =
+    state.capabilities.canFlash && state.device?.mode === "download"
+      ? state.deviceBootloaderVersion
+      : null;
   if (bl) {
     pill.textContent = `Device bootloader: ${bl}`;
     pill.hidden = false;
@@ -733,7 +739,10 @@ function renderArchiveSection() {
   if (zipNoteEl) {
     zipNoteEl.hidden = !isZipMode;
     if (isZipMode) {
-      zipNoteEl.textContent = `Downloads the full decrypted firmware archive (${info.decryptedFilename}, ${formatBytes(info.decryptedSize || 0)}) without extracting components. Full .zip archives cannot be flashed directly.`;
+      const flashNote = state.capabilities.canFlash
+        ? " Full .zip archives cannot be flashed directly."
+        : "";
+      zipNoteEl.textContent = `Downloads the full decrypted firmware archive (${info.decryptedFilename}, ${formatBytes(info.decryptedSize || 0)}) without extracting components.${flashNote}`;
     }
   }
   if (entriesWrapEl) {
@@ -762,7 +771,9 @@ function getRowDisplay(row) {
           ? "Keep user data (HOME_CSC)"
           : row.cscChoice === "csc"
             ? "Wipes user data (CSC)"
-            : "Both CSC packages (download only)",
+            : state.capabilities.canFlash
+              ? "Both CSC packages (download only)"
+              : "Both CSC packages",
       size: activeEntries.reduce((s, e) => s + (e.uncompressedSize || 0), 0),
       ariaLabel: `Include CSC (${activeNames})`,
       unrecognized: false,
@@ -774,7 +785,11 @@ function getRowDisplay(row) {
   return {
     badge: meta ? meta.badge : "FILE",
     name: entry.name,
-    sub: meta ? meta.label : "Extra archive file (download only)",
+    sub: meta
+      ? meta.label
+      : state.capabilities.canFlash
+        ? "Extra archive file (download only)"
+        : "Extra archive file",
     size: entry.uncompressedSize || 0,
     ariaLabel: `Include ${entry.name}`,
     unrecognized: !meta,
@@ -882,9 +897,20 @@ function renderEntryRows() {
 
 // --- Initialization ---
 export function setupServerPanel() {
+  const { canFlash, canDownload } = state.capabilities;
+  if (!canDownload) {
+    state.firmwareSource = "local";
+    updateControlsState();
+    return;
+  }
+
   // Restore persisted UI preferences
-  const savedSource = readStorage(STORAGE_SOURCE);
-  state.firmwareSource = savedSource === "local" ? "local" : "server";
+  if (canFlash) {
+    const savedSource = readStorage(STORAGE_SOURCE);
+    state.firmwareSource = savedSource === "local" ? "local" : "server";
+  } else {
+    state.firmwareSource = "server";
+  }
 
   const modelInput = document.getElementById("server-model");
   const regionInput = document.getElementById("server-region");

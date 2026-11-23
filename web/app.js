@@ -20,10 +20,12 @@ import {
   setVerbose,
   getBackendOptions,
   getVersion,
+  isBackendSupported,
   isWebUsbSupported,
   isWebSerialSupported,
 } from "./bridge.js";
 import { state } from "./ui/state.js";
+import { detectBrowserCapabilities } from "./ui/capabilities.js";
 import {
   setupLogScroller,
   setupLogPanel,
@@ -32,7 +34,11 @@ import {
   clearLog,
   saveLog,
 } from "./ui/log.js";
-import { updateControlsState, setupExclusiveGuards } from "./ui/controls.js";
+import {
+  applyCapabilityLayout,
+  updateControlsState,
+  setupExclusiveGuards,
+} from "./ui/controls.js";
 import {
   renderPackageSlots,
   handleSkipMd5Change,
@@ -80,8 +86,19 @@ async function setupWasmAndEvents() {
     }
     appendLog(`samloader-web version: ${version}`);
 
-    const backendOptions = await getBackendOptions();
+    const allBackendOptions = await getBackendOptions();
+    const backendOptions = allBackendOptions.filter((b) => isBackendSupported(b.id));
     appendLog(`Available backends: ${backendOptions.map((b) => b.id).join(", ") || "none"}`);
+
+    const canFlash = backendOptions.length > 0;
+    if (state.capabilities.canFlash !== canFlash) {
+      state.capabilities.canFlash = canFlash;
+      applyCapabilityLayout();
+      updateControlsState();
+    }
+    appendLog(
+      `Browser capabilities: flashing=${state.capabilities.canFlash ? "supported" : "unsupported"}, downloading=${state.capabilities.canDownload ? "supported" : "unsupported"}`
+    );
 
     if (!backendOptions.some((b) => b.id === state.selectedBackend)) {
       const preferVcom = isWindows() && backendOptions.some((b) => b.id === "vcom");
@@ -118,7 +135,7 @@ async function setupWasmAndEvents() {
       });
     }
 
-    if (isWebUsbSupported()) {
+    if (canFlash && isWebUsbSupported()) {
       const onUsbHotplug = () => {
         if (state.selectedBackend === "nusb") {
           refreshPairedDevicesStatus();
@@ -127,7 +144,7 @@ async function setupWasmAndEvents() {
       navigator.usb.addEventListener("connect", onUsbHotplug);
       navigator.usb.addEventListener("disconnect", onUsbHotplug);
     }
-    if (isWebSerialSupported()) {
+    if (canFlash && isWebSerialSupported()) {
       const onSerialHotplug = () => {
         if (state.selectedBackend === "vcom") {
           refreshPairedDevicesStatus();
@@ -193,7 +210,9 @@ async function setupWasmAndEvents() {
     document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
     document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
 
-    await refreshPairedDevicesStatus();
+    if (state.capabilities.canFlash) {
+      await refreshPairedDevicesStatus();
+    }
   } catch (err) {
     reportError(`WASM Initialization Error: ${err}`);
   }
@@ -201,7 +220,14 @@ async function setupWasmAndEvents() {
 
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
+  state.capabilities = detectBrowserCapabilities();
   setupThemeToggle();
+  applyCapabilityLayout();
+
+  if (!state.capabilities.canFlash && !state.capabilities.canDownload) {
+    return;
+  }
+
   setupLogPanel();
   setupFlashPanel();
   renderPackageSlots();
