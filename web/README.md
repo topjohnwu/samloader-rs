@@ -25,7 +25,7 @@ The userscript activates only on pages containing `<meta name="samloader-fus-bri
 
 | Feature | Chromium (Chrome / Edge / Brave / Opera) | Firefox / Safari |
 | --- | --- | --- |
-| Firmware Lookup, Inspect & Download Only | Direct disk writes via File System Access API (`showSaveFilePicker` / `showDirectoryPicker`) | OPFS staging followed by browser file download |
+| Firmware Lookup, Inspect & Download Only | Direct resumable disk writes via File System Access API (`showDirectoryPicker`) | OPFS staging followed by browser file download |
 | **Load into Local Flash** (after directory download) | Loads `FileSystemFileHandle`s directly into **Local Files** slots without re-reading MD5 | — |
 | Device Flashing (Odin / AT / **Download & Flash**) | Supported via WebUSB / Web Serial in a Secure Context (`http://localhost`, `127.0.0.1`, or `https://`) | WebUSB / Web Serial unavailable (Debug `Mock Device` only if built with `--features mock`) |
 

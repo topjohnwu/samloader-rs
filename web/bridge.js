@@ -480,7 +480,7 @@ export async function fusInspectFirmware(model, region, version, transport) {
 /**
  * Downloads and decrypts (or extracts) firmware from FUS into the specified browser storage target.
  * @param {{ model: string, region: string, version: string, mode: "zip" | "entries", entryNames?: string[], concurrency?: number, force?: boolean }} params
- * @param {{ kind: "opfs" | "directory" | "file", buildKey?: string, meta?: object, dirHandle?: FileSystemDirectoryHandle, fileHandle?: FileSystemFileHandle }} target
+ * @param {{ kind: "opfs" | "directory", buildKey?: string, meta?: object, dirHandle?: FileSystemDirectoryHandle }} target
  * @param {Function} transport JS HTTP transport callback
  * @param {(event: object) => void} onProgress Progress/warning callback
  * @param {AbortSignal} [signal] Optional abort signal

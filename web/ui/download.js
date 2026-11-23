@@ -22,18 +22,6 @@ import {
 } from "../bridge.js";
 import { openBridgePort } from "../fus_bridge.js";
 import { state } from "./state.js";
-
-function hasDirectoryPicker() {
-  return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
-}
-
-function hasSaveFilePicker() {
-  return typeof window !== "undefined" && typeof window.showSaveFilePicker === "function";
-}
-
-function hasOpfs() {
-  return typeof navigator !== "undefined" && typeof navigator.storage?.getDirectory === "function";
-}
 import { announce, formatBytes, formatDuration } from "./util.js";
 import { appendLog, reportError } from "./log.js";
 import { runExclusive, runExclusiveWithSetup, updateControlsState } from "./controls.js";
@@ -47,6 +35,14 @@ import {
   showOperationResult,
   updateOperationProgress,
 } from "./flash.js";
+
+function hasDirectoryPicker() {
+  return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+}
+
+function hasOpfs() {
+  return typeof navigator !== "undefined" && typeof navigator.storage?.getDirectory === "function";
+}
 
 export const COMPONENT_META = {
   bl: { badge: "BL", slot: "BL", label: "Bootloader" },
@@ -432,10 +428,7 @@ async function performDownload({ target, params, statusText, cancelLog }) {
     await refreshOpfsCacheBanner();
   }
   if (outcome.status === "cancelled") {
-    const cancelMsg =
-      target.kind === "file"
-        ? "Download cancelled."
-        : "Download cancelled — progress saved for resume.";
+    const cancelMsg = "Download cancelled — progress saved for resume.";
     showOperationResult("warning", cancelMsg);
     announce("Download cancelled");
     appendLog(cancelLog || cancelMsg);
@@ -456,21 +449,15 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 
   if (mode === "entries" && selectedEntries.length === 0) return;
 
-  const isSingleFile = mode === "zip" || selectedEntries.length === 1;
-  const suggestedName =
-    mode === "zip" ? info.decryptedFilename : selectedEntries[0].name;
-
   await runExclusiveWithSetup(
     async () => {
       let target = null;
       let dirHandle = null;
 
-      // Pick file/directory handle synchronously from user gesture before async work
+      // Always pick a directory when available so single-file and full-ZIP downloads
+      // can store `.part` / `.part.meta` sidecars for resumable transfers.
       try {
-        if (isSingleFile && hasSaveFilePicker()) {
-          const fileHandle = await window.showSaveFilePicker({ suggestedName });
-          target = { kind: "file", fileHandle };
-        } else if (!isSingleFile && hasDirectoryPicker()) {
+        if (hasDirectoryPicker()) {
           dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
           target = { kind: "directory", dirHandle };
         }
@@ -524,16 +511,11 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
             if (hasOdin) {
               state.lastDownloadedDir = { dirHandle, files: result.files };
             }
-            showOperationResult(
-              "success",
-              `Downloaded ${result.files.length} file(s) to "${dirHandle.name}".`,
-              { showLoadIntoLocal: hasOdin }
-            );
-          } else if (target.kind === "file") {
-            showOperationResult(
-              "success",
-              `Download complete: ${result.files[0]?.name || suggestedName}.`
-            );
+            const summary =
+              result.files.length === 1
+                ? `Downloaded ${result.files[0].name} to "${dirHandle.name}".`
+                : `Downloaded ${result.files.length} file(s) to "${dirHandle.name}".`;
+            showOperationResult("success", summary, { showLoadIntoLocal: hasOdin });
           } else {
             const opfsFiles = await readWantedOpfsFiles(
               buildKey,

@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Browser storage adapters (OPFS `FileSystemSyncAccessHandle`, File System Access
-//! `FileSystemDirectoryHandle`, and single-file `FileSystemFileHandle`) plus OPFS
-//! staging manifest management.
+//! Browser storage adapters (OPFS `FileSystemSyncAccessHandle` and File System Access
+//! `FileSystemDirectoryHandle`) plus OPFS staging manifest management.
 
 use crate::{js_err_string, js_obj};
 use futures::channel::oneshot;
@@ -740,7 +739,6 @@ pub(crate) enum DownloadTarget {
         meta: OpfsBuildMeta,
     },
     Directory(FileSystemDirectoryHandle),
-    File(FileSystemFileHandle),
 }
 
 impl DownloadTarget {
@@ -792,15 +790,6 @@ impl DownloadTarget {
                     })?;
                 Ok(Self::Directory(handle))
             }
-            "file" => {
-                let handle = js_sys::Reflect::get(val, &"fileHandle".into())
-                    .map_err(|e| err_str("target.fileHandle", e))?
-                    .dyn_into::<FileSystemFileHandle>()
-                    .map_err(|_| {
-                        "File storage target requires a valid FileSystemFileHandle".to_string()
-                    })?;
-                Ok(Self::File(handle))
-            }
             other => Err(format!("Unsupported storage target kind: {other}")),
         }
     }
@@ -815,7 +804,6 @@ pub(crate) enum DownloadStorage {
         dir: FileSystemDirectoryHandle,
         supports_move: Cell<Option<bool>>,
     },
-    SingleFile(FileSystemFileHandle),
 }
 
 struct OpenedPartDir {
@@ -940,7 +928,6 @@ impl DownloadStorage {
                 dir: dir.clone(),
                 supports_move: Cell::new(None),
             }),
-            DownloadTarget::File(fh) => Ok(Self::SingleFile(fh.clone())),
         }
     }
 
@@ -955,7 +942,6 @@ impl DownloadStorage {
                 dir_is_complete(files_dir, filename, min_size, max_size).await
             }
             Self::Directory { dir, .. } => dir_is_complete(dir, filename, min_size, max_size).await,
-            Self::SingleFile(_) => Ok(false),
         }
     }
 
@@ -1014,10 +1000,6 @@ impl DownloadStorage {
                     pending_meta: None,
                 }))
             }
-            Self::SingleFile(fh) => {
-                let writable = create_writable(fh, false).await?;
-                Ok(PartHandle::SingleFile(writable))
-            }
         }
     }
 }
@@ -1062,7 +1044,6 @@ impl DirectoryPartHandle {
 pub(crate) enum PartHandle {
     Opfs(OpfsPartHandle),
     Directory(DirectoryPartHandle),
-    SingleFile(FileSystemWritableFileStream),
 }
 
 impl PartHandle {
@@ -1081,7 +1062,6 @@ impl PartHandle {
                     .unchecked_into();
                 Ok(file.size() as u64)
             }
-            Self::SingleFile(_) => Ok(0),
         }
     }
 
@@ -1110,7 +1090,6 @@ impl PartHandle {
                     .map_err(|e| err_str("Blob.arrayBuffer()", e))?;
                 Ok(js_sys::Uint8Array::new(&ab).to_vec())
             }
-            Self::SingleFile(_) => Ok(Vec::new()),
         }
     }
 
@@ -1140,7 +1119,6 @@ impl PartHandle {
                 };
                 Ok(Some(read_file_bytes(&file).await?))
             }
-            Self::SingleFile(_) => Ok(None),
         }
     }
 
@@ -1174,15 +1152,6 @@ impl PartHandle {
                 }
                 Ok(())
             }
-            Self::SingleFile(w) => {
-                let promise = w
-                    .truncate_with_f64(new_size as f64)
-                    .map_err(|e| err_str("writable.truncate()", e))?;
-                JsFuture::from(promise)
-                    .await
-                    .map_err(|e| err_str("writable.truncate()", e))?;
-                Ok(())
-            }
         }
     }
 
@@ -1208,7 +1177,6 @@ impl PartHandle {
                 let active = h.ensure_writable().await?;
                 write_positioned_writable(active, offset, chunk).await
             }
-            Self::SingleFile(w) => write_positioned_writable(w, offset, chunk).await,
         }
     }
 
@@ -1259,7 +1227,6 @@ impl PartHandle {
                 h.pending_meta = Some(meta_bytes.to_vec());
                 Ok(())
             }
-            Self::SingleFile(_) => Ok(()),
         }
     }
 
@@ -1281,7 +1248,6 @@ impl PartHandle {
                 h.flush_writable().await?;
                 finalize_part_dir(&h.part_dir).await
             }
-            Self::SingleFile(w) => close_writable(w).await,
         }
     }
 
@@ -1302,9 +1268,6 @@ impl PartHandle {
                 {
                     let _ = write_bytes_writable(&mh, &meta).await;
                 }
-            }
-            Self::SingleFile(w) => {
-                let _ = JsFuture::from(w.abort()).await;
             }
         }
     }
