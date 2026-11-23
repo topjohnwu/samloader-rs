@@ -12,29 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Samsung FUS bridge status, firmware lookup, archive inspection, and component selector.
+// Samsung Server panel DOM rendering, input normalization, preferences, and event wiring.
 
-import { fusFetchHistory, fusInspectFirmware } from "../app/bridge.js";
+import { hasDeviceInfo, onDeviceChange, queryDeviceInfo } from "../app/device.js";
+import { COMPONENT_META } from "../app/download.js";
+import { EXPECTED_BRIDGE_VERSION } from "../app/fus_bridge.js";
+import { appendLog, reportError } from "../app/logger.js";
 import {
-  EXPECTED_BRIDGE_VERSION,
-  detectFusBridge,
-  getMainThreadFusTransport,
-  isBridgeOutdated,
-  onFusBridgeReady,
-} from "../app/fus_bridge.js";
-import { state } from "./state.js";
-import { formatBytes } from "./util.js";
-import { appendLog, reportError } from "./log.js";
+  checkFirmwareVersions,
+  checkFusBridge,
+  clearInspectedArchive,
+  clearServerHistory,
+  doesVersionMatchBootloader,
+  fetchUserscriptSource,
+  getArchiveRows,
+  getSelectedEntriesInfo,
+  initBridgeAnnouncementListener,
+  inspectFirmwareVersion,
+  onServerChange,
+  setArchiveRowChecked,
+  setServerOutputMode,
+  setSmartCscChoice,
+} from "../app/server.js";
+import { state } from "../app/state.js";
 import { updateControlsState } from "./controls.js";
-import { hasDeviceInfo, queryAndShowDeviceInfo, setDeviceUpdateListener } from "./device.js";
 import {
-  COMPONENT_META,
   handleClearOpfsCache,
   handleDownloadAndFlash,
   handleDownloadOnly,
   handleLoadIntoLocalFlash,
-  refreshOpfsCacheBanner,
+  setupDownloadUi,
 } from "./download.js";
+import { formatBytes } from "./util.js";
 
 const STORAGE_SOURCE = "samloader.firmwareSource";
 const STORAGE_MODEL = "samloader.serverModel";
@@ -46,10 +55,6 @@ const SMART_CSC_CHOICES = [
   { value: "csc", label: "Wipe Data (CSC)" },
   { value: "both", label: "Both" },
 ];
-
-let archiveRows = [];
-let inspectGen = 0;
-let bridgeCheckInFlight = false;
 
 function readStorage(key) {
   try {
@@ -116,102 +121,7 @@ function setFirmwareSource(source, persist = true) {
   updateControlsState();
 }
 
-function applyBridgeStatus(status) {
-  const prev = state.fusBridge;
-  const connected = Boolean(status?.connected);
-  const version = typeof status?.version === "string" ? status.version : null;
-  const outdated = connected
-    ? Boolean(status?.outdated ?? isBridgeOutdated(version))
-    : false;
-  const next = {
-    checked: true,
-    connected,
-    version,
-    outdated,
-  };
-
-  const changed =
-    !prev.checked ||
-    prev.connected !== next.connected ||
-    prev.version !== next.version ||
-    prev.outdated !== next.outdated;
-
-  state.fusBridge = next;
-  if (changed) {
-    renderBridgeBanner();
-    updateControlsState();
-  }
-  return { prev, next, changed };
-}
-
-function setupBridgeAnnouncementListener() {
-  onFusBridgeReady((status) => {
-    const { prev, next, changed } = applyBridgeStatus(status);
-
-    if (changed && !bridgeCheckInFlight && prev.checked && !prev.connected && next.connected) {
-      if (next.outdated) {
-        appendLog(
-          `FUS Bridge detected (${next.version ? `v${next.version}` : "unknown version"}), but v${EXPECTED_BRIDGE_VERSION} is recommended. Update the userscript and reload.`
-        );
-      } else {
-        appendLog(`FUS Bridge detected: v${next.version ?? "?"}.`);
-      }
-    }
-  });
-}
-
 // --- FUS Bridge Status Banner ---
-export async function checkFusBridge({ quiet = false } = {}) {
-  const recheckBtn = document.getElementById("btn-recheck-bridge");
-  const feedbackEl = document.getElementById("fus-bridge-feedback");
-  if (!quiet) {
-    if (recheckBtn) {
-      recheckBtn.disabled = true;
-      recheckBtn.textContent = "Checking...";
-    }
-    if (feedbackEl) {
-      feedbackEl.textContent = "";
-      feedbackEl.hidden = true;
-    }
-  }
-
-  bridgeCheckInFlight = true;
-  try {
-    const status = await detectFusBridge();
-    applyBridgeStatus(status);
-  } catch {
-    applyBridgeStatus({ connected: false });
-  } finally {
-    bridgeCheckInFlight = false;
-    if (!quiet && recheckBtn) {
-      recheckBtn.disabled = false;
-      recheckBtn.textContent = "Recheck";
-    }
-  }
-
-  if (state.fusBridge.connected && state.fusBridge.outdated) {
-    const installedLabel = state.fusBridge.version
-      ? `v${state.fusBridge.version}`
-      : "an unknown version";
-    const msg = `FUS Bridge userscript is outdated (installed ${installedLabel}; expected v${EXPECTED_BRIDGE_VERSION}). Update the userscript and click Reload Page.`;
-    if (!quiet && feedbackEl) {
-      feedbackEl.textContent = msg;
-      feedbackEl.hidden = false;
-    }
-    appendLog(msg);
-  } else if (!quiet && state.fusBridge.connected) {
-    appendLog(`FUS Bridge detected: v${state.fusBridge.version ?? "?"}.`);
-  } else if (!quiet) {
-    const msg =
-      "FUS Bridge not detected yet. If you just installed or updated the userscript, click Reload Page so your userscript manager activates it.";
-    if (feedbackEl) {
-      feedbackEl.textContent = msg;
-      feedbackEl.hidden = false;
-    }
-    appendLog(msg);
-  }
-}
-
 function renderBridgeBanner() {
   const setupEl = document.getElementById("fus-bridge-setup");
   const connectedEl = document.getElementById("fus-bridge-connected");
@@ -274,11 +184,7 @@ async function handleCopyUserscript(btn) {
   const originalLabel = btn.textContent;
   btn.disabled = true;
   try {
-    const resp = await fetch("samloader-fus-bridge.user.js", { cache: "no-store" });
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const source = await resp.text();
+    const source = await fetchUserscriptSource();
     if (!navigator.clipboard?.writeText) {
       throw new Error("Clipboard API is unavailable in this browser context");
     }
@@ -296,15 +202,7 @@ async function handleCopyUserscript(btn) {
   }
 }
 
-// --- DVIF Auto-Fill & Bootloader Matching ---
-function doesVersionMatchBootloader(versionStr, bootloaderVer) {
-  if (!versionStr || !bootloaderVer) return false;
-  const target = bootloaderVer.trim().toUpperCase();
-  if (!target) return false;
-  const parts = versionStr.split("/").map((p) => p.trim().toUpperCase());
-  return parts[0] === target || parts[3] === target;
-}
-
+// --- DVIF Auto-Fill & Bootloader Pill ---
 function updateDeviceBootloaderPill() {
   const pill = document.getElementById("server-device-bl-pill");
   if (!pill) return;
@@ -329,15 +227,7 @@ function syncLookupInputsChange() {
     state.serverHistory &&
     (state.serverHistory.model !== model || state.serverHistory.region !== region)
   ) {
-    state.serverHistory = null;
-    const versionSection = document.getElementById("server-version-section");
-    const versionSelect = document.getElementById("server-version-select");
-    if (versionSelect?.value === "__custom__") {
-      renderVersionDropdown("__custom__");
-    } else {
-      if (versionSection) versionSection.hidden = true;
-      if (versionSelect) versionSelect.replaceChildren();
-    }
+    clearServerHistory();
   }
 
   if (
@@ -387,7 +277,7 @@ async function handleDetectFromDevice() {
   setLookupError("");
 
   if (!hasDeviceInfo()) {
-    await queryAndShowDeviceInfo();
+    await queryDeviceInfo();
   }
 
   const filled = applyDeviceFields({ overwrite: true });
@@ -400,7 +290,7 @@ async function handleDetectFromDevice() {
   refreshDeviceVersionState();
 }
 
-// --- Version Lookup & Inspection ---
+// --- Version Dropdown & Archive Rendering ---
 function appendVersionOption(parent, version) {
   const opt = document.createElement("option");
   opt.value = version;
@@ -462,242 +352,16 @@ function renderVersionDropdown(preferredValue) {
   }
 }
 
-function clearInspectedArchive() {
-  inspectGen++;
-  state.serverInspect = null;
-  archiveRows = [];
-  const loadingEl = document.getElementById("server-inspect-loading");
-  const archiveEl = document.getElementById("server-archive-section");
-  const listEl = document.getElementById("server-entries-list");
-  if (loadingEl) loadingEl.hidden = true;
-  if (archiveEl) archiveEl.hidden = true;
-  if (listEl) listEl.replaceChildren();
-  syncArchiveSelectionState();
-}
-
-async function handleCheckVersions(e) {
-  e.preventDefault();
-  if (state.isBusy || state.serverQuerying) return;
-  if (!state.fusBridge.connected) return;
-
-  const model = getLookupModel();
-  const region = getLookupRegion();
-  if (!model || !region) return;
-
-  writeStorage(STORAGE_MODEL, model);
-  writeStorage(STORAGE_REGION, region);
-  setLookupError("");
-  state.serverHistory = null;
-  const versionSectionEl = document.getElementById("server-version-section");
-  if (versionSectionEl) versionSectionEl.hidden = true;
-  clearInspectedArchive();
-
-  const checkBtn = document.getElementById("btn-check-versions");
-  if (checkBtn) checkBtn.textContent = "Checking…";
-
-  state.serverQuerying = true;
-  updateControlsState();
-  appendLog(`Checking Samsung FUS firmware versions for ${model} (${region})...`);
-
-  try {
-    const transport = await getMainThreadFusTransport();
-    const history = await fusFetchHistory(model, region, transport);
-    state.serverHistory = { ...history, model, region };
-
-    if (versionSectionEl) versionSectionEl.hidden = false;
-    updateDeviceBootloaderPill();
-    renderVersionDropdown(history.latest);
-
-    const count =
-      (history.latest ? 1 : 0) +
-      (history.previous?.length ?? 0) +
-      (history.beta?.length ?? 0);
-    appendLog(`Found ${count} firmware version(s); latest is ${history.latest}.`);
-
-    if (checkBtn) checkBtn.textContent = "Check Versions";
-    state.serverQuerying = false;
-    updateControlsState();
-
-    if (history.latest) {
-      await inspectFirmwareVersion(model, region, history.latest);
-    }
-  } catch (err) {
-    const msg = err?.message || String(err);
-    setLookupError(`Version lookup failed: ${msg}`);
-    reportError(`FUS version lookup failed: ${msg}`);
-    if (checkBtn) checkBtn.textContent = "Check Versions";
-    state.serverQuerying = false;
-    updateControlsState();
-  }
-}
-
-async function inspectFirmwareVersion(model, region, version) {
-  if (state.isBusy) return;
-  if (!model || !region || !version) return;
-  if (!state.fusBridge.connected) return;
-
-  const myGen = ++inspectGen;
-  setLookupError("");
-  state.serverInspect = null;
-  archiveRows = [];
-
-  const loadingEl = document.getElementById("server-inspect-loading");
-  const archiveEl = document.getElementById("server-archive-section");
-  if (archiveEl) archiveEl.hidden = true;
-  if (loadingEl) loadingEl.hidden = false;
-
-  state.serverQuerying = true;
-  syncArchiveSelectionState();
-  appendLog(`Inspecting firmware ${version} for ${model} (${region})...`);
-
-  try {
-    const transport = await getMainThreadFusTransport();
-    const info = await fusInspectFirmware(model, region, version, transport);
-    if (myGen !== inspectGen) return;
-
-    state.serverInspect = {
-      model,
-      region,
-      version: info.version || version,
-      info,
-    };
-    state.serverOutputMode = "entries";
-    document.querySelectorAll('input[name="server-output-mode"]').forEach((el) => {
-      el.checked = el.value === "entries";
-    });
-
-    buildArchiveRows(info.entries || []);
-    renderArchiveSection();
-    appendLog(
-      `Inspected ${info.decryptedFilename} (${formatBytes(info.decryptedSize)}, ${(info.entries || []).length} entries).`
-    );
-  } catch (err) {
-    if (myGen !== inspectGen) return;
-    const msg = err?.message || String(err);
-    setLookupError(`Inspect failed: ${msg}`);
-    reportError(`FUS inspect failed: ${msg}`);
-  } finally {
-    if (myGen === inspectGen) {
-      if (loadingEl) loadingEl.hidden = true;
-      state.serverQuerying = false;
-      syncArchiveSelectionState();
-    }
-  }
-}
-
-// --- Archive Component Selector ---
-function buildArchiveRows(entries) {
-  const homeCsc = entries.filter((e) => e.component === "home_csc");
-  const wipeCsc = entries.filter((e) => e.component === "csc");
-  const combineCsc = homeCsc.length === 1 && wipeCsc.length === 1;
-
-  let addedSmartCsc = false;
-  archiveRows = [];
-
-  for (const entry of entries) {
-    if (combineCsc && (entry.component === "home_csc" || entry.component === "csc")) {
-      if (!addedSmartCsc) {
-        addedSmartCsc = true;
-        archiveRows.push({
-          kind: "smart_csc",
-          checked: true,
-          cscChoice: "home_csc",
-          homeEntry: homeCsc[0],
-          wipeEntry: wipeCsc[0],
-        });
-      }
-      continue;
-    }
-
-    const defaultChecked = ["bl", "ap", "cp", "home_csc", "csc"].includes(entry.component);
-    archiveRows.push({
-      kind: "single",
-      entry,
-      checked: defaultChecked,
-    });
-  }
-}
-
-function getSelectedEntriesInfo() {
-  const selectedEntries = [];
-  let hasBothCsc = false;
-
-  for (const row of archiveRows) {
-    if (!row.checked) continue;
-    if (row.kind === "smart_csc") {
-      if (row.cscChoice === "home_csc") {
-        selectedEntries.push(row.homeEntry);
-      } else if (row.cscChoice === "csc") {
-        selectedEntries.push(row.wipeEntry);
-      } else {
-        selectedEntries.push(row.homeEntry, row.wipeEntry);
-        hasBothCsc = true;
-      }
-    } else {
-      selectedEntries.push(row.entry);
-    }
-  }
-
-  if (
-    !hasBothCsc &&
-    selectedEntries.some((e) => e.component === "home_csc") &&
-    selectedEntries.some((e) => e.component === "csc")
-  ) {
-    hasBothCsc = true;
-  }
-
-  const totalBytes = selectedEntries.reduce((sum, e) => sum + (e.uncompressedSize || 0), 0);
-  const odinEntries = selectedEntries.filter((e) => e.component !== null);
-  const hasCscWipe = selectedEntries.some((e) => e.component === "csc");
-  const hasUserdata = selectedEntries.some((e) => e.component === "userdata");
-
-  return {
-    selectedEntries,
-    odinEntries,
-    totalBytes,
-    hasBothCsc,
-    hasCscWipe,
-    hasUserdata,
-  };
-}
-
-function syncArchiveSelectionState() {
-  const { selectedEntries, odinEntries, totalBytes, hasBothCsc } = getSelectedEntriesInfo();
+function updateSelectionSummary(info) {
   const summaryEl = document.getElementById("server-entries-summary");
-
-  if (summaryEl) {
-    if (selectedEntries.length === 0) {
-      summaryEl.textContent = "No components selected";
-    } else {
-      const noun = selectedEntries.length === 1 ? "file" : "files";
-      summaryEl.textContent = `${selectedEntries.length} ${noun} selected · ${formatBytes(totalBytes)}`;
-    }
-  }
-
-  if (!state.serverInspect) {
-    state.serverSelection = {
-      validForDownload: false,
-      validForFlash: false,
-      hasBothCsc: false,
-      hasOdinComponent: false,
-    };
-  } else if (state.serverOutputMode === "zip") {
-    state.serverSelection = {
-      validForDownload: true,
-      validForFlash: false,
-      hasBothCsc: false,
-      hasOdinComponent: false,
-    };
+  if (!summaryEl || !info) return;
+  const { selectedEntries, totalBytes } = info;
+  if (selectedEntries.length === 0) {
+    summaryEl.textContent = "No components selected";
   } else {
-    state.serverSelection = {
-      validForDownload: selectedEntries.length > 0,
-      validForFlash: odinEntries.length > 0 && !hasBothCsc,
-      hasBothCsc,
-      hasOdinComponent: odinEntries.length > 0,
-    };
+    const noun = selectedEntries.length === 1 ? "file" : "files";
+    summaryEl.textContent = `${selectedEntries.length} ${noun} selected · ${formatBytes(totalBytes)}`;
   }
-
-  updateControlsState();
 }
 
 function renderArchiveSection() {
@@ -749,7 +413,8 @@ function renderArchiveSection() {
 
   renderEntryRows();
   archiveEl.hidden = false;
-  syncArchiveSelectionState();
+  updateSelectionSummary(getSelectedEntriesInfo());
+  updateControlsState();
 }
 
 function getRowDisplay(row) {
@@ -799,7 +464,7 @@ function renderEntryRows() {
   if (!listEl) return;
   listEl.replaceChildren();
 
-  archiveRows.forEach((row, idx) => {
+  getArchiveRows().forEach((row, idx) => {
     const item = document.createElement("div");
     item.setAttribute("role", "listitem");
 
@@ -851,9 +516,8 @@ function renderEntryRows() {
     applyRowDisplay();
 
     checkbox.addEventListener("change", () => {
-      row.checked = checkbox.checked;
-      item.classList.toggle("entry-selected", row.checked);
-      syncArchiveSelectionState();
+      setArchiveRowChecked(idx, checkbox.checked);
+      item.classList.toggle("entry-selected", checkbox.checked);
     });
 
     if (row.kind === "smart_csc") {
@@ -871,10 +535,8 @@ function renderEntryRows() {
         radio.value = opt.value;
         radio.checked = row.cscChoice === opt.value;
         radio.addEventListener("change", () => {
-          row.cscChoice = opt.value;
-          row.checked = true;
+          setSmartCscChoice(idx, opt.value);
           applyRowDisplay();
-          syncArchiveSelectionState();
         });
         const span = document.createElement("span");
         span.textContent = opt.label;
@@ -893,6 +555,99 @@ function renderEntryRows() {
   });
 }
 
+function handleServerEvent(event) {
+  switch (event.type) {
+    case "bridge":
+      renderBridgeBanner();
+      updateControlsState();
+      break;
+    case "bridge_checking": {
+      const recheckBtn = document.getElementById("btn-recheck-bridge");
+      const feedbackEl = document.getElementById("fus-bridge-feedback");
+      if (recheckBtn) {
+        recheckBtn.disabled = event.checking;
+        recheckBtn.textContent = event.checking ? "Checking..." : "Recheck";
+      }
+      if (event.checking && feedbackEl) {
+        feedbackEl.textContent = "";
+        feedbackEl.hidden = true;
+      }
+      break;
+    }
+    case "bridge_feedback": {
+      const feedbackEl = document.getElementById("fus-bridge-feedback");
+      if (feedbackEl && event.message) {
+        feedbackEl.textContent = event.message;
+        feedbackEl.hidden = false;
+      }
+      break;
+    }
+    case "querying_history": {
+      const checkBtn = document.getElementById("btn-check-versions");
+      if (checkBtn) {
+        checkBtn.textContent = event.active ? "Checking…" : "Check Versions";
+      }
+      if (event.active) {
+        const versionSectionEl = document.getElementById("server-version-section");
+        if (versionSectionEl) versionSectionEl.hidden = true;
+      }
+      updateControlsState();
+      break;
+    }
+    case "history": {
+      const versionSectionEl = document.getElementById("server-version-section");
+      if (versionSectionEl) versionSectionEl.hidden = false;
+      updateDeviceBootloaderPill();
+      renderVersionDropdown(event.history?.latest);
+      break;
+    }
+    case "history_cleared": {
+      const versionSection = document.getElementById("server-version-section");
+      const versionSelect = document.getElementById("server-version-select");
+      if (versionSelect?.value === "__custom__") {
+        renderVersionDropdown("__custom__");
+      } else {
+        if (versionSection) versionSection.hidden = true;
+        if (versionSelect) versionSelect.replaceChildren();
+      }
+      break;
+    }
+    case "inspecting": {
+      const loadingEl = document.getElementById("server-inspect-loading");
+      const archiveEl = document.getElementById("server-archive-section");
+      if (event.active && archiveEl) archiveEl.hidden = true;
+      if (loadingEl) loadingEl.hidden = !event.active;
+      break;
+    }
+    case "inspect_ready": {
+      document.querySelectorAll('input[name="server-output-mode"]').forEach((el) => {
+        el.checked = el.value === "entries";
+      });
+      renderArchiveSection();
+      break;
+    }
+    case "output_mode":
+      renderArchiveSection();
+      break;
+    case "inspect_cleared": {
+      const loadingEl = document.getElementById("server-inspect-loading");
+      const archiveEl = document.getElementById("server-archive-section");
+      const listEl = document.getElementById("server-entries-list");
+      if (loadingEl) loadingEl.hidden = true;
+      if (archiveEl) archiveEl.hidden = true;
+      if (listEl) listEl.replaceChildren();
+      break;
+    }
+    case "selection":
+      updateSelectionSummary(event.info);
+      updateControlsState();
+      break;
+    case "lookup_error":
+      setLookupError(event.message);
+      break;
+  }
+}
+
 // --- Initialization ---
 export function setupServerPanel() {
   const { canFlash, canDownload } = state.capabilities;
@@ -901,6 +656,15 @@ export function setupServerPanel() {
     updateControlsState();
     return;
   }
+
+  onServerChange(handleServerEvent);
+  onDeviceChange((event) => {
+    if (event.type === "info" || event.type === "status") {
+      handleDeviceUpdated({ dvifQueried: Boolean(event.dvifQueried) });
+    }
+  });
+  initBridgeAnnouncementListener();
+  setupDownloadUi();
 
   // Restore persisted UI preferences
   if (canFlash) {
@@ -944,10 +708,10 @@ export function setupServerPanel() {
     window.location.reload();
   });
   document.getElementById("btn-recheck-bridge")?.addEventListener("click", () => {
-    checkFusBridge();
+    void checkFusBridge();
   });
   document.querySelectorAll(".btn-copy-userscript").forEach((btn) => {
-    btn.addEventListener("click", () => handleCopyUserscript(btn));
+    btn.addEventListener("click", () => void handleCopyUserscript(btn));
   });
   document.getElementById("btn-clear-opfs-cache")?.addEventListener("click", handleClearOpfsCache);
 
@@ -971,7 +735,15 @@ export function setupServerPanel() {
 
   document
     .getElementById("server-lookup-form")
-    ?.addEventListener("submit", handleCheckVersions);
+    ?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const model = getLookupModel();
+      const region = getLookupRegion();
+      if (!model || !region) return;
+      writeStorage(STORAGE_MODEL, model);
+      writeStorage(STORAGE_REGION, region);
+      await checkFirmwareVersions(model, region);
+    });
 
   // Manual custom version toggle
   document
@@ -1028,8 +800,7 @@ export function setupServerPanel() {
   document.querySelectorAll('input[name="server-output-mode"]').forEach((radio) => {
     radio.addEventListener("change", () => {
       if (!radio.checked) return;
-      state.serverOutputMode = radio.value === "zip" ? "zip" : "entries";
-      renderArchiveSection();
+      setServerOutputMode(radio.value);
     });
   });
 
@@ -1044,19 +815,16 @@ export function setupServerPanel() {
   // Action bar buttons
   document
     .getElementById("btn-download-only")
-    ?.addEventListener("click", () => handleDownloadOnly(getSelectedEntriesInfo()));
+    ?.addEventListener("click", () => void handleDownloadOnly(getSelectedEntriesInfo()));
   document
     .getElementById("btn-download-flash")
-    ?.addEventListener("click", () => handleDownloadAndFlash(getSelectedEntriesInfo()));
+    ?.addEventListener("click", () => void handleDownloadAndFlash(getSelectedEntriesInfo()));
   document
     .getElementById("btn-load-into-local")
-    ?.addEventListener("click", () => handleLoadIntoLocalFlash(() => setFirmwareSource("local", true)));
-
-  // Sync with connected device DVIF & status updates
-  setDeviceUpdateListener(handleDeviceUpdated);
-  setupBridgeAnnouncementListener();
+    ?.addEventListener("click", () =>
+      void handleLoadIntoLocalFlash(() => setFirmwareSource("local", true))
+    );
 
   updateControlsState();
-  checkFusBridge({ quiet: true });
-  refreshOpfsCacheBanner();
+  void checkFusBridge({ quiet: true });
 }

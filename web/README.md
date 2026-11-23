@@ -85,23 +85,32 @@ web/
 ├── styles.css                   # Material Design 3 styling (light/dark tokens)
 ├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
 ├── app/
-│   ├── app.js                   # Entry point, WASM init, device hotplug & events
+│   ├── app.js                   # Entry point, WASM init, device hotplug & UI wiring
 │   ├── bridge.js                # JS facade over wasm-bindgen exports in pkg/
-│   └── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
+│   ├── capabilities.js          # Browser capability detection (flashing & downloading)
+│   ├── device.js                # Paired device state, DVIF queries, PIT dumps & reboots
+│   ├── download.js              # OPFS staging, worker download & Download & Flash flows
+│   ├── exclusive.js             # Exclusive operation guard, wake lock & beforeunload
+│   ├── flash.js                 # Flash job orchestration & EMA speed/ETA tracking
+│   ├── format.js                # Byte-size and duration formatting helpers
+│   ├── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
+│   ├── logger.js                # App logging and error-reporting facade over WASM buffer
+│   ├── server.js                # FUS bridge probing, history lookup, inspect & selection state
+│   ├── slots.js                 # Odin slot/partition state & sequential MD5 worker queue
+│   └── state.js                 # Shared application state and Odin slot metadata
 ├── workers/
 │   ├── download.js              # Module Web Worker running concurrent FUS downloads & DEFLATE
 │   └── md5.js                   # Module Web Worker running streaming .tar.md5 checks
 ├── ui/
-│   ├── state.js                 # Shared client UI state and Odin slot metadata
-│   ├── controls.js              # View visibility, button enablement, wake lock & beforeunload
-│   ├── device.js                # WebUSB/WebSerial pairing, DVIF telemetry, PIT, AT/Odin reboots
-│   ├── slots.js                 # Local package slots, MD5 queue, individual partitions
-│   ├── flash.js                 # Shared flashing flow, progress speed/ETA, outcome banner
-│   ├── server.js                # Samsung Server lookup, ZIP inspect & component selector
-│   ├── download.js              # OPFS cache banner, worker downloads & Download & Flash flows
-│   ├── log.js                   # Virtualized Rust-backed activity log viewer
+│   ├── controls.js              # View visibility, button enablement & header/advanced controls
+│   ├── device.js                # Device list, DVIF telemetry grid & PIT save UI
+│   ├── download.js              # OPFS cache banner, picker/wipe prompts & progress UI
+│   ├── flash.js                 # Flashing progress bar, outcome banner & action bar UI
+│   ├── log.js                   # Virtualized Rust-backed activity log panel
+│   ├── server.js                # Samsung Server panel rendering, preferences & events
+│   ├── slots.js                 # Package slot dropzones, MD5 badges & sortable partitions UI
 │   ├── theme.js                 # Light / Dark / System theme switcher
-│   └── util.js                  # Byte/duration formatting and file helpers
+│   └── util.js                  # DOM progress/accessibility helpers and file download trigger
 ├── fonts/                       # Self-hosted DM Sans, Roboto, and Roboto Mono fonts
 └── pkg/                         # Generated wasm-bindgen JS/WASM bundle (built by xtask)
 ```

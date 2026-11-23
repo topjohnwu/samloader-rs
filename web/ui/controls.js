@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Enabling controls for the current state, and guarding exclusive device operations.
+// Layout visibility, control enablement, and header/advanced option bindings.
 
-import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
+import { refreshPairedDevicesStatus } from "../app/device.js";
+import { setBusyChangeListener } from "../app/exclusive.js";
+import { appendLog } from "../app/logger.js";
+import { PACKAGE_SLOTS, SLOTS, state } from "../app/state.js";
 
 // Lists the advanced options that differ from their defaults next to the folded
 // "Advanced options" heading, so that e.g. a NAND erase is never hidden from view
@@ -33,6 +36,31 @@ function updateAdvancedSummary() {
   el.textContent = active.join(" · ");
   el.title = el.textContent;
   el.hidden = active.length === 0;
+}
+
+export function setAppVersion(version) {
+  const versionEl = document.getElementById("app-version");
+  if (versionEl) {
+    versionEl.textContent = `v${version}`;
+    versionEl.hidden = false;
+  }
+}
+
+export function renderBackendOptions(backendOptions, selectedBackend) {
+  const backendSelect = document.getElementById("backend-select");
+  if (!backendSelect) return;
+  backendSelect.replaceChildren(
+    ...backendOptions.map(({ id, label }) => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = label;
+      return opt;
+    })
+  );
+  if (selectedBackend !== null) {
+    backendSelect.value = selectedBackend;
+  }
+  backendSelect.disabled = state.isBusy || backendOptions.length === 0;
 }
 
 // Applies static layout visibility and copy based on detected browser capabilities.
@@ -349,70 +377,26 @@ export function updateControlsState() {
   });
 }
 
-// --- Exclusive Device Operations ---
-// While an operation holds the device, keep the screen (and thus the USB link) awake,
-// and warn before the tab is closed or reloaded, since that aborts the operation midway.
-let wakeLock = null;
+export function setupControlsPanel() {
+  setBusyChangeListener(() => updateControlsState());
 
-async function acquireWakeLock() {
-  if (wakeLock || !navigator.wakeLock) return;
-  try {
-    const lock = await navigator.wakeLock.request("screen");
-    lock.addEventListener("release", () => {
-      if (wakeLock === lock) wakeLock = null;
+  document.getElementById("backend-select")?.addEventListener("change", async (e) => {
+    state.selectedBackend = e.target.value;
+    appendLog(`Backend selected: ${state.selectedBackend}`);
+    await refreshPairedDevicesStatus();
+  });
+
+  const rebootModeSelect = document.getElementById("opt-reboot-mode");
+  if (rebootModeSelect) {
+    rebootModeSelect.value = state.rebootMode;
+    rebootModeSelect.addEventListener("change", (e) => {
+      state.rebootMode = e.target.value;
+      appendLog(`When done: ${e.target.selectedOptions[0]?.text ?? state.rebootMode}`);
     });
-    wakeLock = lock;
-  } catch {
-    // Wake lock may be denied (e.g. battery saver); the operation proceeds without it
   }
-}
 
-async function releaseWakeLock() {
-  const lock = wakeLock;
-  wakeLock = null;
-  try {
-    await lock?.release();
-  } catch {
-    // Already released by the browser
-  }
-}
-
-export function setupExclusiveGuards() {
-  window.addEventListener("beforeunload", (e) => {
-    if (state.isBusy) {
-      e.preventDefault();
-      e.returnValue = "";
-    }
-  });
-  // Browsers drop the wake lock whenever the page is hidden; re-acquire it on return
-  document.addEventListener("visibilitychange", () => {
-    if (state.isBusy && document.visibilityState === "visible") {
-      acquireWakeLock();
-    }
-  });
-}
-
-export async function runExclusiveWithSetup(prepareFn, fn) {
-  if (state.isBusy) return;
-  state.isBusy = true;
-  updateControlsState();
-  try {
-    const setupResult = await prepareFn();
-    if (setupResult === false) return;
-    await acquireWakeLock();
-    await fn(setupResult);
-  } finally {
-    state.isBusy = false;
-    await releaseWakeLock();
-    updateControlsState();
-  }
-}
-
-export async function runExclusive(fn) {
-  await runExclusiveWithSetup(
-    () => true,
-    async () => {
-      await fn();
-    }
-  );
+  // Advanced options affect whether there is anything to flash, and their summary
+  const advancedOptions = document.getElementById("advanced-options");
+  advancedOptions?.addEventListener("input", updateControlsState);
+  advancedOptions?.addEventListener("change", updateControlsState);
 }

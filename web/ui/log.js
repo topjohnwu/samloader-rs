@@ -12,22 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The activity log, rendered by the virtualized log viewport in Rust.
+// The activity log panel, rendered by the virtualized log viewport in Rust.
 
 import {
-  appendWasmLog,
   clearWasmLog,
   exportWasmLogs,
   lastWasmLogLine,
-  renderLogViewport,
   logLineHeight,
+  renderLogViewport,
+  setVerbose,
 } from "../app/bridge.js";
+import { appendLog, setLogHandlers } from "../app/logger.js";
+import { state } from "../app/state.js";
 import { downloadFile, localTimestampForFilename } from "./util.js";
 
 // --- Virtualized Activity Log Scroller ---
 let logStickToBottom = true;
-
 let logFlushScheduled = false;
+
+function renderPreWasmLines(queuedLines) {
+  // WASM is still initializing; show the queued lines until Rust takes over rendering
+  const logElem = document.getElementById("log-output");
+  if (logElem) {
+    const separator = logElem.textContent ? "\n" : "";
+    logElem.textContent += `${separator}${queuedLines.join("\n")}`;
+  }
+  const preview = document.getElementById("log-preview");
+  if (preview) preview.textContent = queuedLines.at(-1) ?? "";
+}
 
 function flushLogViewport(stickToBottom = logStickToBottom) {
   const container = document.querySelector(".log-terminal");
@@ -35,7 +47,7 @@ function flushLogViewport(stickToBottom = logStickToBottom) {
   if (!container || !logElem) return;
 
   // Keep the latest line visible in the header while the log is folded. Before WASM
-  // is initialized, appendLog() shows the queued lines instead.
+  // is initialized, renderPreWasmLines() shows the queued lines instead.
   const preview = document.getElementById("log-preview");
   const lastLine = lastWasmLogLine();
   if (preview && lastLine !== null) preview.textContent = lastLine;
@@ -115,34 +127,6 @@ export function openLog() {
   setLogExpanded(true);
 }
 
-export function setupLogPanel() {
-  const toggle = document.getElementById("log-toggle");
-  toggle?.addEventListener("click", () => {
-    setLogExpanded(toggle.getAttribute("aria-expanded") !== "true");
-  });
-}
-
-// --- Log Buffer ---
-export function appendLog(msg) {
-  const queuedLines = appendWasmLog(msg);
-  if (queuedLines) {
-    // WASM is still initializing; show the queued lines until Rust takes over rendering
-    const logElem = document.getElementById("log-output");
-    if (logElem) {
-      const separator = logElem.textContent ? "\n" : "";
-      logElem.textContent += `${separator}${queuedLines.join("\n")}`;
-    }
-    const preview = document.getElementById("log-preview");
-    if (preview) preview.textContent = queuedLines.at(-1) ?? "";
-  }
-}
-
-// Logs an error and unfolds the log, so the failure is not hidden
-export function reportError(msg) {
-  appendLog(msg);
-  openLog();
-}
-
 export function clearLog() {
   clearWasmLog();
   logStickToBottom = true;
@@ -155,4 +139,26 @@ export function saveLog() {
     `${exportWasmLogs()}\n`,
     "text/plain"
   );
+}
+
+export function setupLogPanel() {
+  setLogHandlers({
+    onPreWasmLog: renderPreWasmLines,
+    onOpenLog: openLog,
+  });
+
+  const toggle = document.getElementById("log-toggle");
+  toggle?.addEventListener("click", () => {
+    setLogExpanded(toggle.getAttribute("aria-expanded") !== "true");
+  });
+
+  document.getElementById("opt-verbose")?.addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    state.verbose = enabled;
+    await setVerbose(enabled);
+    appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
+  });
+
+  document.getElementById("btn-clear-log")?.addEventListener("click", clearLog);
+  document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
 }

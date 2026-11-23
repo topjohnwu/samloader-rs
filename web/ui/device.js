@@ -12,43 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The connected device panel and device operations (DVIF, PIT, reboots).
+// Connected device UI rendering and button wiring.
 
 import {
-  isBackendSupported,
-  getPairedDevices,
-  pairDownloadDevice,
-  pairSamsungDevice,
-  detectDownloadDevice,
-  rebootToDownloadAt,
-  rebootFromOdin,
-  printPit,
-  deviceMode,
-} from "../app/bridge.js";
-import { state } from "./state.js";
+  disconnectDevice,
+  dumpPit,
+  getLastPitDownload,
+  onDeviceChange,
+  pairDownload,
+  pairNormal,
+  queryDeviceInfo,
+  rebootOdin,
+  rebootToDownload,
+} from "../app/device.js";
+import { state } from "../app/state.js";
+import { updateControlsState } from "./controls.js";
 import { downloadFile } from "./util.js";
-import { appendLog, reportError, openLog } from "./log.js";
-import { updateControlsState, runExclusive } from "./controls.js";
 
-let deviceUpdateListener = null;
-
-export function setDeviceUpdateListener(listener) {
-  deviceUpdateListener = listener;
+function updateConnectionChip(connected, text) {
+  const chip = document.getElementById("connection-chip");
+  if (chip) {
+    chip.className = `status-chip ${connected ? "chip-connected" : "chip-disconnected"}`;
+    const label = chip.querySelector(".chip-label");
+    if (label) label.textContent = text;
+  }
 }
 
-function notifyDeviceUpdate(detail) {
-  deviceUpdateListener?.(detail);
-}
-
-// --- Device List & Hardware Info Rendering ---
 function renderDeviceInfo(info) {
   const gridEl = document.getElementById("device-info-grid");
   const boxEl = document.getElementById("device-info-box");
   if (!gridEl || !boxEl) return;
 
-  state.deviceModel = info.model ?? null;
-  state.deviceSalesCode = info.salesCode ?? null;
-  state.deviceBootloaderVersion = info.bootloaderVersion ?? null;
+  if (!info) {
+    gridEl.hidden = true;
+    gridEl.innerHTML = "";
+    boxEl.hidden = true;
+    boxEl.textContent = "";
+    return;
+  }
+
   if (info.fields.length > 0) {
     gridEl.innerHTML = "";
     info.fields.forEach(([label, val]) => {
@@ -78,24 +80,6 @@ function renderDeviceInfo(info) {
     boxEl.hidden = false;
     gridEl.hidden = true;
   }
-  notifyDeviceUpdate({ dvifQueried: true });
-}
-
-function clearDeviceInfo() {
-  state.deviceModel = null;
-  state.deviceSalesCode = null;
-  state.deviceBootloaderVersion = null;
-  const gridEl = document.getElementById("device-info-grid");
-  const boxEl = document.getElementById("device-info-box");
-  if (gridEl) {
-    gridEl.hidden = true;
-    gridEl.innerHTML = "";
-  }
-  if (boxEl) {
-    boxEl.hidden = true;
-    boxEl.textContent = "";
-  }
-  notifyDeviceUpdate({ dvifQueried: false });
 }
 
 function renderDeviceList() {
@@ -111,7 +95,6 @@ function renderDeviceList() {
     emptyEl.hidden = false;
     listWrap.hidden = true;
     updateControlsState();
-    notifyDeviceUpdate({ dvifQueried: false });
     return;
   }
 
@@ -171,7 +154,7 @@ function renderDeviceList() {
   disconnectBtn.innerHTML = "&times;";
   disconnectBtn.disabled = state.isBusy;
   disconnectBtn.addEventListener("click", () => {
-    handleDisconnectDevice(dev);
+    disconnectDevice(dev);
   });
 
   right.appendChild(badge);
@@ -181,231 +164,46 @@ function renderDeviceList() {
   listEl.appendChild(row);
 
   updateControlsState();
-  notifyDeviceUpdate({ dvifQueried: false });
 }
 
-async function handleDisconnectDevice(dev) {
-  if (state.isBusy) return;
-  try {
-    await dev.disconnect();
-    appendLog(`Disconnected device: ${dev.name}`);
-    await refreshPairedDevicesStatus();
-  } catch (err) {
-    reportError(`Failed to disconnect device: ${err}`);
-  }
+function savePit() {
+  const pit = getLastPitDownload();
+  if (!pit) return;
+  downloadFile(pit.filename, pit.data, "application/octet-stream");
 }
 
-export async function queryAndShowDeviceInfo() {
-  await runExclusive(async () => {
-    try {
-      appendLog("Querying Download Mode device info (DVIF)...");
-      const info = await detectDownloadDevice({
-        backend: state.selectedBackend,
-      });
-      renderDeviceInfo(info);
-      updateConnectionChip(true, "Device Ready");
-    } catch (err) {
-      reportError(`Detection failed: ${err}`);
-    }
-  });
-}
-
-let refreshGen = 0;
-
-// Identifies a paired device across refreshes. Web Serial ports have no serial number,
-// but unplugging a device still triggers a refresh without it, so swapping two identical
-// phones clears the device info in between.
-function deviceKey(backend, d) {
-  return `${backend}/${d.vendorId}:${d.productId}:${d.serialNumber ?? ""}`;
-}
-
-export function hasDeviceInfo() {
-  const gridEl = document.getElementById("device-info-grid");
-  const boxEl = document.getElementById("device-info-box");
-  return Boolean((gridEl && !gridEl.hidden) || (boxEl && !boxEl.hidden));
-}
-
-export async function refreshPairedDevicesStatus() {
-  // Refreshes may overlap (e.g. a backend switch while a hotplug refresh is pending);
-  // only the most recent one may update the UI.
-  const gen = ++refreshGen;
-  const backend = state.selectedBackend;
-  const summaryEl = document.getElementById("paired-devices-summary");
-
-  if (!backend) {
-    clearDeviceInfo();
-    state.device = null;
-    if (summaryEl) summaryEl.textContent = "No USB backend is available in this build";
-    updateConnectionChip(false, "No Backend");
-    renderDeviceList();
-    return;
-  }
-
-  if (!isBackendSupported(backend)) {
-    clearDeviceInfo();
-    state.device = null;
-    const label = backend === "vcom" ? "WebSerial" : "WebUSB";
-    if (summaryEl) summaryEl.textContent = `${label} is not supported in this browser`;
-    updateConnectionChip(false, `${label} Unavailable`);
-    renderDeviceList();
-    return;
-  }
-
-  let devices;
-  try {
-    devices = await getPairedDevices(backend);
-  } catch (err) {
-    if (gen === refreshGen) {
-      reportError(`Failed to enumerate paired device: ${err}`);
-    }
-    return;
-  }
-  if (gen !== refreshGen) return;
-
-  // Prefer a Download Mode device, so a Normal Mode device that happens to be listed
-  // first does not disable the Download Mode actions
-  const samsung = devices
-    .map((dev) => ({ dev, mode: deviceMode(dev.vendorId, dev.productId) }))
-    .filter(({ mode }) => mode !== undefined);
-  const { dev: d, mode } = samsung.find((s) => s.mode === "download") ?? samsung[0] ?? {};
-
-  // Only drop the queried device info when the device itself changed or disappeared
-  const key = d ? deviceKey(backend, d) : null;
-  const sameDevice = key !== null && key === state.device?.key;
-  if (!sameDevice) {
-    clearDeviceInfo();
-  }
-
-  if (!d) {
-    state.device = null;
-    if (summaryEl) {
-      summaryEl.textContent = "Connect a Samsung device in Download Mode or Normal Mode";
-    }
-    updateConnectionChip(false, "No Device");
-  } else {
-    const vid = d.vendorId.toString(16).padStart(4, "0");
-    const pid = d.productId.toString(16).padStart(4, "0");
-    const name =
-      d.productName ||
-      (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
-    const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
-    state.device = {
-      key,
-      name,
-      subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
-      mode,
-      disconnect: d.disconnect,
-    };
-    if (summaryEl) {
-      summaryEl.textContent =
-        mode === "download"
-          ? "Download Mode device paired"
-          : "Normal Mode device paired. Reboot it into Download Mode to flash firmware";
-    }
-    const ready = sameDevice && hasDeviceInfo();
-    updateConnectionChip(true, ready ? "Device Ready" : "Device Paired");
-  }
-  renderDeviceList();
-}
-
-export async function handlePairDownload() {
-  if (state.isBusy || !state.selectedBackend) return;
-  try {
-    appendLog(`Pairing Download Mode device via ${state.selectedBackend}...`);
-    await pairDownloadDevice(state.selectedBackend);
-    appendLog("Download Mode device paired successfully.");
-    await refreshPairedDevicesStatus();
-  } catch (err) {
-    appendLog(`Pairing failed: ${err}`);
-  }
-}
-
-export async function handlePairNormal() {
-  if (state.isBusy || !state.selectedBackend) return;
-  try {
-    appendLog(`Pairing Normal Mode device via ${state.selectedBackend}...`);
-    await pairSamsungDevice(state.selectedBackend);
-    appendLog("Normal Mode Samsung device paired.");
-    await refreshPairedDevicesStatus();
-  } catch (err) {
-    appendLog(`Pairing failed: ${err}`);
-  }
-}
-
-export async function handleRebootToDownload() {
-  await runExclusive(async () => {
-    try {
-      appendLog("Requesting reboot to Download Mode via AT interface...");
-      const sent = await rebootToDownloadAt({
-        backend: state.selectedBackend,
-      });
-      if (sent) {
-        appendLog(
-          "AT+SUDDLMOD=0,0 reboot command sent. Add the Download Mode device once it re-enumerates."
-        );
-      } else {
-        appendLog("Device is already in Download Mode (no AT command needed).");
+export function setupDevicePanel() {
+  onDeviceChange((event) => {
+    switch (event.type) {
+      case "info":
+        renderDeviceInfo(event.info);
+        if (event.info) {
+          updateConnectionChip(true, "Device Ready");
+        }
+        break;
+      case "status": {
+        const summaryEl = document.getElementById("paired-devices-summary");
+        if (summaryEl) summaryEl.textContent = event.summaryText;
+        updateConnectionChip(event.chipConnected, event.chipLabel);
+        renderDeviceList();
+        break;
       }
-    } catch (err) {
-      reportError(`Reboot command failed: ${err}`);
+      case "pit":
+        updateControlsState();
+        break;
     }
   });
-}
 
-// Reboots a Download Mode device over Odin into `target` ("normal" for Android, or
-// "download"), independent of the "When done" setting of flashing and PIT dumps.
-export async function handleRebootOdin(target) {
-  const label = target === "download" ? "Download Mode" : "Android";
-  await runExclusive(async () => {
-    try {
-      appendLog(`Rebooting device to ${label} via Odin...`);
-      await rebootFromOdin({
-        backend: state.selectedBackend,
-        rebootMode: target,
-      });
-      appendLog(`Reboot to ${label} command sent.`);
-    } catch (err) {
-      reportError(`Odin reboot failed: ${err}`);
-    }
-  });
-}
-
-export async function handleDumpPit() {
-  await runExclusive(async () => {
-    try {
-      appendLog("Downloading device PIT table...");
-      const pit = await printPit({
-        backend: state.selectedBackend,
-        rebootMode: state.rebootMode,
-      });
-      appendLog("--- PIT Table Output ---");
-      appendLog(pit.text);
-      lastPit = { data: pit.data, model: state.deviceModel };
-      state.hasLastPit = true;
-      updateControlsState();
-      // The PIT table is printed to the log, so show it
-      openLog();
-    } catch (err) {
-      reportError(`PIT dump failed: ${err}`);
-    }
-  });
-}
-
-// The most recently dumped PIT, kept after the device reboots so it can still be saved.
-// It is named after the device model if it was queried (DVIF) before dumping.
-let lastPit = null;
-
-export function savePit() {
-  if (!lastPit) return;
-  const name = (lastPit.model || "device").replace(/[^\w.-]/g, "_");
-  downloadFile(`${name}.pit`, lastPit.data, "application/octet-stream");
-}
-
-function updateConnectionChip(connected, text) {
-  const chip = document.getElementById("connection-chip");
-  if (chip) {
-    chip.className = `status-chip ${connected ? "chip-connected" : "chip-disconnected"}`;
-    const label = chip.querySelector(".chip-label");
-    if (label) label.textContent = text;
-  }
+  document.getElementById("btn-pair-download")?.addEventListener("click", pairDownload);
+  document.getElementById("btn-pair-normal")?.addEventListener("click", pairNormal);
+  document.getElementById("btn-detect-device")?.addEventListener("click", queryDeviceInfo);
+  document.getElementById("btn-reboot-download")?.addEventListener("click", rebootToDownload);
+  document
+    .getElementById("btn-odin-reboot-android")
+    ?.addEventListener("click", () => rebootOdin("normal"));
+  document
+    .getElementById("btn-odin-reboot-download")
+    ?.addEventListener("click", () => rebootOdin("download"));
+  document.getElementById("btn-dump-pit")?.addEventListener("click", dumpPit);
+  document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
 }

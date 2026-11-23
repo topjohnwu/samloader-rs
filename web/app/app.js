@@ -12,51 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Entry point of the web app: initializes WASM and wires the page to the modules in ui/.
+// Entry point of the web app: initializes WASM and wires app modules to the UI panels.
 
 import {
-  initWasm,
-  setProgressCallback,
-  setVerbose,
   getBackendOptions,
   getVersion,
+  initWasm,
   isBackendSupported,
-  isWebUsbSupported,
   isWebSerialSupported,
+  isWebUsbSupported,
+  setProgressCallback,
 } from "./bridge.js";
-import { state } from "../ui/state.js";
-import { detectBrowserCapabilities } from "../ui/capabilities.js";
-import {
-  setupLogScroller,
-  setupLogPanel,
-  appendLog,
-  reportError,
-  clearLog,
-  saveLog,
-} from "../ui/log.js";
+import { detectBrowserCapabilities } from "./capabilities.js";
+import { refreshPairedDevicesStatus } from "./device.js";
+import { setupExclusiveGuards } from "./exclusive.js";
+import { appendLog, reportError } from "./logger.js";
+import { state } from "./state.js";
 import {
   applyCapabilityLayout,
+  renderBackendOptions,
+  setAppVersion,
+  setupControlsPanel,
   updateControlsState,
-  setupExclusiveGuards,
 } from "../ui/controls.js";
-import {
-  renderPackageSlots,
-  handleSkipMd5Change,
-  clearFirmwareSelections,
-  setupDropzones,
-} from "../ui/slots.js";
-import {
-  queryAndShowDeviceInfo,
-  refreshPairedDevicesStatus,
-  handlePairDownload,
-  handlePairNormal,
-  handleRebootToDownload,
-  handleRebootOdin,
-  handleDumpPit,
-  savePit,
-} from "../ui/device.js";
-import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "../ui/flash.js";
+import { setupDevicePanel } from "../ui/device.js";
+import { handleProgressEvent, setupFlashPanel } from "../ui/flash.js";
+import { setupLogPanel, setupLogScroller } from "../ui/log.js";
 import { setupServerPanel } from "../ui/server.js";
+import { setupSlotsPanel } from "../ui/slots.js";
 import { setupThemeToggle } from "../ui/theme.js";
 
 // Use Web Serial (vcom) by default on Windows, since WebUSB requires replacing
@@ -70,7 +53,7 @@ function isWindows() {
   return /^win/i.test(navigator.platform || "") || /\bwindows\b/i.test(navigator.userAgent || "");
 }
 
-// --- WASM & Event Wiring ---
+// --- WASM & Hotplug Initialization ---
 async function setupWasmAndEvents() {
   try {
     await initWasm();
@@ -79,11 +62,7 @@ async function setupWasmAndEvents() {
     appendLog("WASM engine initialized successfully.");
 
     const version = await getVersion();
-    const versionEl = document.getElementById("app-version");
-    if (versionEl) {
-      versionEl.textContent = `v${version}`;
-      versionEl.hidden = false;
-    }
+    setAppVersion(version);
     appendLog(`samloader-web version: ${version}`);
 
     const allBackendOptions = await getBackendOptions();
@@ -104,41 +83,12 @@ async function setupWasmAndEvents() {
       const preferVcom = isWindows() && backendOptions.some((b) => b.id === "vcom");
       state.selectedBackend = preferVcom ? "vcom" : (backendOptions[0]?.id ?? null);
     }
-
-    const backendSelect = document.getElementById("backend-select");
-    if (backendSelect) {
-      backendSelect.replaceChildren(
-        ...backendOptions.map(({ id, label }) => {
-          const opt = document.createElement("option");
-          opt.value = id;
-          opt.textContent = label;
-          return opt;
-        })
-      );
-      if (state.selectedBackend !== null) {
-        backendSelect.value = state.selectedBackend;
-      }
-      backendSelect.disabled = state.isBusy || backendOptions.length === 0;
-      backendSelect.addEventListener("change", async (e) => {
-        state.selectedBackend = e.target.value;
-        appendLog(`Backend selected: ${state.selectedBackend}`);
-        await refreshPairedDevicesStatus();
-      });
-    }
-
-    const rebootModeSelect = document.getElementById("opt-reboot-mode");
-    if (rebootModeSelect) {
-      rebootModeSelect.value = state.rebootMode;
-      rebootModeSelect.addEventListener("change", (e) => {
-        state.rebootMode = e.target.value;
-        appendLog(`When done: ${e.target.selectedOptions[0]?.text ?? state.rebootMode}`);
-      });
-    }
+    renderBackendOptions(backendOptions, state.selectedBackend);
 
     if (canFlash && isWebUsbSupported()) {
       const onUsbHotplug = () => {
         if (state.selectedBackend === "nusb") {
-          refreshPairedDevicesStatus();
+          void refreshPairedDevicesStatus();
         }
       };
       navigator.usb.addEventListener("connect", onUsbHotplug);
@@ -147,68 +97,12 @@ async function setupWasmAndEvents() {
     if (canFlash && isWebSerialSupported()) {
       const onSerialHotplug = () => {
         if (state.selectedBackend === "vcom") {
-          refreshPairedDevicesStatus();
+          void refreshPairedDevicesStatus();
         }
       };
       navigator.serial.addEventListener("connect", onSerialHotplug);
       navigator.serial.addEventListener("disconnect", onSerialHotplug);
     }
-
-    document.getElementById("opt-skip-md5")?.addEventListener("change", (e) => {
-      handleSkipMd5Change(e.target.checked);
-    });
-    document.getElementById("opt-verbose")?.addEventListener("change", async (e) => {
-      const enabled = e.target.checked;
-      state.verbose = enabled;
-      await setVerbose(enabled);
-      appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
-    });
-    // Advanced options affect whether there is anything to flash, and their summary
-    const advancedOptions = document.getElementById("advanced-options");
-    advancedOptions?.addEventListener("input", updateControlsState);
-    advancedOptions?.addEventListener("change", updateControlsState);
-
-    // Pair Download Device button
-    document.getElementById("btn-pair-download")?.addEventListener("click", handlePairDownload);
-
-    // Pair Normal Device (AT) button
-    document.getElementById("btn-pair-normal")?.addEventListener("click", handlePairNormal);
-
-    // Query Device Info (DVIF)
-    document.getElementById("btn-detect-device")?.addEventListener("click", async () => {
-      await queryAndShowDeviceInfo();
-    });
-
-    // Reboot to Download Mode (Normal Mode device, via AT command)
-    document.getElementById("btn-reboot-download")?.addEventListener("click", handleRebootToDownload);
-
-    // Reboot to Android / Download Mode (Download Mode device, via Odin)
-    document
-      .getElementById("btn-odin-reboot-android")
-      ?.addEventListener("click", () => handleRebootOdin("normal"));
-    document
-      .getElementById("btn-odin-reboot-download")
-      ?.addEventListener("click", () => handleRebootOdin("download"));
-
-    // Dump PIT Table
-    document.getElementById("btn-dump-pit")?.addEventListener("click", handleDumpPit);
-
-    // Flash Firmware Button
-    document.getElementById("btn-flash-firmware")?.addEventListener("click", async () => {
-      await executeFlashProcess();
-    });
-
-    // Clear All firmware selections
-    document.getElementById("btn-clear-slots")?.addEventListener("click", clearFirmwareSelections);
-
-    // Clear Terminal
-    document.getElementById("btn-clear-log")?.addEventListener("click", () => {
-      clearLog();
-    });
-
-    // Save Log / Save PIT
-    document.getElementById("btn-save-log")?.addEventListener("click", saveLog);
-    document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
 
     if (state.capabilities.canFlash) {
       await refreshPairedDevicesStatus();
@@ -228,11 +122,12 @@ document.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
+  setupExclusiveGuards();
+  setupControlsPanel();
   setupLogPanel();
   setupFlashPanel();
-  renderPackageSlots();
-  setupExclusiveGuards();
-  setupDropzones();
+  setupDevicePanel();
+  setupSlotsPanel();
   setupServerPanel();
-  setupWasmAndEvents();
+  void setupWasmAndEvents();
 });

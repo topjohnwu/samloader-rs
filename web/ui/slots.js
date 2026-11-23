@@ -12,17 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package slots, MD5 verification, and individual partition files.
+// Package slot grid, MD5 status indicators, dropzones, and sortable partition list UI.
 
-import { appendRawWasmLogs } from "../app/bridge.js";
-import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
-import { formatBytes, setBarPercent, isActivationKey } from "./util.js";
-import { appendLog } from "./log.js";
+import {
+  addPartitionFiles,
+  assignFileToSlot,
+  clearFirmwareSelections,
+  clearSlot,
+  movePartitionFile,
+  onSlotsChange,
+  removePartitionFile,
+  reorderPartitionFile,
+  replacePartitionFile,
+  setPartitionTarget,
+  setSkipMd5,
+} from "../app/slots.js";
+import { PACKAGE_SLOTS, SLOTS, state } from "../app/state.js";
 import { updateControlsState } from "./controls.js";
+import { formatBytes, isActivationKey, setBarPercent } from "./util.js";
 
 let draggedPartitionId = null;
 
-// --- Slot Status ---
+// --- Slot Status Rendering ---
 const SLOT_STATUS = {
   empty: { cls: "badge-idle", text: () => "Empty", width: 0 },
   queued: { cls: "badge-hashing", text: () => "Queued...", width: 0 },
@@ -33,21 +44,9 @@ const SLOT_STATUS = {
   invalid: { cls: "badge-invalid", text: () => "MD5 Failed", width: 100, error: true },
 };
 
-/**
- * Records a slot's verification status and updates its badge and progress bar.
- * @param {string} slot
- * @param {keyof SLOT_STATUS} status
- * @param {number} [percent] Progress percentage, used by "verifying"
- * @param {string} [error] Error message, used by "invalid"
- */
-
-function setSlotStatus(slot, status, percent, error) {
+function renderSlotStatus(slot, status, percent) {
   const def = SLOT_STATUS[status];
-  if (status === "empty") {
-    delete state.md5Results[slot];
-  } else {
-    state.md5Results[slot] = { status, error };
-  }
+  if (!def) return;
 
   const badge = document.getElementById(`md5-badge-${slot}`);
   const bar = document.getElementById(`md5-bar-${slot}`);
@@ -61,98 +60,32 @@ function setSlotStatus(slot, status, percent, error) {
   }
 }
 
-function isMd5File(file) {
-  return file.name.toLowerCase().endsWith(".md5");
-}
-
-// --- MD5 Verification Queue ---
-// Verification is I/O-bound, so slots are verified one at a time. The queue lives on the
-// main thread and each verification runs in a fresh worker, so cancelling the active
-// slot is simply terminating its worker.
-const md5Queue = [];
-
-let md5Active = null; // { slot, worker }
-
-function scheduleMd5Pump() {
-  // Deferred so that cancelling several slots in a row (e.g. Clear All) does not
-  // spawn a worker for a slot that is about to be cancelled too.
-  queueMicrotask(pumpMd5Queue);
-}
-
-function enqueueMd5(slot) {
-  cancelMd5(slot);
-  md5Queue.push(slot);
-  setSlotStatus(slot, "queued");
-  scheduleMd5Pump();
-}
-
-function cancelMd5(slot) {
-  const idx = md5Queue.indexOf(slot);
-  if (idx !== -1) {
-    md5Queue.splice(idx, 1);
-  }
-  if (md5Active?.slot === slot) {
-    md5Active.worker.terminate();
-    md5Active = null;
-    scheduleMd5Pump();
-  }
-}
-
-function pumpMd5Queue() {
-  if (md5Active || md5Queue.length === 0) return;
-  const slot = md5Queue.shift();
-  const file = state.slots[slot];
-  if (!file) {
-    scheduleMd5Pump();
-    return;
-  }
-
-  const worker = new Worker(new URL("../workers/md5.js", import.meta.url), { type: "module" });
-  md5Active = { slot, worker };
-
-  const finish = (status, error) => {
-    if (md5Active?.worker !== worker) return; // Cancelled; ignore late messages
-    worker.terminate();
-    md5Active = null;
-    setSlotStatus(slot, status, 100, error);
-    if (error) {
-      appendLog(`[MD5 ERROR] ${slot}: ${error}`);
-    }
-    updateControlsState();
-    pumpMd5Queue();
-  };
-
-  worker.onmessage = ({ data }) => {
-    if (md5Active?.worker !== worker) return;
-    switch (data.type) {
-      case "PROGRESS":
-        setSlotStatus(slot, "verifying", data.percent);
-        break;
-      case "LOG":
-        appendRawWasmLogs(data.lines);
-        break;
-      case "SUCCESS":
-        finish("valid");
-        break;
-      case "ERROR":
-        finish("invalid", data.error);
-        break;
-    }
-  };
-  worker.onerror = (e) => {
-    finish("invalid", e.message || "MD5 worker encountered an unexpected error");
-  };
-
-  setSlotStatus(slot, "verifying", 0);
-  worker.postMessage({ file });
-}
-
-// --- Slot Handling & Dropzones ---
 function slotPlaceholder(slot) {
   return slot === "PIT" ? "Select *.pit file" : `Select ${slot}_*.tar.md5`;
 }
 
-export function renderPackageSlots() {
+function renderSlotFile(slot, file) {
+  const slotBox = document.getElementById(`slot-box-${slot}`);
+  const fileNameElem = document.getElementById(`file-name-${slot}`);
+  const fileSizeElem = document.getElementById(`file-size-${slot}`);
+  const clearBtn = document.getElementById(`clear-${slot}`);
+  const fileInput = document.getElementById(`input-${slot}`);
+
+  if (file) {
+    if (slotBox) slotBox.classList.add("slot-populated");
+    if (fileNameElem) fileNameElem.textContent = file.name;
+    if (fileSizeElem) fileSizeElem.textContent = formatBytes(file.size);
+    if (clearBtn) clearBtn.hidden = false;
+  } else {
+    if (slotBox) slotBox.classList.remove("slot-populated");
+    if (fileNameElem) fileNameElem.textContent = slotPlaceholder(slot);
+    if (fileSizeElem) fileSizeElem.textContent = "";
+    if (clearBtn) clearBtn.hidden = true;
+    if (fileInput) fileInput.value = "";
+  }
+}
+
+function renderPackageSlots() {
   const grid = document.getElementById("slots-grid");
   const template = document.getElementById("slot-template");
   if (!grid || !template) return;
@@ -179,104 +112,7 @@ export function renderPackageSlots() {
   });
 }
 
-export function assignFileToSlot(slot, file, { trustCrc = false } = {}) {
-  if (state.isBusy) return;
-
-  cancelMd5(slot);
-  state.slots[slot] = file;
-
-  const slotBox = document.getElementById(`slot-box-${slot}`);
-  const fileNameElem = document.getElementById(`file-name-${slot}`);
-  const fileSizeElem = document.getElementById(`file-size-${slot}`);
-  const clearBtn = document.getElementById(`clear-${slot}`);
-
-  if (slotBox) slotBox.classList.add("slot-populated");
-  if (fileNameElem) fileNameElem.textContent = file.name;
-  if (fileSizeElem) fileSizeElem.textContent = formatBytes(file.size);
-  if (clearBtn) clearBtn.hidden = false;
-
-  const loaded = `Loaded ${slot}: ${file.name} (${formatBytes(file.size)})`;
-  if (!isMd5File(file)) {
-    setSlotStatus(slot, "ready");
-    appendLog(loaded);
-  } else if (trustCrc) {
-    setSlotStatus(slot, "ready");
-    appendLog(`${loaded} — ZIP CRC-32 verified`);
-  } else if (state.skipMd5) {
-    setSlotStatus(slot, "skipped");
-    appendLog(`${loaded} — MD5 check skipped`);
-  } else {
-    enqueueMd5(slot);
-    appendLog(`${loaded} — queued for MD5 check`);
-  }
-
-  updateControlsState();
-}
-
-export function loadFilesIntoSlots(slotFiles) {
-  if (state.isBusy) return;
-  PACKAGE_SLOTS.forEach(({ id }) => clearSlot(id));
-  clearAllPartitions();
-  for (const [slot, file] of Object.entries(slotFiles)) {
-    if (file && PACKAGE_SLOTS.some((s) => s.id === slot)) {
-      assignFileToSlot(slot, file, { trustCrc: true });
-    }
-  }
-}
-
-export function handleSkipMd5Change(skip) {
-  state.skipMd5 = skip;
-  appendLog(`MD5 verification ${skip ? "disabled (skipped)" : "enabled"}.`);
-
-  SLOTS.forEach((slot) => {
-    const file = state.slots[slot];
-    if (!file || !isMd5File(file)) return;
-    const status = state.md5Results[slot]?.status;
-    if (skip && status !== "valid" && status !== "ready") {
-      // Stop any queued or active verification and mark unverified slots as skipped
-      cancelMd5(slot);
-      setSlotStatus(slot, "skipped");
-    } else if (!skip && status === "skipped") {
-      enqueueMd5(slot);
-    }
-  });
-
-  updateControlsState();
-}
-
-function clearSlot(slot) {
-  if (state.isBusy) return;
-
-  cancelMd5(slot);
-  state.slots[slot] = null;
-  setSlotStatus(slot, "empty");
-
-  const slotBox = document.getElementById(`slot-box-${slot}`);
-  const fileNameElem = document.getElementById(`file-name-${slot}`);
-  const fileSizeElem = document.getElementById(`file-size-${slot}`);
-  const clearBtn = document.getElementById(`clear-${slot}`);
-  const fileInput = document.getElementById(`input-${slot}`);
-
-  if (slotBox) slotBox.classList.remove("slot-populated");
-  if (fileNameElem) {
-    fileNameElem.textContent = slotPlaceholder(slot);
-  }
-  if (fileSizeElem) fileSizeElem.textContent = "";
-  if (clearBtn) clearBtn.hidden = true;
-  if (fileInput) fileInput.value = "";
-
-  updateControlsState();
-}
-
-// Clears the package slots and partition files. The PIT file is an advanced option
-// with its own clear button, so it is kept.
-export function clearFirmwareSelections() {
-  if (state.isBusy) return;
-  PACKAGE_SLOTS.forEach(({ id }) => clearSlot(id));
-  clearAllPartitions();
-  appendLog("All package slots and partition files cleared.");
-}
-
+// --- Individual Partition List Rendering ---
 function formatPartitionLabel(partitionTarget) {
   const trimmed = partitionTarget.trim();
   if (!trimmed) {
@@ -287,39 +123,6 @@ function formatPartitionLabel(partitionTarget) {
     : `Target Partition: ${trimmed}`;
 }
 
-function addPartitionFiles(fileList) {
-  if (state.isBusy) return;
-  const files = Array.from(fileList);
-  if (files.length === 0) return;
-
-  files.forEach((file) => {
-    const id = state.nextPartitionId++;
-    state.partitions.push({ id, file, partition: "" });
-    appendLog(`Added partition file: ${file.name} (${formatBytes(file.size)})`);
-  });
-
-  renderPartitionList();
-  updateControlsState();
-}
-
-function removePartitionFile(id) {
-  if (state.isBusy) return;
-  const idx = state.partitions.findIndex((p) => p.id === id);
-  if (idx === -1) return;
-  const [removed] = state.partitions.splice(idx, 1);
-  appendLog(`Removed partition file: ${removed.file.name}`);
-  renderPartitionList();
-  updateControlsState();
-}
-
-function clearAllPartitions() {
-  if (state.isBusy) return;
-  if (state.partitions.length === 0) return;
-  state.partitions = [];
-  renderPartitionList();
-  updateControlsState();
-}
-
 function clearPartitionDropIndicators(clearDragging = true) {
   document.querySelectorAll(".partition-item").forEach((el) => {
     el.classList.remove("drop-before", "drop-after");
@@ -327,35 +130,6 @@ function clearPartitionDropIndicators(clearDragging = true) {
       el.classList.remove("dragging");
     }
   });
-}
-
-function reorderPartitionFile(draggedId, targetId, insertAfter) {
-  if (draggedId === targetId) return;
-  const fromIdx = state.partitions.findIndex((p) => p.id === draggedId);
-  if (fromIdx === -1) return;
-
-  const [moved] = state.partitions.splice(fromIdx, 1);
-  const toIdx = state.partitions.findIndex((p) => p.id === targetId);
-  if (toIdx === -1) {
-    state.partitions.splice(fromIdx, 0, moved);
-    return;
-  }
-
-  const insertIdx = insertAfter ? toIdx + 1 : toIdx;
-  state.partitions.splice(insertIdx, 0, moved);
-  renderPartitionList();
-}
-
-// Moves a partition file up (-1) or down (+1) with the keyboard, keeping it focused
-function movePartitionFile(id, delta) {
-  if (state.isBusy) return;
-  const from = state.partitions.findIndex((p) => p.id === id);
-  const to = from + delta;
-  if (from === -1 || to < 0 || to >= state.partitions.length) return;
-  const [moved] = state.partitions.splice(from, 1);
-  state.partitions.splice(to, 0, moved);
-  renderPartitionList();
-  document.querySelector(`.partition-item[data-partition-id="${id}"]`)?.focus();
 }
 
 function renderPartitionList() {
@@ -383,7 +157,9 @@ function renderPartitionList() {
       if (e.target !== item || !e.altKey) return;
       if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
-        movePartitionFile(entry.id, e.key === "ArrowUp" ? -1 : 1);
+        if (movePartitionFile(entry.id, e.key === "ArrowUp" ? -1 : 1)) {
+          document.querySelector(`.partition-item[data-partition-id="${entry.id}"]`)?.focus();
+        }
       }
     });
 
@@ -445,10 +221,7 @@ function renderPartitionList() {
     replaceInput.hidden = true;
     replaceInput.addEventListener("change", () => {
       if (!state.isBusy && replaceInput.files && replaceInput.files[0]) {
-        entry.file = replaceInput.files[0];
-        appendLog(`Updated partition file: ${entry.file.name} (${formatBytes(entry.file.size)})`);
-        renderPartitionList();
-        updateControlsState();
+        replacePartitionFile(entry.id, replaceInput.files[0]);
       }
       replaceInput.value = "";
     });
@@ -520,8 +293,8 @@ function renderPartitionList() {
       `Target partition name or ID for ${entry.file.name}`
     );
     targetInput.addEventListener("input", () => {
-      entry.partition = targetInput.value;
-      labelEl.textContent = formatPartitionLabel(entry.partition);
+      setPartitionTarget(entry.id, targetInput.value);
+      labelEl.textContent = formatPartitionLabel(targetInput.value);
     });
 
     const removeBtn = document.createElement("button");
@@ -545,7 +318,7 @@ function renderPartitionList() {
   });
 }
 
-export function setupDropzones() {
+function setupDropzones() {
   SLOTS.forEach((slot) => {
     const dropzone = document.getElementById(`dropzone-${slot}`);
     const fileInput = document.getElementById(`input-${slot}`);
@@ -660,4 +433,32 @@ export function setupDropzones() {
   // Prevent browser default navigation when files are dropped outside a dropzone
   window.addEventListener("dragover", (e) => e.preventDefault());
   window.addEventListener("drop", (e) => e.preventDefault());
+}
+
+export function setupSlotsPanel() {
+  onSlotsChange((event) => {
+    switch (event.type) {
+      case "slot":
+        renderSlotFile(event.slot, event.file);
+        break;
+      case "status":
+        renderSlotStatus(event.slot, event.status, event.percent);
+        break;
+      case "partitions":
+        renderPartitionList();
+        break;
+      case "controls":
+        updateControlsState();
+        break;
+    }
+  });
+
+  renderPackageSlots();
+  setupDropzones();
+
+  document.getElementById("opt-skip-md5")?.addEventListener("change", (e) => {
+    setSkipMd5(e.target.checked);
+  });
+
+  document.getElementById("btn-clear-slots")?.addEventListener("click", clearFirmwareSelections);
 }
