@@ -393,6 +393,10 @@ pub fn set_verbose(verbose: bool) {
     PROGRESS.with(|&p| p.verbose.set(verbose));
 }
 
+pub(crate) fn is_verbose() -> bool {
+    PROGRESS.with(|&p| p.verbose.get())
+}
+
 /// Appends a timestamped log message to the Rust log buffer and schedules a dirty notification.
 #[wasm_bindgen]
 pub fn append_log(msg: &str) {

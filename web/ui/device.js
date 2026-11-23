@@ -30,6 +30,16 @@ import { downloadFile } from "./util.js";
 import { appendLog, reportError, openLog } from "./log.js";
 import { updateControlsState, runExclusive } from "./controls.js";
 
+let deviceUpdateListener = null;
+
+export function setDeviceUpdateListener(listener) {
+  deviceUpdateListener = listener;
+}
+
+function notifyDeviceUpdate(detail) {
+  deviceUpdateListener?.(detail);
+}
+
 // --- Device List & Hardware Info Rendering ---
 function renderDeviceInfo(info) {
   const gridEl = document.getElementById("device-info-grid");
@@ -37,6 +47,8 @@ function renderDeviceInfo(info) {
   if (!gridEl || !boxEl) return;
 
   state.deviceModel = info.model ?? null;
+  state.deviceSalesCode = info.salesCode ?? null;
+  state.deviceBootloaderVersion = info.bootloaderVersion ?? null;
   if (info.fields.length > 0) {
     gridEl.innerHTML = "";
     info.fields.forEach(([label, val]) => {
@@ -66,10 +78,13 @@ function renderDeviceInfo(info) {
     boxEl.hidden = false;
     gridEl.hidden = true;
   }
+  notifyDeviceUpdate({ dvifQueried: true });
 }
 
 function clearDeviceInfo() {
   state.deviceModel = null;
+  state.deviceSalesCode = null;
+  state.deviceBootloaderVersion = null;
   const gridEl = document.getElementById("device-info-grid");
   const boxEl = document.getElementById("device-info-box");
   if (gridEl) {
@@ -80,6 +95,7 @@ function clearDeviceInfo() {
     boxEl.hidden = true;
     boxEl.textContent = "";
   }
+  notifyDeviceUpdate({ dvifQueried: false });
 }
 
 function renderDeviceList() {
@@ -95,6 +111,7 @@ function renderDeviceList() {
     emptyEl.hidden = false;
     listWrap.hidden = true;
     updateControlsState();
+    notifyDeviceUpdate({ dvifQueried: false });
     return;
   }
 
@@ -164,6 +181,7 @@ function renderDeviceList() {
   listEl.appendChild(row);
 
   updateControlsState();
+  notifyDeviceUpdate({ dvifQueried: false });
 }
 
 async function handleDisconnectDevice(dev) {
@@ -201,7 +219,7 @@ function deviceKey(backend, d) {
   return `${backend}/${d.vendorId}:${d.productId}:${d.serialNumber ?? ""}`;
 }
 
-function hasDeviceInfo() {
+export function hasDeviceInfo() {
   const gridEl = document.getElementById("device-info-grid");
   const boxEl = document.getElementById("device-info-box");
   return Boolean((gridEl && !gridEl.hidden) || (boxEl && !boxEl.hidden));
@@ -363,8 +381,8 @@ export async function handleDumpPit() {
       appendLog("--- PIT Table Output ---");
       appendLog(pit.text);
       lastPit = { data: pit.data, model: state.deviceModel };
-      const savePitBtn = document.getElementById("btn-save-pit");
-      if (savePitBtn) savePitBtn.hidden = false;
+      state.hasLastPit = true;
+      updateControlsState();
       // The PIT table is printed to the log, so show it
       openLog();
     } catch (err) {

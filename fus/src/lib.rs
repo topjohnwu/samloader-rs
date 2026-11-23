@@ -18,6 +18,7 @@
 #![deny(missing_docs)]
 
 mod auth;
+mod checkpoint;
 #[doc(hidden)]
 pub mod compat;
 mod data;
@@ -26,6 +27,7 @@ mod decrypt;
 mod error;
 mod fusclient;
 mod http;
+mod odin;
 mod parallel;
 mod stream;
 #[cfg(test)]
@@ -39,12 +41,14 @@ pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
 pub use stream::{Checkpoint, DataStream, OffsetCheckpoint, ResumableAsyncRead, ResumableStream};
 
 // Domain implementers
+pub use checkpoint::{CheckpointMeta, CheckpointState};
 pub use decoder::ZipCheckpoint;
 pub use error::{Error, HttpError, Result};
 pub use fusclient::{DownloadSession, FusClient, fetch_history};
 pub use http::{HttpClient, HttpMethod, HttpRequest, HttpResponse};
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::{ReqwestClient, ReqwestResponse};
+pub use odin::OdinComponent;
 pub use xml::{BinaryInform, VersionInfo};
 pub use zip::{ZipArchive, ZipEntry, ZipEntryStream};
 

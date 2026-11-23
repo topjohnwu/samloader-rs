@@ -18,6 +18,7 @@
 
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
+use samloader_fus::OdinComponent;
 use samloader_odin::{PartitionTarget, RebootMode, UsbBackendOption};
 
 // On Windows, the default USB backend is set to VCOM rather than libusb/nusb.
@@ -42,87 +43,20 @@ fn usb_backend_parser() -> impl TypedValueParser<Value = UsbBackendOption> {
         .map(|name| UsbBackendOption::try_from(name.as_str()).expect("enabled backend"))
 }
 
-/// Recognized Samsung Odin firmware component of an archive entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OdinComponent {
-    Bl,
-    Ap,
-    Cp,
-    Csc,
-    HomeCsc,
-    Userdata,
-}
-
-impl OdinComponent {
-    /// Classifies an archive entry file name by its Samsung prefix, if recognized.
-    pub(crate) fn from_entry_name(name: &str) -> Option<Self> {
-        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-        let upper = base.to_ascii_uppercase();
-
-        if upper.starts_with("HOME_CSC_") {
-            Some(Self::HomeCsc)
-        } else if upper.starts_with("CSC_") {
-            Some(Self::Csc)
-        } else if upper.starts_with("BL_") || upper.starts_with("BOOTLOADER_") {
-            Some(Self::Bl)
-        } else if upper.starts_with("AP_")
-            || upper.starts_with("CODE_")
-            || upper.starts_with("PDA_")
-        {
-            Some(Self::Ap)
-        } else if upper.starts_with("CP_")
-            || upper.starts_with("MODEM_")
-            || upper.starts_with("PHONE_")
-        {
-            Some(Self::Cp)
-        } else if upper.starts_with("USERDATA_") {
-            Some(Self::Userdata)
-        } else if upper.ends_with("_HOME.TAR.MD5") || upper.ends_with("_HOME.TAR") {
-            Some(Self::Ap)
-        } else {
-            None
-        }
-    }
-}
-
-/// All recognized Samsung Odin firmware components in canonical CLI order.
-pub(crate) const ALL_COMPONENTS: &[OdinComponent] = &[
-    OdinComponent::Bl,
-    OdinComponent::Ap,
-    OdinComponent::Cp,
-    OdinComponent::Csc,
-    OdinComponent::HomeCsc,
-    OdinComponent::Userdata,
-];
-
-/// Canonical lowercase CLI key for an [`OdinComponent`].
-pub(crate) const fn component_key(component: OdinComponent) -> &'static str {
-    match component {
-        OdinComponent::Bl => "bl",
-        OdinComponent::Ap => "ap",
-        OdinComponent::Cp => "cp",
-        OdinComponent::Csc => "csc",
-        OdinComponent::HomeCsc => "home_csc",
-        OdinComponent::Userdata => "userdata",
-    }
-}
-
 fn parse_component_key(s: &str) -> Option<OdinComponent> {
-    match s.to_ascii_lowercase().as_str() {
-        "bl" => Some(OdinComponent::Bl),
-        "ap" => Some(OdinComponent::Ap),
-        "cp" => Some(OdinComponent::Cp),
-        "csc" => Some(OdinComponent::Csc),
-        "home_csc" | "home-csc" => Some(OdinComponent::HomeCsc),
-        "userdata" => Some(OdinComponent::Userdata),
-        _ => None,
+    if s.eq_ignore_ascii_case("home-csc") {
+        return Some(OdinComponent::HomeCsc);
     }
+    OdinComponent::ALL
+        .iter()
+        .copied()
+        .find(|c| c.key().eq_ignore_ascii_case(s))
 }
 
 /// Accepts recognized Samsung Odin firmware component keys.
 fn odin_component_parser() -> impl TypedValueParser<Value = OdinComponent> {
-    PossibleValuesParser::new(ALL_COMPONENTS.iter().map(|&c| {
-        let pv = PossibleValue::new(component_key(c));
+    PossibleValuesParser::new(OdinComponent::ALL.iter().map(|&c| {
+        let pv = PossibleValue::new(c.key());
         if c == OdinComponent::HomeCsc {
             pv.alias("home-csc")
         } else {
@@ -430,35 +364,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_odin_component_classification() {
+    fn test_odin_component_parser() {
+        let cli = Cli::try_parse_from([
+            "samloader",
+            "download",
+            "-m",
+            "SM-S931U1",
+            "-r",
+            "XAA",
+            "--select",
+            "BL,home-csc,home_csc",
+        ])
+        .unwrap();
+        let Command::Download(args) = cli.command else {
+            panic!("expected download subcommand");
+        };
         assert_eq!(
-            OdinComponent::from_entry_name("BL_S931U1UES1AXB2.tar.md5"),
-            Some(OdinComponent::Bl)
+            args.select,
+            [
+                OdinComponent::Bl,
+                OdinComponent::HomeCsc,
+                OdinComponent::HomeCsc
+            ]
         );
-        assert_eq!(
-            OdinComponent::from_entry_name("AP_S931U1UEU1AXB2.tar.md5"),
-            Some(OdinComponent::Ap)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("CP_S931U1UEU1AXB2.tar.md5"),
-            Some(OdinComponent::Cp)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("CSC_OYM_S931U1OYM1AXB2.tar.md5"),
-            Some(OdinComponent::Csc)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("HOME_CSC_OYM_S931U1OYM1AXB2.tar.md5"),
-            Some(OdinComponent::HomeCsc)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("USERDATA_XAA_S931U1.tar.md5"),
-            Some(OdinComponent::Userdata)
-        );
-        assert_eq!(
-            OdinComponent::from_entry_name("I9305XXUEML8_I9305QLBEML4_HOME.tar.md5"),
-            Some(OdinComponent::Ap)
-        );
-        assert_eq!(OdinComponent::from_entry_name("SS_DL.dll"), None);
     }
 }

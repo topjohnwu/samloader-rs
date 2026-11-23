@@ -51,34 +51,150 @@ export function updateControlsState() {
     return !res || ["queued", "verifying", "invalid"].includes(res.status);
   });
   const hasDownloadDevice = state.device?.mode === "download";
+  const isServer = state.firmwareSource === "server";
+  const busy = state.isBusy;
+  const serverBusy = busy || state.serverQuerying;
 
-  const slotsCard = document.getElementById("slots-card");
-  if (slotsCard) {
-    slotsCard.hidden = !hasDownloadDevice;
+  // Source panels visibility
+  const serverPanel = document.getElementById("server-panel");
+  const localPanel = document.getElementById("local-panel");
+  if (serverPanel) serverPanel.hidden = !isServer;
+  if (localPanel) localPanel.hidden = isServer;
+
+  document.querySelectorAll('input[name="firmware-source"]').forEach((el) => {
+    el.checked = el.value === state.firmwareSource;
+    el.disabled = serverBusy;
+  });
+
+  // Action bar buttons visibility & disabled state
+  const dumpPitBtn = document.getElementById("btn-dump-pit");
+  if (dumpPitBtn) {
+    dumpPitBtn.hidden = isServer && !hasDownloadDevice;
+    dumpPitBtn.disabled = busy || !hasDownloadDevice;
+  }
+
+  const savePitBtn = document.getElementById("btn-save-pit");
+  if (savePitBtn) {
+    savePitBtn.hidden = !state.hasLastPit || (isServer && !hasDownloadDevice);
+    savePitBtn.disabled = busy;
   }
 
   if (flashBtn) {
+    flashBtn.hidden = isServer;
     flashBtn.disabled =
-      !hasAction || !hasDownloadDevice || state.isBusy || hasPendingOrInvalidMd5;
+      !hasAction || !hasDownloadDevice || busy || hasPendingOrInvalidMd5;
   }
+
+  const bridgeReady = state.fusBridge.connected;
+  const modelVal = document.getElementById("server-model")?.value.trim() ?? "";
+  const regionVal = document.getElementById("server-region")?.value.trim() ?? "";
+  const customVerVal = document.getElementById("server-custom-version")?.value.trim() ?? "";
+  const sel = state.serverSelection;
+
+  const downloadOnlyBtn = document.getElementById("btn-download-only");
+  if (downloadOnlyBtn) {
+    downloadOnlyBtn.hidden = !isServer;
+    downloadOnlyBtn.disabled =
+      !bridgeReady || !state.serverInspect || !sel.validForDownload || serverBusy;
+  }
+
+  const downloadFlashBtn = document.getElementById("btn-download-flash");
+  if (downloadFlashBtn) {
+    downloadFlashBtn.hidden = !isServer;
+    downloadFlashBtn.disabled =
+      !bridgeReady ||
+      !hasDownloadDevice ||
+      !state.serverInspect ||
+      !sel.validForFlash ||
+      serverBusy;
+  }
+
+  const flashHint = document.getElementById("server-flash-hint");
+  if (flashHint) {
+    let hintText = "";
+    if (isServer && !busy && state.serverInspect) {
+      if (state.serverOutputMode === "zip") {
+        hintText =
+          "Full .zip archives are download-only — select Extract Components to enable Download & Flash.";
+      } else if (sel.hasBothCsc) {
+        hintText =
+          "Download & Flash cannot flash both CSCs — choose either Keep Data (HOME_CSC) or Wipe Data (CSC).";
+      } else if (!sel.hasOdinComponent) {
+        hintText =
+          "Select at least one Odin component (BL, AP, CP, CSC, or USERDATA) to enable Download & Flash.";
+      } else if (!hasDownloadDevice) {
+        hintText = "Connect a Download Mode device above to enable Download & Flash.";
+      }
+    }
+    flashHint.textContent = hintText;
+    flashHint.hidden = !hintText;
+  }
+
+  // Server panel controls
+  const detectServerBtn = document.getElementById("btn-detect-server-device");
+  if (detectServerBtn) {
+    detectServerBtn.hidden = !hasDownloadDevice;
+    detectServerBtn.disabled = serverBusy || !hasDownloadDevice;
+  }
+
+  const checkVersionsBtn = document.getElementById("btn-check-versions");
+  if (checkVersionsBtn) {
+    checkVersionsBtn.disabled =
+      !bridgeReady || !modelVal || !regionVal || serverBusy;
+  }
+
+  const toggleCustomBtn = document.getElementById("btn-toggle-custom-version");
+  if (toggleCustomBtn) {
+    toggleCustomBtn.disabled = !bridgeReady || serverBusy;
+  }
+
+  const inspectCustomBtn = document.getElementById("btn-inspect-custom");
+  if (inspectCustomBtn) {
+    inspectCustomBtn.disabled =
+      !bridgeReady || !modelVal || !regionVal || !customVerVal || serverBusy;
+  }
+
+  [
+    "server-model",
+    "server-region",
+    "btn-recheck-bridge",
+    "btn-reload-bridge",
+    "btn-clear-opfs-cache",
+    "btn-save-opfs-cache",
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = serverBusy;
+  });
+
+  ["server-version-select", "server-custom-version", "server-concurrency"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !bridgeReady || serverBusy;
+  });
+
+  document
+    .querySelectorAll(
+      'input[name="server-output-mode"], .server-entry-check, input[name="server-csc-mode"]'
+    )
+    .forEach((el) => {
+      el.disabled = serverBusy;
+    });
 
   const downloadActionIds = [
     "btn-detect-device",
-    "btn-dump-pit",
     "btn-odin-reboot-android",
     "btn-odin-reboot-download",
   ];
   downloadActionIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
-      el.disabled = state.isBusy || !hasDownloadDevice;
+      el.disabled = busy || !hasDownloadDevice;
     }
   });
 
   // Rebooting into Download Mode over AT is the only action a Normal Mode device supports
   const rebootDownloadBtn = document.getElementById("btn-reboot-download");
   if (rebootDownloadBtn) {
-    rebootDownloadBtn.disabled = state.isBusy || state.device?.mode !== "normal";
+    rebootDownloadBtn.disabled = busy || state.device?.mode !== "normal";
   }
 
   // Clears the package slots and partition files, so only offer it when there is any
@@ -86,7 +202,7 @@ export function updateControlsState() {
   if (clearSlotsBtn) {
     const hasSelection =
       PACKAGE_SLOTS.some(({ id }) => state.slots[id] !== null) || state.partitions.length > 0;
-    clearSlotsBtn.disabled = state.isBusy || !hasSelection;
+    clearSlotsBtn.disabled = busy || !hasSelection;
   }
 
   const generalControlIds = [
@@ -97,6 +213,7 @@ export function updateControlsState() {
     "btn-pair-download",
     "btn-pair-normal",
     "btn-add-partition",
+    "btn-load-into-local",
     "opt-sales-code",
     "opt-nand-erase",
     "opt-disable-verity",
@@ -106,17 +223,17 @@ export function updateControlsState() {
   generalControlIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
-      el.disabled = state.isBusy || (id === "backend-select" && el.options.length === 0);
+      el.disabled = busy || (id === "backend-select" && el.options.length === 0);
     }
   });
 
   SLOTS.forEach((slot) => {
     const clearBtn = document.getElementById(`clear-${slot}`);
     if (clearBtn) {
-      clearBtn.disabled = state.isBusy;
+      clearBtn.disabled = busy;
     }
     const dropzone = document.getElementById(`dropzone-${slot}`);
-    dropzone?.setAttribute("aria-disabled", String(state.isBusy));
+    dropzone?.setAttribute("aria-disabled", String(busy));
   });
 
   document
@@ -124,11 +241,11 @@ export function updateControlsState() {
       ".partition-target-input, .partition-item .btn-clear-slot, .btn-disconnect-device"
     )
     .forEach((el) => {
-      el.disabled = state.isBusy;
+      el.disabled = busy;
     });
 
   document.querySelectorAll(".partition-item").forEach((el) => {
-    el.draggable = !state.isBusy;
+    el.draggable = !busy;
   });
 }
 
@@ -175,16 +292,27 @@ export function setupExclusiveGuards() {
   });
 }
 
-export async function runExclusive(fn) {
+export async function runExclusiveWithSetup(prepareFn, fn) {
   if (state.isBusy) return;
   state.isBusy = true;
   updateControlsState();
-  await acquireWakeLock();
   try {
-    await fn();
+    const setupResult = await prepareFn();
+    if (setupResult === false) return;
+    await acquireWakeLock();
+    await fn(setupResult);
   } finally {
     state.isBusy = false;
     await releaseWakeLock();
     updateControlsState();
   }
+}
+
+export async function runExclusive(fn) {
+  await runExclusiveWithSetup(
+    () => true,
+    async () => {
+      await fn();
+    }
+  );
 }

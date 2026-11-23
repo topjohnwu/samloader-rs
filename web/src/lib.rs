@@ -17,8 +17,22 @@
 #[cfg(not(any(feature = "nusb", feature = "serialport")))]
 compile_error!("At least one USB backend must be enabled!");
 
+mod fus;
+mod http;
 mod progress;
 mod reader;
+mod storage;
+
+macro_rules! js_obj {
+    ($($key:expr => $val:expr),* $(,)?) => {{
+        let obj = js_sys::Object::new();
+        $(
+            let _ = js_sys::Reflect::set(&obj, &JsValue::from($key), &JsValue::from($val));
+        )*
+        JsValue::from(obj)
+    }};
+}
+pub(crate) use js_obj;
 
 use futures::io::AsyncReadExt;
 use samloader_odin::{
@@ -60,6 +74,43 @@ fn parse_reboot_mode(mode: &str) -> RebootMode {
 
 fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+pub(crate) fn js_err_string(e: &JsValue) -> String {
+    if let Some(s) = e.as_string() {
+        return s;
+    }
+    if e.is_object() {
+        let name = js_sys::Reflect::get(e, &"name".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty() && s != "Error");
+        let message = js_sys::Reflect::get(e, &"message".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty());
+        match (name, message) {
+            (Some(n), Some(m)) => return format!("{n}: {m}"),
+            (None, Some(m)) => return m,
+            (Some(n), None) => return n,
+            (None, None) => {}
+        }
+    }
+    format!("{e:?}")
+}
+
+pub(crate) fn js_value_to_bytes(val: JsValue) -> Result<Option<Vec<u8>>, &'static str> {
+    if val.is_null() || val.is_undefined() {
+        return Ok(None);
+    }
+    let arr = match val.dyn_into::<js_sys::Uint8Array>() {
+        Ok(arr) => arr,
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => {
+            js_sys::Uint8Array::new(&other)
+        }
+        Err(_) => return Err("Expected Uint8Array, ArrayBuffer, or null"),
+    };
+    Ok(Some(arr.to_vec()))
 }
 
 /// Returns the mode of a Samsung device with the given USB VID/PID: "download" or
@@ -122,8 +173,8 @@ pub async fn pair_samsung_device(backend_str: Option<String>) -> Result<(), JsVa
 
 /// Detects a Download Mode device and queries DVIF device info.
 ///
-/// Returns `{ model?, fields }`, where `fields` is an array of `[label, value]` pairs in
-/// display order. `fields` is empty if the device did not report any DVIF info.
+/// Returns `{ model?, salesCode?, bootloaderVersion?, fields }`, where `fields` is an array of
+/// `[label, value]` pairs in display order. `fields` is empty if the device did not report any DVIF info.
 #[wasm_bindgen]
 pub async fn detect_download_device(
     backend_str: Option<String>,
@@ -140,8 +191,20 @@ pub async fn detect_download_device(
     }
 
     let obj = js_sys::Object::new();
-    if let Some(model) = info.and_then(|info| info.model) {
-        js_sys::Reflect::set(&obj, &"model".into(), &model.into())?;
+    if let Some(info) = info {
+        if let Some(model) = info.model {
+            js_sys::Reflect::set(&obj, &"model".into(), &model.into())?;
+        }
+        if let Some(sales_code) = info.sales_code {
+            js_sys::Reflect::set(&obj, &"salesCode".into(), &sales_code.into())?;
+        }
+        if let Some(bootloader_version) = info.bootloader_version {
+            js_sys::Reflect::set(
+                &obj,
+                &"bootloaderVersion".into(),
+                &bootloader_version.into(),
+            )?;
+        }
     }
     js_sys::Reflect::set(&obj, &"fields".into(), &fields)?;
     Ok(obj.into())

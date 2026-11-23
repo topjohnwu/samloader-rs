@@ -15,13 +15,13 @@
 mod part;
 mod progress;
 
-use crate::cli::{ALL_COMPONENTS, DownloadArgs, OdinComponent, component_key};
-use part::{CheckpointState, PartFile, ResumeState, part_path_for, wait_cancelled};
+use crate::cli::DownloadArgs;
+use part::{PartFile, ResumeState, part_path_for, wait_cancelled};
 use progress::{CliObserver, FileLabel};
 use samloader_fus::futures::future::{self, Either, try_join_all};
 use samloader_fus::{
-    BinaryInform, Checkpoint, DataStream, DownloadSession, FusClient, ParallelDataSource,
-    ReqwestClient, ResumableStream, ZipArchive, ZipEntry,
+    BinaryInform, Checkpoint, CheckpointState, DataStream, DownloadSession, FusClient,
+    OdinComponent, ParallelDataSource, ReqwestClient, ResumableStream, ZipArchive, ZipEntry,
 };
 use std::error::Error;
 use std::future::Future;
@@ -108,7 +108,7 @@ fn select_entries<'a>(
                 .filter(|e| OdinComponent::from_entry_name(e.name()) == Some(component)),
         );
         if list.len() == before {
-            let avail: Vec<_> = ALL_COMPONENTS
+            let avail: Vec<_> = OdinComponent::ALL
                 .iter()
                 .copied()
                 .filter(|&c| {
@@ -116,7 +116,7 @@ fn select_entries<'a>(
                         .iter()
                         .any(|e| OdinComponent::from_entry_name(e.name()) == Some(c))
                 })
-                .map(component_key)
+                .map(OdinComponent::key)
                 .collect();
             let avail_list = if avail.is_empty() {
                 "none".to_string()
@@ -125,7 +125,7 @@ fn select_entries<'a>(
             };
             return Err(format!(
                 "Component '{}' not found in firmware archive (available: {avail_list})",
-                component_key(component)
+                component.key()
             ));
         }
     }

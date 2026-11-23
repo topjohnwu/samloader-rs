@@ -1,6 +1,39 @@
 # samloader-web
 
-Browser-based Samsung Odin firmware flasher powered by [`samloader-odin`](../odin) compiled to WebAssembly, using [WebUSB](https://wicg.github.io/webusb/) (`nusb`) and [Web Serial](https://wicg.github.io/serial/) (`vcom`).
+Browser-based Samsung firmware downloader and Odin flasher powered by [`samloader-fus`](../fus) and [`samloader-odin`](../odin) compiled to WebAssembly, using [WebUSB](https://wicg.github.io/webusb/) (`nusb`) and [Web Serial](https://wicg.github.io/serial/) (`vcom`).
+
+## Features
+
+- **Samsung Server Firmware Lookup & Inspection**: Query FUS firmware history (`Latest`, `Previous Stable`, `Beta`) or enter a custom version string, auto-fill Model & Region from a connected Download Mode device (DVIF), highlight the installed bootloader version, and inspect the encrypted ZIP Central Directory before downloading.
+- **Selective Component Extraction & Smart CSC Selection**: Download either the full decrypted `.zip` archive or selected `.tar.md5` components (`BL`, `AP`, `CP`, `CSC` / `HOME_CSC`, `USERDATA`, or extra archive files) with range-resumable parallel connections and ZIP CRC-32 validation.
+- **Download & Flash**: Stream selected firmware components into OPFS staging and flash them directly to a Download Mode device with shared Odin options (PIT, CSC/Sales Code, NAND Erase, vbmeta flags, reboot target).
+- **Local Files Flasher**: Load local `.tar` / `.tar.md5` packages, `.pit` files, and individual partition images with Web Worker MD5 verification.
+
+## FUS Bridge Userscript
+
+Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and serve encrypted firmware binaries over plain HTTP (which browsers block as mixed content on HTTPS pages). To talk to Samsung FUS directly from your browser without any backend proxy, the **Samsung Server** mode uses a lightweight local userscript bridge: [`web/samloader-fus-bridge.user.js`](samloader-fus-bridge.user.js).
+
+### Setup
+
+1. Install **Tampermonkey** (on Chrome MV3, ensure **Allow User Scripts** / Developer Mode is enabled for the extension).
+2. Click **Install Userscript** (or **Copy Script** / **Download `.user.js`** for manual installation) in the web UI banner.
+3. Click **Reload Page** so Tampermonkey injects the bridge into the tab. The badge switches to `FUS Bridge v1.0.0`.
+
+The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
+
+## Browser Compatibility & Storage
+
+| Feature | Chromium (Chrome / Edge / Brave / Opera) | Firefox / Safari |
+| --- | --- | --- |
+| Firmware Lookup, Inspect & Download Only | Direct disk writes via File System Access API (`showSaveFilePicker` / `showDirectoryPicker`) | OPFS staging followed by browser file download |
+| **Load into Local Flash** (after directory download) | Loads `FileSystemFileHandle`s directly into **Local Files** slots without re-reading MD5 | — |
+| Device Flashing (Odin / AT / **Download & Flash**) | Supported via WebUSB / Web Serial in a Secure Context (`http://localhost`, `127.0.0.1`, or `https://`) | WebUSB / Web Serial unavailable (Debug `Mock Device` only if built with `--features mock`) |
+
+### OPFS Cache & Resume Checkpoints
+
+- **Download & Flash** (and Download Only fallback on Firefox/Safari) stages decrypted files in the browser's Origin Private File System (`samloader-staging/`) with `.part` resume checkpoints and CRC-32 verification.
+- Cancelling or hitting an error keeps the partial OPFS checkpoint so re-running skips already-completed ranges/files.
+- Completed builds in the cache banner offer a **Save Files** button (useful if your browser blocked automatic multi-file downloads) and **Clear Cache** to remove staged files manually. A successful **Download & Flash** automatically clears the OPFS cache afterwards, whereas a failed/aborted flash retains it so retrying skips re-downloading.
 
 ## Prerequisites
 
@@ -44,19 +77,46 @@ Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Bra
 
 > **Note:** WebUSB and Web Serial are only exposed in [Secure Contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (`http://localhost`, `http://127.0.0.1`, or `https://`), and require a Chromium-based browser. When built with `--features mock`, you can also select the **Mock Device (Debug)** backend in the UI to test flashing workflows in any browser without physical hardware.
 
+## Static File Structure
+
+```text
+web/
+├── index.html                   # App shell (Samsung Server & Local Files panels)
+├── styles.css                   # Material Design 3 styling (light/dark tokens)
+├── app.js                       # Entry point, WASM init, device hotplug & events
+├── bridge.js                    # JS facade over wasm-bindgen exports in pkg/
+├── fus_bridge.js                # Main-thread & Worker MessagePort transport over userscript
+├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
+├── download_worker.js           # Module Web Worker running concurrent FUS downloads & DEFLATE
+├── md5_worker.js                # Module Web Worker running streaming .tar.md5 checks
+├── ui/
+│   ├── state.js                 # Shared client UI state and Odin slot metadata
+│   ├── controls.js              # View visibility, button enablement, wake lock & beforeunload
+│   ├── device.js                # WebUSB/WebSerial pairing, DVIF telemetry, PIT, AT/Odin reboots
+│   ├── slots.js                 # Local package slots, MD5 queue, individual partitions
+│   ├── flash.js                 # Shared flashing flow, progress speed/ETA, outcome banner
+│   ├── server.js                # Samsung Server lookup, ZIP inspect & component selector
+│   ├── download.js              # OPFS cache banner, worker downloads & Download & Flash flows
+│   ├── log.js                   # Virtualized Rust-backed activity log viewer
+│   ├── theme.js                 # Light / Dark / System theme switcher
+│   └── util.js                  # Byte/duration formatting and file helpers
+├── fonts/                       # Self-hosted DM Sans, Roboto, and Roboto Mono fonts
+└── pkg/                         # Generated wasm-bindgen JS/WASM bundle (built by xtask)
+```
+
 ## Deploying
 
-The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/fonts/`, so the page makes no third-party requests.
+The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/fonts/`, so the page makes no third-party requests other than optional Samsung FUS requests via the user's installed bridge userscript.
 
-1. Build the release WASM bundle and stage the static site (web assets, fonts, and the generated `pkg/` bindings) into `dist/`:
+1. Build the release WASM bundle and stage the static site (web assets, userscript, fonts, and generated `pkg/` bindings) into `dist/`:
 
    ```bash
    cargo xtask build-web --dist dist
    ```
 
 2. Deploy the contents of `dist/` to any static hosting provider (GitHub Pages, Cloudflare Pages, Netlify, Vercel, S3, nginx, etc.):
-   - **HTTPS required:** Production deployments must be served over `https://` so the browser enables `navigator.usb` (WebUSB) and `navigator.serial` (Web Serial).
-   - **MIME types:** Ensure `.wasm` files are served with `Content-Type: application/wasm` and `.js` files with `Content-Type: text/javascript` (standard on all modern static hosts).
+   - **HTTPS required:** Production deployments must be served over `https://` so the browser enables `navigator.usb` (WebUSB), `navigator.serial` (Web Serial), and OPFS SyncAccessHandle in workers.
+   - **MIME types:** Ensure `.wasm` files are served with `Content-Type: application/wasm` and `.js` / `.user.js` files with `Content-Type: text/javascript` (standard on all modern static hosts).
 
 ## License
 

@@ -50,6 +50,7 @@ import {
   savePit,
 } from "./ui/device.js";
 import { handleProgressEvent, executeFlashProcess, setupFlashPanel } from "./ui/flash.js";
+import { setupServerPanel } from "./ui/server.js";
 import { setupThemeToggle } from "./ui/theme.js";
 
 // Use Web Serial (vcom) by default on Windows, since WebUSB requires replacing
@@ -141,6 +142,7 @@ async function setupWasmAndEvents() {
     });
     document.getElementById("opt-verbose")?.addEventListener("change", async (e) => {
       const enabled = e.target.checked;
+      state.verbose = enabled;
       await setVerbose(enabled);
       appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
     });
@@ -205,5 +207,6 @@ document.addEventListener("DOMContentLoaded", () => {
   renderPackageSlots();
   setupExclusiveGuards();
   setupDropzones();
+  setupServerPanel();
   setupWasmAndEvents();
 });

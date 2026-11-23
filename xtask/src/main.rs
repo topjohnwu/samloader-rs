@@ -154,7 +154,10 @@ const WEB_STATIC_FILES: &[&str] = &[
     "styles.css",
     "app.js",
     "bridge.js",
+    "fus_bridge.js",
+    "download_worker.js",
     "md5_worker.js",
+    "samloader-fus-bridge.user.js",
     "favicon.svg",
     "logo.svg",
 ];
@@ -274,6 +277,22 @@ fn main() -> Result<()> {
             )?;
             println!("wasm-bindgen bindings generated successfully.");
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_static_assets_exist() {
+        let web = workspace_root().join("web");
+        for file in WEB_STATIC_FILES {
+            assert!(web.join(file).is_file(), "missing static file web/{file}");
+        }
+        for dir in WEB_STATIC_DIRS {
+            assert!(web.join(dir).is_dir(), "missing static dir web/{dir}");
         }
     }
 }

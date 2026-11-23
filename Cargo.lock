@@ -1455,7 +1455,9 @@ name = "samloader-web"
 version = "3.0.0"
 dependencies = [
  "futures",
+ "futures-timer",
  "js-sys",
+ "samloader-fus",
  "samloader-odin",
  "samloader-pit",
  "wasm-bindgen",

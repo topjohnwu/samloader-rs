@@ -14,16 +14,23 @@
 
 import init, {
   FlashOptions,
+  FusDownloadOptions,
   append_log,
   append_raw_logs,
   clear_log,
+  clear_opfs_cache,
   clear_progress_callback,
   detect_download_device,
   device_mode,
   export_logs,
+  fus_download,
+  fus_fetch_history,
+  fus_inspect_firmware,
   get_backend_options,
   last_log_line,
   log_line_height,
+  opfs_build_files,
+  opfs_cache_info,
   pair_download_device,
   pair_samsung_device,
   prepare_flash,
@@ -140,15 +147,19 @@ export function appendWasmLog(msg) {
  * @param {string[]} lines
  */
 export function appendRawWasmLogs(lines) {
-  if (wasmReady && Array.isArray(lines) && lines.length > 0) {
+  if (!Array.isArray(lines) || lines.length === 0) return;
+  if (wasmReady) {
     append_raw_logs(lines);
+  } else {
+    pendingLogs.push(...lines.map(String));
   }
 }
 
 /**
- * Clears the Rust log buffer.
+ * Clears the Rust log buffer (and any queued pre-init logs).
  */
 export function clearWasmLog() {
+  pendingLogs.length = 0;
   if (wasmReady) {
     clear_log();
   }
@@ -344,7 +355,7 @@ export async function pairSamsungDevice(backend) {
  * @param {object} [options]
  * @param {string} [options.backend] Backend option ("nusb", "vcom", "mock")
  * @param {boolean} [options.wait=false]
- * @returns {Promise<{ model?: string, fields: [string, string][] }>} DVIF info as display
+ * @returns {Promise<{ model?: string, salesCode?: string, bootloaderVersion?: string, fields: [string, string][] }>} DVIF info as display
  *   label/value pairs; `fields` is empty if the device did not report any
  */
 export async function detectDownloadDevice({ backend, wait = false } = {}) {
@@ -439,4 +450,84 @@ export async function prepareFlash(files, options = {}) {
   // The generated setters convert each value; unset options keep their defaults
   const flashOptions = Object.assign(new FlashOptions(), options);
   return await prepare_flash(files, flashOptions);
+}
+
+/**
+ * Fetches available firmware versions for a Samsung model and region CSC from FUS.
+ * @param {string} model Device model (e.g. `"SM-S931U1"`)
+ * @param {string} region Region / CSC code (e.g. `"XAA"`)
+ * @param {Function} transport JS HTTP transport callback
+ * @returns {Promise<{ latest: string, previous: string[], beta: string[] }>}
+ */
+export async function fusFetchHistory(model, region, transport) {
+  await initWasm();
+  return await fus_fetch_history(model, region, transport);
+}
+
+/**
+ * Queries FUS binary info and reads the remote ZIP Central Directory for a firmware build.
+ * @param {string} model Device model (e.g. `"SM-S931U1"`)
+ * @param {string} region Region / CSC code (e.g. `"XAA"`)
+ * @param {string} version Firmware version string (`PDA/CSC/CP` or `PDA/CSC/CP/BL`)
+ * @param {Function} transport JS HTTP transport callback
+ * @returns {Promise<{ version: string, filename: string, decryptedFilename: string, encryptedSize: number, decryptedSize: number, fingerprintHex: string, entries: { name: string, component: "bl" | "ap" | "cp" | "csc" | "home_csc" | "userdata" | null, compressedSize: number, uncompressedSize: number }[] }>}
+ */
+export async function fusInspectFirmware(model, region, version, transport) {
+  await initWasm();
+  return await fus_inspect_firmware(model, region, version, transport);
+}
+
+/**
+ * Downloads and decrypts (or extracts) firmware from FUS into the specified browser storage target.
+ * @param {{ model: string, region: string, version: string, mode: "zip" | "entries", entryNames?: string[], concurrency?: number, force?: boolean }} params
+ * @param {{ kind: "opfs" | "directory" | "file", buildKey?: string, meta?: object, dirHandle?: FileSystemDirectoryHandle, fileHandle?: FileSystemFileHandle }} target
+ * @param {Function} transport JS HTTP transport callback
+ * @param {(event: object) => void} onProgress Progress/warning callback
+ * @param {AbortSignal} [signal] Optional abort signal
+ * @returns {Promise<{ version: string, filename: string, decryptedFilename: string, fingerprintHex: string, files: { name: string, component: string | null, size: number }[] }>}
+ */
+export async function fusDownload(params, target, transport, onProgress, signal) {
+  await initWasm();
+  if (!params || typeof params !== "object") {
+    throw new Error("Download parameters must be an object");
+  }
+  const options = new FusDownloadOptions();
+  try {
+    for (const [key, value] of Object.entries(params)) {
+      if (value != null) {
+        options[key] = value;
+      }
+    }
+  } catch (err) {
+    options.free();
+    throw err;
+  }
+  return await fus_download(options, target, transport, onProgress, signal);
+}
+
+/**
+ * Reads the OPFS staging manifest and sums the byte sizes of cached files.
+ * @returns {Promise<{ buildKey: string, model: string, region: string, version: string, decryptedFilename: string, fingerprintHex: string, totalBytes: number, complete: boolean, files: { name: string, component: string | null, size: number }[] } | null>}
+ */
+export async function getOpfsCacheInfo() {
+  await initWasm();
+  return await opfs_cache_info();
+}
+
+/**
+ * Opens seekable `File` handles for every completed file in the staged OPFS build `buildKey`.
+ * @param {string} buildKey
+ * @returns {Promise<{ name: string, component: string | null, file: File }[]>}
+ */
+export async function getOpfsBuildFiles(buildKey) {
+  await initWasm();
+  return await opfs_build_files(buildKey);
+}
+
+/**
+ * Recursively deletes the `samloader-staging/` directory in OPFS.
+ */
+export async function clearOpfsCache() {
+  await initWasm();
+  await clear_opfs_cache();
 }

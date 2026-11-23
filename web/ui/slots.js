@@ -179,7 +179,7 @@ export function renderPackageSlots() {
   });
 }
 
-function assignFileToSlot(slot, file) {
+export function assignFileToSlot(slot, file, { trustCrc = false } = {}) {
   if (state.isBusy) return;
 
   cancelMd5(slot);
@@ -199,6 +199,9 @@ function assignFileToSlot(slot, file) {
   if (!isMd5File(file)) {
     setSlotStatus(slot, "ready");
     appendLog(loaded);
+  } else if (trustCrc) {
+    setSlotStatus(slot, "ready");
+    appendLog(`${loaded} — ZIP CRC-32 verified`);
   } else if (state.skipMd5) {
     setSlotStatus(slot, "skipped");
     appendLog(`${loaded} — MD5 check skipped`);
@@ -210,6 +213,17 @@ function assignFileToSlot(slot, file) {
   updateControlsState();
 }
 
+export function loadFilesIntoSlots(slotFiles) {
+  if (state.isBusy) return;
+  PACKAGE_SLOTS.forEach(({ id }) => clearSlot(id));
+  clearAllPartitions();
+  for (const [slot, file] of Object.entries(slotFiles)) {
+    if (file && PACKAGE_SLOTS.some((s) => s.id === slot)) {
+      assignFileToSlot(slot, file, { trustCrc: true });
+    }
+  }
+}
+
 export function handleSkipMd5Change(skip) {
   state.skipMd5 = skip;
   appendLog(`MD5 verification ${skip ? "disabled (skipped)" : "enabled"}.`);
@@ -218,7 +232,7 @@ export function handleSkipMd5Change(skip) {
     const file = state.slots[slot];
     if (!file || !isMd5File(file)) return;
     const status = state.md5Results[slot]?.status;
-    if (skip && status !== "valid") {
+    if (skip && status !== "valid" && status !== "ready") {
       // Stop any queued or active verification and mark unverified slots as skipped
       cancelMd5(slot);
       setSlotStatus(slot, "skipped");

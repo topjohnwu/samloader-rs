@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>samloader-rs — Odin Web Flasher</title>
+  <meta name="samloader-fus-bridge" content="1">
+  <title>samloader-rs — Firmware Downloader &amp; Odin Web Flasher</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <!-- Apply the stored theme before first paint to avoid a flash; see ui/theme.js -->
@@ -24,7 +25,7 @@
         </div>
         <div class="brand-text">
           <span class="brand-title">samloader-rs</span>
-          <span class="brand-pill">Odin Web Flasher</span>
+          <span class="brand-pill">Downloader &amp; Flasher</span>
           <!-- Filled in once WASM is initialized -->
           <span id="app-version" class="brand-version" title="samloader-web version" hidden></span>
         </div>
@@ -79,27 +80,28 @@
       </div>
 
       <div class="card-body">
-        <!-- Empty State (shown when no device is paired) -->
-        <div id="device-empty-state" class="device-empty-state">
-          <div class="empty-icon-circle">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="6" y="2" width="12" height="20" rx="2.5"/>
-              <path d="M10 18h4"/>
-              <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
-            </svg>
+        <!-- Compact Empty State (shown when no device is paired) -->
+        <div id="device-empty-state" class="device-empty-bar">
+          <div class="device-empty-info">
+            <span class="empty-icon-pill" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="2" width="12" height="20" rx="2.5"/>
+                <path d="M10 18h4"/>
+                <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
+              </svg>
+            </span>
+            <span class="device-empty-text">
+              <strong>No device connected</strong> — optional for downloading, required for flashing
+            </span>
           </div>
-          <div class="empty-state-title">No device connected</div>
-          <p class="empty-state-desc">
-            Plug in your Samsung device via USB. Pair a <strong>Download Mode</strong> device to flash firmware, or pair a <strong>Normal Mode</strong> device to reboot it into Download Mode.
-          </p>
           <div id="device-pair-toolbar" class="device-pair-toolbar">
-            <button type="button" id="btn-pair-download" class="btn btn-primary">
+            <button type="button" id="btn-pair-download" class="btn btn-sm btn-primary">
               <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M10 4v12M4 10h12" stroke-linecap="round"/>
               </svg>
               Add Download Mode device
             </button>
-            <button type="button" id="btn-pair-normal" class="btn btn-outline">
+            <button type="button" id="btn-pair-normal" class="btn btn-sm btn-outline">
               <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                 <rect x="6" y="2.5" width="8" height="15" rx="1.8"/>
                 <circle cx="10" cy="14.5" r="0.8" fill="currentColor"/>
@@ -161,70 +163,232 @@
       </div>
     </section>
 
-    <!-- Select Firmware & Flash (shown when a Download Mode device is connected) -->
-    <section id="slots-card" class="card slots-card" hidden>
+    <!-- Firmware Downloader & Flasher (always visible) -->
+    <section id="slots-card" class="card slots-card">
       <div class="card-header">
         <div>
-          <h2 class="card-title">Select firmware &amp; flash</h2>
-          <p class="card-subtitle">Select TAR packages for Odin slots or add individual partition files</p>
+          <h2 class="card-title">Firmware &amp; flashing</h2>
+          <p id="firmware-card-subtitle" class="card-subtitle">Download official firmware from Samsung servers or load local Odin packages</p>
         </div>
-        <div class="slots-header-actions">
-          <label class="inline-check-toggle" for="opt-skip-md5">
-            <input type="checkbox" id="opt-skip-md5" role="switch">
-            <span class="md-switch-track" aria-hidden="true">
-              <span class="md-switch-thumb"></span>
-            </span>
-            <span>Skip MD5</span>
+        <div id="source-switcher" class="source-segmented-group" role="radiogroup" aria-label="Firmware source">
+          <label class="source-segmented-option">
+            <input type="radio" name="firmware-source" value="server" checked>
+            <span>Samsung Server</span>
           </label>
-          <button type="button" id="btn-clear-slots" class="btn-clear-all" title="Clear all package slots and partition files">Clear All</button>
-          <input type="file" id="input-partition-files" multiple hidden>
-          <button type="button" id="btn-add-partition" class="btn btn-sm btn-primary-outline">
-            <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <path d="M10 4v12M4 10h12" stroke-linecap="round"/>
-            </svg>
-            Add Partition File
-          </button>
+          <label class="source-segmented-option">
+            <input type="radio" name="firmware-source" value="local">
+            <span>Local Files</span>
+          </label>
         </div>
       </div>
 
       <div class="card-body">
-        <!-- Package slots, rendered from PACKAGE_SLOTS in app.js -->
-        <div id="slots-grid" class="slots-grid"></div>
-        <template id="slot-template">
-          <div class="slot-box">
-            <input type="file" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
-            <div class="dropzone" tabindex="0" role="button">
-              <div class="slot-left">
-                <span class="slot-badge"></span>
-                <div class="dropzone-content">
-                  <span class="slot-label"></span>
-                  <span class="file-name"></span>
+        <!-- Samsung Server Panel -->
+        <div id="server-panel" class="server-panel">
+          <!-- Userscript Bridge Status / Warning Banner -->
+          <div id="fus-bridge-banner" class="fus-bridge-banner">
+            <div id="fus-bridge-setup" class="bridge-setup-banner" role="alert" hidden>
+              <div class="bridge-setup-header">
+                <div class="bridge-setup-title-wrap">
+                  <svg class="bridge-setup-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="10" cy="10" r="8"/>
+                    <path d="M10 6.5v4.5M10 13.5h.01" stroke-linecap="round"/>
+                  </svg>
+                  <strong id="fus-bridge-banner-title">FUS Bridge Userscript Required</strong>
+                </div>
+                <div class="bridge-setup-actions">
+                  <button type="button" id="btn-reload-bridge" class="btn btn-sm btn-primary-outline">Reload Page</button>
+                  <button type="button" id="btn-recheck-bridge" class="btn btn-sm btn-outline">Recheck</button>
                 </div>
               </div>
-              <div class="slot-right">
-                <span class="file-size"></span>
-                <span class="badge badge-idle">Empty</span>
-                <button type="button" class="btn-clear-slot" title="Remove file" hidden>&times;</button>
+              <p id="fus-bridge-banner-desc" class="bridge-setup-desc">
+                Samsung FUS blocks browser CORS and serves firmware binaries over plain HTTP. Install the local bridge userscript so this page can fetch firmware directly.
+              </p>
+              <ol class="bridge-steps">
+                <li id="bridge-step-tampermonkey">Install <strong>Tampermonkey</strong>.</li>
+                <li class="bridge-install-step">
+                  <span id="bridge-install-step-label">Install the bridge userscript:</span>
+                  <span class="bridge-install-actions">
+                    <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Userscript</a>
+                    <button type="button" class="btn btn-sm btn-outline btn-copy-userscript" title="Copy samloader-fus-bridge.user.js source for manual installation">Copy Script</button>
+                    <a class="btn btn-sm btn-outline" href="samloader-fus-bridge.user.js" download="samloader-fus-bridge.user.js" title="Download samloader-fus-bridge.user.js file">Download .user.js</a>
+                  </span>
+                </li>
+                <li id="bridge-reload-step">Click <strong>Reload Page</strong> so your userscript manager injects the bridge into this tab.</li>
+              </ol>
+              <p id="fus-bridge-feedback" class="bridge-setup-feedback" hidden></p>
+            </div>
+            <div id="fus-bridge-connected" class="fus-bridge-connected" hidden>
+              <div id="fus-bridge-badge" class="fus-bridge-badge">
+                <span class="chip-dot" aria-hidden="true"></span>
+                <span id="fus-bridge-badge-text">FUS Bridge connected</span>
               </div>
             </div>
-            <div class="slot-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-              <div class="progress-bar-fill" style="width: 0%"></div>
-            </div>
           </div>
-        </template>
 
-        <!-- Individual Partition Files List -->
-        <div id="partition-files-section" class="partition-files-section" hidden>
-          <div class="partition-section-header">
-            <div class="partition-section-title-group">
-              <span class="partition-section-title">Individual Partition Files</span>
-              <span class="partition-section-hint">Drag to reorder • Leave target empty to auto-match by filename, or specify a partition name / ID</span>
+          <!-- OPFS Cache Indicator (hidden unless cache exists) -->
+          <div id="opfs-cache-banner" class="opfs-cache-banner" hidden>
+            <div class="opfs-cache-info">
+              <span id="opfs-cache-title" class="opfs-cache-title"></span>
+              <span id="opfs-cache-meta" class="opfs-cache-meta"></span>
+            </div>
+            <div class="opfs-cache-actions">
+              <button type="button" id="btn-save-opfs-cache" class="btn btn-sm btn-primary-outline" hidden>Save Files</button>
+              <button type="button" id="btn-clear-opfs-cache" class="btn btn-sm btn-outline">Clear Cache</button>
             </div>
           </div>
-          <div id="partition-list" class="partition-list" role="list" aria-label="Individual partition files"></div>
+
+          <!-- Firmware Lookup Form -->
+          <form id="server-lookup-form" class="server-lookup-form" novalidate>
+            <div class="server-lookup-fields">
+              <div class="field-group server-field-model">
+                <label for="server-model" class="field-title">Device Model</label>
+                <input type="text" id="server-model" class="text-input-sm" placeholder="e.g. SM-S931U1" autocomplete="off" autocapitalize="characters" spellcheck="false">
+              </div>
+              <div class="field-group server-field-region">
+                <label for="server-region" class="field-title">Region / CSC</label>
+                <input type="text" id="server-region" class="text-input-sm" maxlength="3" placeholder="e.g. XAA" autocomplete="off" autocapitalize="characters" spellcheck="false">
+              </div>
+              <div class="server-lookup-actions">
+                <button type="button" id="btn-detect-server-device" class="btn btn-outline" title="Fill Model and Region from connected Download Mode device" hidden>
+                  <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="9" cy="9" r="5.5"/>
+                    <path d="M13.2 13.2L17 17" stroke-linecap="round"/>
+                  </svg>
+                  Detect from device
+                </button>
+                <button type="submit" id="btn-check-versions" class="btn btn-primary" disabled>Check Versions</button>
+              </div>
+            </div>
+            <div class="server-lookup-subrow">
+              <button type="button" id="btn-toggle-custom-version" class="text-action-link">Enter custom version manually</button>
+              <span id="server-lookup-error" class="server-inline-error" role="alert" hidden></span>
+            </div>
+          </form>
+
+          <!-- Version Picker (shown after lookup or when custom version toggled) -->
+          <div id="server-version-section" class="server-version-section" hidden>
+            <div class="server-version-header">
+              <label for="server-version-select" class="field-title">Firmware Version</label>
+              <span id="server-device-bl-pill" class="device-bl-pill" hidden></span>
+            </div>
+            <select id="server-version-select" class="select-input select-input-full"></select>
+            <div id="server-custom-version-row" class="server-custom-version-row" hidden>
+              <input type="text" id="server-custom-version" class="text-input-sm" placeholder="PDA/CSC/CP or PDA/CSC/CP/BL" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Custom firmware version">
+              <button type="button" id="btn-inspect-custom" class="btn btn-primary-outline">Inspect</button>
+            </div>
+            <div id="server-inspect-loading" class="server-inspect-loading" role="status" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <span>Inspecting firmware archive index…</span>
+            </div>
+          </div>
+
+          <!-- Archive Contents & Component Selector (shown once inspected) -->
+          <div id="server-archive-section" class="server-archive-section" hidden>
+            <div id="server-archive-summary" class="server-archive-summary"></div>
+
+            <div class="server-archive-controls">
+              <div class="archive-format-group">
+                <span class="field-title">Output Format</span>
+                <div class="source-segmented-group source-segmented-sm" role="radiogroup" aria-label="Output format">
+                  <label class="source-segmented-option">
+                    <input type="radio" name="server-output-mode" value="entries" checked>
+                    <span>Extract Components</span>
+                  </label>
+                  <label class="source-segmented-option">
+                    <input type="radio" name="server-output-mode" value="zip">
+                    <span>Full .zip Archive</span>
+                  </label>
+                </div>
+              </div>
+              <div class="archive-concurrency-group">
+                <label for="server-concurrency" class="field-title">Parallel connections</label>
+                <select id="server-concurrency" class="select-input">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <option value="6" selected>6</option>
+                  <option value="7">7</option>
+                  <option value="8">8</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="server-zip-note" class="server-zip-note" hidden></div>
+
+            <div id="server-entries-wrap" class="server-entries-wrap">
+              <div class="server-entries-header">
+                <span class="partition-section-title">Archive Components</span>
+                <span id="server-entries-summary" class="server-entries-summary"></span>
+              </div>
+              <div id="server-entries-list" class="server-entries-list" role="list" aria-label="Firmware components"></div>
+            </div>
+          </div>
         </div>
 
-        <!-- Advanced Options: folded by default, with a summary of the active ones -->
+        <!-- Local Files Panel -->
+        <div id="local-panel" class="local-panel" hidden>
+          <div class="local-panel-toolbar">
+            <span class="local-panel-hint">Select TAR packages for Odin slots or add individual partition files</span>
+            <div class="slots-header-actions">
+              <label class="inline-check-toggle" for="opt-skip-md5">
+                <input type="checkbox" id="opt-skip-md5" role="switch">
+                <span class="md-switch-track" aria-hidden="true">
+                  <span class="md-switch-thumb"></span>
+                </span>
+                <span>Skip MD5</span>
+              </label>
+              <button type="button" id="btn-clear-slots" class="btn-clear-all" title="Clear all package slots and partition files">Clear All</button>
+              <input type="file" id="input-partition-files" multiple hidden>
+              <button type="button" id="btn-add-partition" class="btn btn-sm btn-primary-outline">
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M10 4v12M4 10h12" stroke-linecap="round"/>
+                </svg>
+                Add Partition File
+              </button>
+            </div>
+          </div>
+
+          <!-- Package slots, rendered from PACKAGE_SLOTS in app.js -->
+          <div id="slots-grid" class="slots-grid"></div>
+          <template id="slot-template">
+            <div class="slot-box">
+              <input type="file" class="slot-file-input" accept=".tar,.md5,.tar.md5" hidden>
+              <div class="dropzone" tabindex="0" role="button">
+                <div class="slot-left">
+                  <span class="slot-badge"></span>
+                  <div class="dropzone-content">
+                    <span class="slot-label"></span>
+                    <span class="file-name"></span>
+                  </div>
+                </div>
+                <div class="slot-right">
+                  <span class="file-size"></span>
+                  <span class="badge badge-idle">Empty</span>
+                  <button type="button" class="btn-clear-slot" title="Remove file" hidden>&times;</button>
+                </div>
+              </div>
+              <div class="slot-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="progress-bar-fill" style="width: 0%"></div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Individual Partition Files List -->
+          <div id="partition-files-section" class="partition-files-section" hidden>
+            <div class="partition-section-header">
+              <div class="partition-section-title-group">
+                <span class="partition-section-title">Individual Partition Files</span>
+                <span class="partition-section-hint">Drag to reorder • Leave target empty to auto-match by filename, or specify a partition name / ID</span>
+              </div>
+            </div>
+            <div id="partition-list" class="partition-list" role="list" aria-label="Individual partition files"></div>
+          </div>
+        </div>
+
+        <!-- Advanced Options: folded by default, shared by Local Flash and Download & Flash -->
         <details id="advanced-options" class="advanced-options">
           <summary class="advanced-summary">
             <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -294,15 +458,16 @@
         </details>
 
         <div class="action-bar">
-          <!-- Outcome of the last flash, kept until dismissed or the next flash -->
+          <!-- Outcome of the last operation, kept until dismissed or the next run -->
           <div id="flash-result" class="flash-result" hidden>
             <span id="flash-result-text" class="flash-result-text"></span>
+            <button type="button" id="btn-load-into-local" class="btn btn-sm btn-primary-outline" hidden>Load into Local Flash</button>
             <button type="button" id="btn-show-log" class="flash-result-link" hidden>Show log</button>
             <button type="button" id="btn-dismiss-result" class="btn-clear-slot" title="Dismiss" aria-label="Dismiss">&times;</button>
           </div>
 
           <div id="action-controls" class="action-controls">
-            <div class="when-done-group">
+            <div id="when-done-group" class="when-done-group">
               <label for="opt-reboot-mode" class="field-title">When done</label>
               <select id="opt-reboot-mode" class="select-input select-input-action" title="What the device does after flashing or dumping the PIT">
                 <option value="normal" selected>Reboot to Android</option>
@@ -310,9 +475,9 @@
                 <option value="none">Stay in Download Mode</option>
               </select>
             </div>
-            <!-- Both actions open an Odin session and apply the "When done" setting afterwards -->
+            <!-- Odin actions and Download actions -->
             <div class="action-bar-group">
-              <button type="button" id="btn-dump-pit" class="btn btn-outline" title="Download and print the device's Partition Information Table (PIT), then apply the &quot;When done&quot; setting">
+              <button type="button" id="btn-dump-pit" class="btn btn-outline" title="Download and print the device's Partition Information Table (PIT), then apply the &quot;When done&quot; setting" hidden>
                 <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <rect x="4" y="3" width="12" height="14" rx="1.5"/>
                   <path d="M7 7h6M7 10.5h6M7 14h4" stroke-linecap="round"/>
@@ -325,7 +490,19 @@
                 </svg>
                 Save PIT
               </button>
-              <button type="button" id="btn-flash-firmware" class="btn btn-flash" disabled>
+              <button type="button" id="btn-download-only" class="btn btn-outline" disabled>
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 16h12" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Download
+              </button>
+              <button type="button" id="btn-download-flash" class="btn btn-flash" disabled>
+                <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M11.3 1.5L4.5 11h5l-.8 7.5L15.5 9h-5l.8-7.5z"/>
+                </svg>
+                Download &amp; Flash
+              </button>
+              <button type="button" id="btn-flash-firmware" class="btn btn-flash" disabled hidden>
                 <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                   <path d="M11.3 1.5L4.5 11h5l-.8 7.5L15.5 9h-5l.8-7.5z"/>
                 </svg>
@@ -333,14 +510,18 @@
               </button>
             </div>
           </div>
+          <p id="server-flash-hint" class="server-flash-hint" hidden></p>
 
-          <!-- Replaces the controls while flashing -->
+          <!-- Replaces the controls while downloading or flashing -->
           <div id="flash-progress-panel" class="flash-progress" hidden>
             <div class="flash-progress-header">
               <span id="flash-status-text" class="flash-status-text">Preparing firmware...</span>
-              <span id="flash-percent-text" class="progress-percent-pill">0%</span>
+              <div class="flash-progress-meta">
+                <span id="flash-percent-text" class="progress-percent-pill">0%</span>
+                <button type="button" id="btn-cancel-operation" class="btn btn-sm btn-outline btn-cancel-op" hidden>Cancel</button>
+              </div>
             </div>
-            <div class="main-progress-bg" role="progressbar" aria-label="Flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="main-progress-bg" role="progressbar" aria-label="Operation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
             </div>
             <span id="flash-detail-text" class="flash-detail-text"></span>

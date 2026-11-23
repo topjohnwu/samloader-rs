@@ -30,11 +30,35 @@ export const state = {
   selectedBackend: null,
   rebootMode: "normal",
   skipMd5: false,
+  verbose: false,
+  firmwareSource: "server",
   device: null,
   slots: Object.fromEntries(SLOTS.map((slot) => [slot, null])),
   md5Results: {},
   deviceModel: null, // Model reported by the last DVIF query of the current device
+  deviceSalesCode: null, // Sales code / CSC reported by the last DVIF query
+  deviceBootloaderVersion: null, // Bootloader version reported by the last DVIF query
+  hasLastPit: false,
   partitions: [],
   nextPartitionId: 1,
   isBusy: false,
+  fusBridge: {
+    checked: false,
+    connected: false,
+    version: null,
+    outdated: false,
+  },
+  serverQuerying: false,
+  serverHistory: null,
+  serverInspect: null,
+  serverOutputMode: "entries",
+  serverConcurrency: 6,
+  serverSelection: {
+    validForDownload: false,
+    validForFlash: false,
+    hasBothCsc: false,
+    hasOdinComponent: false,
+  },
+  opfsCache: null,
+  lastDownloadedDir: null,
 };

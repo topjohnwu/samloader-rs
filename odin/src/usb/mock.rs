@@ -161,7 +161,7 @@ impl DeviceProfile {
             storage_firmware_version: "0800".to_string(),
             storage_product_name: "KLUEG8UHDB".to_string(),
             provisioning_status: "2".to_string(),
-            default_sales_code: "TUR".to_string(),
+            default_sales_code: "BRI".to_string(),
             temperature_c: 32,
             usb_product_name: Some("SAMSUNG_Android".to_string()),
             protocol_version: 3,
@@ -799,7 +799,7 @@ mod tests {
             assert_eq!(info.storage_capacity_gb, Some(512));
             assert_eq!(info.storage_vendor.as_deref(), Some("SAMSUNG"));
             assert_eq!(info.storage_product_name.as_deref(), Some("KLUEG8UHDB"));
-            assert_eq!(info.sales_code.as_deref(), Some("TUR"));
+            assert_eq!(info.sales_code.as_deref(), Some("BRI"));
 
             // 2. Handshake & Begin Session (protocol v3, LZ4 supported)
             let mut session = connection.begin_session().await.unwrap();
@@ -815,7 +815,7 @@ mod tests {
             // 4. Opcode 0x69 in-session DeviceInfo
             let session_info = session.dump_device_info().await.unwrap();
             assert_eq!(session_info.model.as_deref(), Some("SM-F968B"));
-            assert_eq!(session_info.sales_code.as_deref(), Some("TUR"));
+            assert_eq!(session_info.sales_code.as_deref(), Some("BRI"));
 
             // 5. Dynamic partition check
             assert!(session.check_super_size(1024 * 1024 * 100).await.is_ok());

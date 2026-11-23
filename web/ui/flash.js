@@ -15,7 +15,7 @@
 // Flashing, with overall progress, transfer speed and ETA.
 
 import { prepareFlash } from "../bridge.js";
-import { state } from "./state.js";
+import { PACKAGE_SLOTS, state } from "./state.js";
 import { formatBytes, setBarPercent, announce, formatDuration } from "./util.js";
 import { scheduleLogFlush, appendLog, reportError, openLog } from "./log.js";
 import { runExclusive } from "./controls.js";
@@ -98,35 +98,80 @@ export function handleProgressEvent(event) {
   }
 }
 
-// --- Flash Panel ---
-// While flashing, the progress panel replaces the flash controls in the action bar,
+// --- Flash & Operation Panel ---
+// While downloading or flashing, the progress panel replaces the controls in the action bar,
 // and the outcome is shown above them afterwards.
-function setFlashInProgress(inProgress) {
+let activeCancelHandler = null;
+
+export function setFlashInProgress(inProgress) {
   const controls = document.getElementById("action-controls");
   const panel = document.getElementById("flash-progress-panel");
+  const hint = document.getElementById("server-flash-hint");
   if (controls) controls.hidden = inProgress;
   if (panel) panel.hidden = !inProgress;
+  if (hint && inProgress) hint.hidden = true;
 }
 
-function showFlashResult(success, message) {
+export function setCancelOperationButton({
+  visible,
+  disabled = false,
+  label = "Cancel",
+  onCancel = null,
+} = {}) {
+  activeCancelHandler = visible ? onCancel : null;
+  const btn = document.getElementById("btn-cancel-operation");
+  if (!btn) return;
+  btn.hidden = !visible;
+  btn.disabled = Boolean(disabled);
+  btn.textContent = label;
+}
+
+export function updateOperationProgress({ statusText, percent, detailText } = {}) {
+  const progressBar = document.getElementById("flash-progress-bar");
+  const percentText = document.getElementById("flash-percent-text");
+  const statusEl = document.getElementById("flash-status-text");
+  const detailEl = document.getElementById("flash-detail-text");
+  if (typeof percent === "number") {
+    const clamped = Math.max(0, Math.min(100, percent));
+    setBarPercent(progressBar, clamped);
+    if (percentText) percentText.textContent = `${Math.floor(clamped)}%`;
+  }
+  if (statusEl && statusText !== undefined) statusEl.textContent = statusText;
+  if (detailEl && detailText !== undefined) detailEl.textContent = detailText;
+}
+
+export function showOperationResult(
+  variant,
+  message,
+  { showLog = variant === "error", showLoadIntoLocal = false } = {}
+) {
   const result = document.getElementById("flash-result");
   const text = document.getElementById("flash-result-text");
   const showLogBtn = document.getElementById("btn-show-log");
+  const loadLocalBtn = document.getElementById("btn-load-into-local");
   if (!result || !text) return;
-  result.classList.toggle("result-success", success);
-  result.classList.toggle("result-error", !success);
+  result.classList.toggle("result-success", variant === "success");
+  result.classList.toggle("result-error", variant === "error");
+  result.classList.toggle("result-warning", variant === "warning");
   text.textContent = message;
-  if (showLogBtn) showLogBtn.hidden = success;
+  if (showLogBtn) showLogBtn.hidden = !showLog;
+  if (loadLocalBtn) loadLocalBtn.hidden = !showLoadIntoLocal;
   result.hidden = false;
 }
 
-function hideFlashResult() {
+export function hideFlashResult() {
   const result = document.getElementById("flash-result");
+  const loadLocalBtn = document.getElementById("btn-load-into-local");
+  if (loadLocalBtn) loadLocalBtn.hidden = true;
   if (result) result.hidden = true;
 }
 
+function showFlashResult(success, message) {
+  showOperationResult(success ? "success" : "error", message, { showLog: !success });
+}
+
 // Brings the action bar into view, in case the page was scrolled elsewhere
-function revealActionBar() {
+export function revealActionBar() {
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   document
     .querySelector(".action-bar")
@@ -150,104 +195,138 @@ export function setupFlashPanel() {
     openLog();
     document.querySelector(".log-card")?.scrollIntoView({ block: "nearest" });
   });
+  document.getElementById("btn-cancel-operation")?.addEventListener("click", () => {
+    activeCancelHandler?.();
+  });
+}
+
+async function runFlashWithFiles(files, { skipWipeConfirmAlreadyAsked = false } = {}) {
+  const statusText = document.getElementById("flash-status-text");
+  const detailText = document.getElementById("flash-detail-text");
+  const percentText = document.getElementById("flash-percent-text");
+  const progressBar = document.getElementById("flash-progress-bar");
+
+  resetFlashStats();
+  setCancelOperationButton({ visible: false });
+  setBarPercent(progressBar, 0);
+  if (detailText) detailText.textContent = "";
+  if (percentText) percentText.textContent = "0%";
+  if (statusText) statusText.textContent = "Preparing firmware...";
+  hideFlashResult();
+  setFlashInProgress(true);
+  revealActionBar();
+  appendLog("=== Starting Flashing Session ===");
+
+  const preparedFiles = { ...files };
+  if (!preparedFiles.PIT && state.slots.PIT) {
+    preparedFiles.PIT = state.slots.PIT;
+  }
+
+  const slotNames = PACKAGE_SLOTS.map((s) => s.id).filter((id) => preparedFiles[id]);
+  if (preparedFiles.PIT) slotNames.push("PIT");
+  if (slotNames.length > 0) {
+    appendLog(`Active flashing slots: ${slotNames.join(", ")}`);
+  }
+  if (Array.isArray(preparedFiles.partitions) && preparedFiles.partitions.length > 0) {
+    appendLog(`Individual partition files: ${preparedFiles.partitions.length}`);
+  }
+
+  try {
+    for (const slot of slotNames) {
+      const file = preparedFiles[slot];
+      appendLog(`Preparing slot ${slot}: ${file.name} (${formatBytes(file.size)})...`);
+    }
+    if (Array.isArray(preparedFiles.partitions)) {
+      for (const entry of preparedFiles.partitions) {
+        const target = entry.partition?.trim();
+        const targetDesc = target ? `target: ${target}` : "auto-match";
+        appendLog(
+          `Preparing partition (${targetDesc}): ${entry.file.name} (${formatBytes(entry.file.size)})...`
+        );
+      }
+    }
+
+    const eraseChk = document.getElementById("opt-nand-erase");
+    const disableVerityChk = document.getElementById("opt-disable-verity");
+    const disableVerificationChk = document.getElementById("opt-disable-verification");
+    const skipSizeCheckChk = document.getElementById("opt-skip-size-check");
+    const salesCodeInput = document.getElementById("opt-sales-code");
+
+    const options = {
+      reboot: state.rebootMode,
+      erase: eraseChk ? eraseChk.checked : false,
+      disable_verity: disableVerityChk ? disableVerityChk.checked : false,
+      disable_verification: disableVerificationChk ? disableVerificationChk.checked : false,
+      skip_size_check: skipSizeCheckChk ? skipSizeCheckChk.checked : false,
+      sales_code:
+        salesCodeInput && salesCodeInput.value.trim()
+          ? salesCodeInput.value.trim().toUpperCase()
+          : undefined,
+    };
+
+    appendLog("Validating firmware files...");
+    const job = await prepareFlash(preparedFiles, options);
+
+    // Mirror the CLI: confirm before a flash that wipes the device's data
+    const wipeReasons = [];
+    if (job.erases_userdata()) wipeReasons.push("NAND Erase is enabled.");
+    if (job.flashes_userdata()) wipeReasons.push("The flash list contains userdata.");
+    if (
+      wipeReasons.length > 0 &&
+      !skipWipeConfirmAlreadyAsked &&
+      !confirm(`${wipeReasons.join("\n")}\n\nThis will wipe the device's data. Continue?`)
+    ) {
+      job.free();
+      announce("Flashing aborted");
+      appendLog("Flashing aborted by user.");
+      return { success: false, aborted: true };
+    }
+
+    if (statusText) statusText.textContent = "Flashing firmware...";
+    appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
+    await job.execute(state.selectedBackend, false);
+
+    setBarPercent(progressBar, 100);
+    if (percentText) percentText.textContent = "100%";
+    showFlashResult(true, `Flashing complete. ${rebootOutcome()}`);
+    announce("Flashing complete");
+    appendLog("=== Flashing Process Finished Successfully ===");
+    return { success: true, aborted: false };
+  } catch (err) {
+    // Errors may span many lines; the banner shows the first, the log all of them
+    showFlashResult(false, `Flashing failed: ${String(err).split("\n")[0]}`);
+    announce("Flashing failed");
+    reportError(`[FLASH ERROR] ${err}`);
+    return { success: false, aborted: false, error: err };
+  } finally {
+    setCancelOperationButton({ visible: false });
+    setFlashInProgress(false);
+  }
+}
+
+export async function executeFlashWithFiles(files, options = {}) {
+  if (state.isBusy) {
+    return await runFlashWithFiles(files, options);
+  }
+  let result = { success: false, aborted: false };
+  await runExclusive(async () => {
+    result = await runFlashWithFiles(files, options);
+  });
+  return result;
 }
 
 export async function executeFlashProcess() {
-  await runExclusive(async () => {
-    const statusText = document.getElementById("flash-status-text");
-    const detailText = document.getElementById("flash-detail-text");
-    const percentText = document.getElementById("flash-percent-text");
-    const progressBar = document.getElementById("flash-progress-bar");
-
-    resetFlashStats();
-    setBarPercent(progressBar, 0);
-    if (detailText) detailText.textContent = "";
-    if (percentText) percentText.textContent = "0%";
-    if (statusText) statusText.textContent = "Preparing firmware...";
-    hideFlashResult();
-    setFlashInProgress(true);
-    revealActionBar();
-    appendLog("=== Starting Flashing Session ===");
-
-    const activeSlots = Object.entries(state.slots).filter(([_, file]) => file !== null);
-    if (activeSlots.length > 0) {
-      appendLog(`Active flashing slots: ${activeSlots.map(([s]) => s).join(", ")}`);
+  const files = {};
+  for (const [slot, file] of Object.entries(state.slots)) {
+    if (file !== null) {
+      files[slot] = file;
     }
-    if (state.partitions.length > 0) {
-      appendLog(`Individual partition files: ${state.partitions.length}`);
-    }
-
-    try {
-      const files = {};
-      for (const [slot, file] of activeSlots) {
-        appendLog(`Preparing slot ${slot}: ${file.name} (${formatBytes(file.size)})...`);
-        files[slot] = file;
-      }
-      if (state.partitions.length > 0) {
-        files.partitions = state.partitions.map((entry) => {
-          const target = entry.partition.trim();
-          const targetDesc = target ? `target: ${target}` : "auto-match";
-          appendLog(
-            `Preparing partition (${targetDesc}): ${entry.file.name} (${formatBytes(entry.file.size)})...`
-          );
-          return {
-            file: entry.file,
-            partition: target || null,
-          };
-        });
-      }
-
-      const eraseChk = document.getElementById("opt-nand-erase");
-      const disableVerityChk = document.getElementById("opt-disable-verity");
-      const disableVerificationChk = document.getElementById("opt-disable-verification");
-      const skipSizeCheckChk = document.getElementById("opt-skip-size-check");
-      const salesCodeInput = document.getElementById("opt-sales-code");
-
-      const options = {
-        reboot: state.rebootMode,
-        erase: eraseChk ? eraseChk.checked : false,
-        disable_verity: disableVerityChk ? disableVerityChk.checked : false,
-        disable_verification: disableVerificationChk ? disableVerificationChk.checked : false,
-        skip_size_check: skipSizeCheckChk ? skipSizeCheckChk.checked : false,
-        sales_code:
-          salesCodeInput && salesCodeInput.value.trim()
-            ? salesCodeInput.value.trim().toUpperCase()
-            : undefined,
-      };
-
-      appendLog("Validating firmware files...");
-      const job = await prepareFlash(files, options);
-
-      // Mirror the CLI: confirm before a flash that wipes the device's data
-      const wipeReasons = [];
-      if (job.erases_userdata()) wipeReasons.push("NAND Erase is enabled.");
-      if (job.flashes_userdata()) wipeReasons.push("The flash list contains userdata.");
-      if (
-        wipeReasons.length > 0 &&
-        !confirm(`${wipeReasons.join("\n")}\n\nThis will wipe the device's data. Continue?`)
-      ) {
-        job.free();
-        announce("Flashing aborted");
-        appendLog("Flashing aborted by user.");
-        return;
-      }
-
-      if (statusText) statusText.textContent = "Flashing firmware...";
-      appendLog(`Executing flash via backend '${state.selectedBackend}'...`);
-      await job.execute(state.selectedBackend, false);
-
-      setBarPercent(progressBar, 100);
-      if (percentText) percentText.textContent = "100%";
-      showFlashResult(true, `Flashing complete. ${rebootOutcome()}`);
-      announce("Flashing complete");
-      appendLog("=== Flashing Process Finished Successfully ===");
-    } catch (err) {
-      // Errors may span many lines; the banner shows the first, the log all of them
-      showFlashResult(false, `Flashing failed: ${String(err).split("\n")[0]}`);
-      announce("Flashing failed");
-      reportError(`[FLASH ERROR] ${err}`);
-    } finally {
-      setFlashInProgress(false);
-    }
-  });
+  }
+  if (state.partitions.length > 0) {
+    files.partitions = state.partitions.map((entry) => ({
+      file: entry.file,
+      partition: entry.partition.trim() || null,
+    }));
+  }
+  return await executeFlashWithFiles(files);
 }
