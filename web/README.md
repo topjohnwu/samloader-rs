@@ -31,9 +31,9 @@ The userscript activates only on pages containing `<meta name="samloader-fus-bri
 
 ### OPFS Cache & Resume Checkpoints
 
-- **Download & Flash** (and Download Only when `showDirectoryPicker` is unavailable, such as Edge on Android) stages decrypted files in the browser's Origin Private File System (`samloader-staging/`) with `.part` resume checkpoints and CRC-32 verification.
+- **Download & Flash** stages decrypted files in the browser's Origin Private File System (`samloader-staging/`) with `.part` resume checkpoints and CRC-32 verification.
 - Cancelling or hitting an error keeps the partial OPFS checkpoint so re-running skips already-completed ranges/files.
-- Completed builds in the cache banner offer a **Save Files** button (useful if your browser blocked automatic multi-file downloads) and **Clear Cache** to remove staged files manually. A successful **Download & Flash** automatically clears the OPFS cache afterwards, whereas a failed/aborted flash retains it so retrying skips re-downloading.
+- A successful **Download & Flash** automatically clears the OPFS cache afterwards, whereas a failed/aborted flash retains it so retrying skips re-downloading (or click **Clear Cache** to remove staged files manually).
 
 ## Prerequisites
 

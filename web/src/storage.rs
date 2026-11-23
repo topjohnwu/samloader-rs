@@ -17,7 +17,7 @@
 
 use crate::{js_err_string, js_obj};
 use futures::channel::oneshot;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -32,8 +32,6 @@ use web_sys::{
 const STAGING_DIR_NAME: &str = "samloader-staging";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const FILES_DIR_NAME: &str = "files";
-const MOVE_PROBE_SRC: &str = ".samloader-move-probe.tmp";
-const MOVE_PROBE_DST: &str = ".samloader-move-probe-dst.tmp";
 
 #[wasm_bindgen]
 extern "C" {
@@ -79,11 +77,8 @@ fn validate_filename(filename: &str) -> Result<(), String> {
         || filename == ".."
         || filename.contains(['/', '\\'])
         || filename.bytes().any(|b| b <= 0x1f || b == 0x7f)
-        || filename == MOVE_PROBE_SRC
-        || filename == MOVE_PROBE_DST
         || filename.ends_with(".part")
-        || filename.ends_with(".part.meta")
-        || filename.ends_with(".part.lock");
+        || filename.ends_with(".part.meta");
     if invalid {
         return Err(format!("Invalid filename: {filename}"));
     }
@@ -268,33 +263,6 @@ fn read_sync_all(
     Ok(buf)
 }
 
-async fn probe_directory_move_support(dir: &FileSystemDirectoryHandle) -> bool {
-    let _ = remove_entry_if_exists(dir, MOVE_PROBE_SRC, false).await;
-    let _ = remove_entry_if_exists(dir, MOVE_PROBE_DST, false).await;
-
-    let supported = async {
-        let Some(probe) = get_file_handle(dir, MOVE_PROBE_SRC, true)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return false;
-        };
-        if !has_method(probe.as_ref(), "move") {
-            return false;
-        }
-        match move_file_js(&probe, MOVE_PROBE_DST) {
-            Ok(promise) => JsFuture::from(promise).await.is_ok(),
-            Err(_) => false,
-        }
-    }
-    .await;
-
-    let _ = remove_entry_if_exists(dir, MOVE_PROBE_SRC, false).await;
-    let _ = remove_entry_if_exists(dir, MOVE_PROBE_DST, false).await;
-    supported
-}
-
 async fn move_file_replacing(
     dir: &FileSystemDirectoryHandle,
     fh: &FileSystemFileHandle,
@@ -441,29 +409,24 @@ async fn write_manifest(
         .await?
         .ok_or_else(|| "Failed to create manifest file handle".to_string())?;
 
-    if has_method(fh.as_ref(), "createSyncAccessHandle") {
-        let sync_val = JsFuture::from(fh.create_sync_access_handle())
-            .await
-            .map_err(|e| err_str("manifest createSyncAccessHandle()", e))?;
-        let sync_handle: FileSystemSyncAccessHandle = sync_val.unchecked_into();
-        let res = (|| {
-            sync_handle
-                .truncate_with_f64(0.0)
-                .map_err(|e| err_str("manifest truncate()", e))?;
-            write_sync_all(&sync_handle, text.as_bytes(), 0)?;
-            sync_handle
-                .flush()
-                .map_err(|e| err_str("manifest flush()", e))
-        })();
-        sync_handle.close();
-        return res;
+    if !has_method(fh.as_ref(), "createSyncAccessHandle") {
+        return Err("OPFS manifest write must run in a Web Worker".to_string());
     }
-
-    if has_method(fh.as_ref(), "createWritable") {
-        return write_bytes_writable(&fh, text.as_bytes()).await;
-    }
-
-    Err("OPFS manifest write requires createSyncAccessHandle or createWritable".to_string())
+    let sync_val = JsFuture::from(fh.create_sync_access_handle())
+        .await
+        .map_err(|e| err_str("manifest createSyncAccessHandle()", e))?;
+    let sync_handle: FileSystemSyncAccessHandle = sync_val.unchecked_into();
+    let res = (|| {
+        sync_handle
+            .truncate_with_f64(0.0)
+            .map_err(|e| err_str("manifest truncate()", e))?;
+        write_sync_all(&sync_handle, text.as_bytes(), 0)?;
+        sync_handle
+            .flush()
+            .map_err(|e| err_str("manifest flush()", e))
+    })();
+    sync_handle.close();
+    res
 }
 
 pub(crate) async fn prepare_opfs_build(meta: &OpfsBuildMeta) -> Result<(), String> {
@@ -592,7 +555,7 @@ pub async fn opfs_cache_info() -> Result<JsValue, JsValue> {
                 continue;
             }
             has_files = true;
-            if name.ends_with(".part.meta") || name.ends_with(".part.lock") {
+            if name.ends_with(".part.meta") {
                 continue;
             }
             let fh: FileSystemFileHandle = handle.unchecked_into();
@@ -796,14 +759,8 @@ impl DownloadTarget {
 }
 
 pub(crate) enum DownloadStorage {
-    Opfs {
-        files_dir: FileSystemDirectoryHandle,
-        supports_move: Cell<Option<bool>>,
-    },
-    Directory {
-        dir: FileSystemDirectoryHandle,
-        supports_move: Cell<Option<bool>>,
-    },
+    Opfs(FileSystemDirectoryHandle),
+    Directory(FileSystemDirectoryHandle),
 }
 
 struct OpenedPartDir {
@@ -811,9 +768,6 @@ struct OpenedPartDir {
     data_handle: FileSystemFileHandle,
     filename: String,
     meta_name: String,
-    lock_name: String,
-    use_move: bool,
-    has_resumable_part: bool,
 }
 
 async fn dir_is_complete(
@@ -825,7 +779,6 @@ async fn dir_is_complete(
     validate_filename(filename)?;
     if file_exists(dir, &format!("{filename}.part")).await?
         || file_exists(dir, &format!("{filename}.part.meta")).await?
-        || file_exists(dir, &format!("{filename}.part.lock")).await?
     {
         return Ok(false);
     }
@@ -838,66 +791,35 @@ async fn dir_is_complete(
 
 async fn dir_open_part(
     dir: &FileSystemDirectoryHandle,
-    supports_move: &Cell<Option<bool>>,
     filename: &str,
     force: bool,
 ) -> Result<OpenedPartDir, String> {
     validate_filename(filename)?;
     let part_name = format!("{filename}.part");
     let meta_name = format!("{filename}.part.meta");
-    let lock_name = format!("{filename}.part.lock");
-
-    let has_part = file_exists(dir, &part_name).await?;
-    let has_lock = file_exists(dir, &lock_name).await?;
-
-    let use_move = if !force && has_part {
-        true
-    } else if !force && has_lock {
-        false
-    } else if let Some(cached) = supports_move.get() {
-        cached
-    } else {
-        let probed = probe_directory_move_support(dir).await;
-        supports_move.set(Some(probed));
-        probed
-    };
-
-    let has_resumable_part = !force && if use_move { has_part } else { has_lock };
 
     if force {
         remove_entry_if_exists(dir, &part_name, false).await?;
         remove_entry_if_exists(dir, &meta_name, false).await?;
-        remove_entry_if_exists(dir, &lock_name, false).await?;
-    } else if !has_resumable_part {
+    } else if !file_exists(dir, &part_name).await? {
         remove_entry_if_exists(dir, &meta_name, false).await?;
     }
 
-    if !use_move {
-        let _ = get_file_handle(dir, &lock_name, true).await?;
-    }
-
-    let data_name = if use_move { &part_name } else { filename };
-    let data_handle = get_file_handle(dir, data_name, true)
+    let data_handle = get_file_handle(dir, &part_name, true)
         .await?
-        .ok_or_else(|| format!("Failed to open data file handle '{data_name}'"))?;
+        .ok_or_else(|| format!("Failed to open data file handle '{part_name}'"))?;
 
     Ok(OpenedPartDir {
         dir: dir.clone(),
         data_handle,
         filename: filename.to_string(),
         meta_name,
-        lock_name,
-        use_move,
-        has_resumable_part,
     })
 }
 
 async fn finalize_part_dir(part_dir: &OpenedPartDir) -> Result<(), String> {
-    if part_dir.use_move {
-        move_file_replacing(&part_dir.dir, &part_dir.data_handle, &part_dir.filename).await?;
-    }
+    move_file_replacing(&part_dir.dir, &part_dir.data_handle, &part_dir.filename).await?;
     remove_entry_if_exists(&part_dir.dir, &part_dir.meta_name, false).await?;
-    remove_entry_if_exists(&part_dir.dir, &part_dir.lock_name, false).await?;
     Ok(())
 }
 
@@ -919,15 +841,9 @@ impl DownloadStorage {
                 let files_dir = get_dir_handle(&staging_dir, FILES_DIR_NAME, true)
                     .await?
                     .ok_or_else(|| "Failed to open OPFS files directory".to_string())?;
-                Ok(Self::Opfs {
-                    files_dir,
-                    supports_move: Cell::new(None),
-                })
+                Ok(Self::Opfs(files_dir))
             }
-            DownloadTarget::Directory(dir) => Ok(Self::Directory {
-                dir: dir.clone(),
-                supports_move: Cell::new(None),
-            }),
+            DownloadTarget::Directory(dir) => Ok(Self::Directory(dir.clone())),
         }
     }
 
@@ -938,10 +854,9 @@ impl DownloadStorage {
         max_size: u64,
     ) -> Result<bool, String> {
         match self {
-            Self::Opfs { files_dir, .. } => {
-                dir_is_complete(files_dir, filename, min_size, max_size).await
+            Self::Opfs(dir) | Self::Directory(dir) => {
+                dir_is_complete(dir, filename, min_size, max_size).await
             }
-            Self::Directory { dir, .. } => dir_is_complete(dir, filename, min_size, max_size).await,
         }
     }
 
@@ -951,11 +866,8 @@ impl DownloadStorage {
         force: bool,
     ) -> Result<PartHandle, String> {
         match self {
-            Self::Opfs {
-                files_dir,
-                supports_move,
-            } => {
-                let part_dir = dir_open_part(files_dir, supports_move, filename, force).await?;
+            Self::Opfs(files_dir) => {
+                let part_dir = dir_open_part(files_dir, filename, force).await?;
                 if !has_method(part_dir.data_handle.as_ref(), "createSyncAccessHandle") {
                     return Err(
                         "FileSystemFileHandle.createSyncAccessHandle() must run in a Web Worker"
@@ -968,19 +880,6 @@ impl DownloadStorage {
                         .map_err(|e| err_str("createSyncAccessHandle()", e))?
                         .unchecked_into();
 
-                if !part_dir.use_move
-                    && !part_dir.has_resumable_part
-                    && let Err(e) = (|| {
-                        sync_handle
-                            .truncate_with_f64(0.0)
-                            .map_err(|e| err_str("OPFS truncate(0)", e))?;
-                        sync_handle.flush().map_err(|e| err_str("OPFS flush()", e))
-                    })()
-                {
-                    sync_handle.close();
-                    return Err(e);
-                }
-
                 Ok(PartHandle::Opfs(OpfsPartHandle {
                     part_dir,
                     sync_handle,
@@ -988,12 +887,8 @@ impl DownloadStorage {
                     yielder: None,
                 }))
             }
-            Self::Directory { dir, supports_move } => {
-                let part_dir = dir_open_part(dir, supports_move, filename, force).await?;
-                if !part_dir.use_move && !part_dir.has_resumable_part {
-                    let w = create_writable(&part_dir.data_handle, false).await?;
-                    close_writable(w).await?;
-                }
+            Self::Directory(dir) => {
+                let part_dir = dir_open_part(dir, filename, force).await?;
                 Ok(PartHandle::Directory(DirectoryPartHandle {
                     part_dir,
                     writable: None,

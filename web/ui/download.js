@@ -36,14 +36,6 @@ import {
   updateOperationProgress,
 } from "./flash.js";
 
-function hasDirectoryPicker() {
-  return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
-}
-
-function hasOpfs() {
-  return typeof navigator !== "undefined" && typeof navigator.storage?.getDirectory === "function";
-}
-
 export const COMPONENT_META = {
   bl: { badge: "BL", slot: "BL", label: "Bootloader" },
   ap: { badge: "AP", slot: "AP", label: "System / Application" },
@@ -52,9 +44,6 @@ export const COMPONENT_META = {
   csc: { badge: "CSC", slot: "CSC", label: "Wipe Data (CSC)" },
   userdata: { badge: "USER", slot: "USERDATA", label: "User Data (wipes data)" },
 };
-
-let activeDownloadUrls = [];
-let activeDownloadTimers = [];
 
 export async function mapEntriesToOdinSlots(
   entries,
@@ -83,15 +72,6 @@ export async function refreshOpfsCacheBanner() {
   const banner = document.getElementById("opfs-cache-banner");
   const titleEl = document.getElementById("opfs-cache-title");
   const metaEl = document.getElementById("opfs-cache-meta");
-  const saveBtn = document.getElementById("btn-save-opfs-cache");
-
-  if (!hasOpfs()) {
-    state.opfsCache = null;
-    if (saveBtn) saveBtn.hidden = true;
-    if (banner) banner.hidden = true;
-    updateControlsState();
-    return;
-  }
 
   let info = null;
   try {
@@ -102,7 +82,6 @@ export async function refreshOpfsCacheBanner() {
   state.opfsCache = info;
 
   if (!banner || !info) {
-    if (saveBtn) saveBtn.hidden = true;
     if (banner) banner.hidden = true;
     updateControlsState();
     return;
@@ -118,15 +97,8 @@ export async function refreshOpfsCacheBanner() {
       : `Cached build: ${buildDesc}`;
   }
   if (metaEl) {
-    const statusLabel = info.complete
-      ? state.capabilities.canFlash
-        ? "Ready to flash"
-        : "Ready to save"
-      : "Partial download — resumable";
+    const statusLabel = info.complete ? "Ready to flash" : "Partial download — resumable";
     metaEl.textContent = `${formatBytes(info.totalBytes || 0)} · ${statusLabel}`;
-  }
-  if (saveBtn) {
-    saveBtn.hidden = !(info.complete && Array.isArray(info.files) && info.files.length > 0);
   }
   banner.hidden = false;
   updateControlsState();
@@ -137,7 +109,6 @@ export async function handleClearOpfsCache() {
   await runExclusive(async () => {
     try {
       await clearOpfsCache();
-      revokeDownloadUrls();
       appendLog("Cleared OPFS firmware download cache.");
       await refreshOpfsCacheBanner();
     } catch (err) {
@@ -284,62 +255,6 @@ export async function runDownloadWorker({ target, params }) {
   });
 }
 
-// --- Browser Download Fallback Helpers ---
-export function revokeDownloadUrls() {
-  for (const timer of activeDownloadTimers) {
-    clearTimeout(timer);
-  }
-  activeDownloadTimers = [];
-  for (const url of activeDownloadUrls) {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {
-      // Ignore already revoked URL
-    }
-  }
-  activeDownloadUrls = [];
-}
-
-function triggerBrowserFileDownload(file, index) {
-  const url = URL.createObjectURL(file);
-  activeDownloadUrls.push(url);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = file.name;
-  document.body.appendChild(link);
-  if (index === 0) {
-    link.click();
-    link.remove();
-  } else {
-    const timer = setTimeout(() => {
-      link.click();
-      link.remove();
-    }, index * 250);
-    activeDownloadTimers.push(timer);
-  }
-}
-
-export async function handleSaveOpfsFiles() {
-  if (state.isBusy || state.serverQuerying) return;
-  const cache = state.opfsCache;
-  if (!cache || !cache.complete) return;
-
-  await runExclusive(async () => {
-    try {
-      const opfsFiles = await getOpfsBuildFiles(cache.buildKey);
-      if (!opfsFiles || opfsFiles.length === 0) {
-        showOperationResult("warning", "No cached files available to save.");
-        return;
-      }
-      revokeDownloadUrls();
-      opfsFiles.forEach((f, i) => triggerBrowserFileDownload(f.file, i));
-      appendLog(`Started browser download for ${opfsFiles.length} cached file(s).`);
-    } catch (err) {
-      reportError(`Failed to read cached OPFS files: ${err?.message || err}`);
-    }
-  });
-}
-
 export async function handleLoadIntoLocalFlash(onSwitchToLocal) {
   if (state.isBusy || !state.lastDownloadedDir) return;
   const { dirHandle, files } = state.lastDownloadedDir;
@@ -455,16 +370,11 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 
   await runExclusiveWithSetup(
     async () => {
-      let target = null;
-      let dirHandle = null;
-
-      // Always pick a directory when available so single-file and full-ZIP downloads
-      // can store `.part` / `.part.meta` sidecars for resumable transfers.
+      let dirHandle;
+      // Pick a directory so single-file and full-ZIP downloads can store
+      // `.part` / `.part.meta` sidecars for resumable transfers.
       try {
-        if (hasDirectoryPicker()) {
-          dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-          target = { kind: "directory", dirHandle };
-        }
+        dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
       } catch (err) {
         if (err?.name === "AbortError") {
           return false;
@@ -473,22 +383,10 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
         return false;
       }
 
-      let buildKey = null;
-      if (!target) {
-        if (!hasOpfs()) {
-          reportError(
-            "This browser supports neither the File System Access API nor OPFS for streaming firmware downloads."
-          );
-          return false;
-        }
-        buildKey = `${info.fingerprintHex}:${mode}`;
-        target = createOpfsTarget(buildKey, { model, region, version, info });
-      }
-
       state.lastDownloadedDir = null;
-      return { target, dirHandle, buildKey };
+      return { target: { kind: "directory", dirHandle }, dirHandle };
     },
-    async ({ target, dirHandle, buildKey }) => {
+    async ({ target, dirHandle }) => {
       await executeServerOperation(
         `=== Starting Firmware Download (${model} / ${region} / ${version}) ===`,
         target.kind,
@@ -510,29 +408,16 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 
           updateOperationProgress({ percent: 100 });
 
-          if (target.kind === "directory" && dirHandle) {
-            const hasOdin = (result.files || []).some((f) => f.component !== null);
-            const canLoadIntoLocal = hasOdin && state.capabilities.canFlash;
-            if (canLoadIntoLocal) {
-              state.lastDownloadedDir = { dirHandle, files: result.files };
-            }
-            const summary =
-              result.files.length === 1
-                ? `Downloaded ${result.files[0].name} to "${dirHandle.name}".`
-                : `Downloaded ${result.files.length} file(s) to "${dirHandle.name}".`;
-            showOperationResult("success", summary, { showLoadIntoLocal: canLoadIntoLocal });
-          } else {
-            const opfsFiles = await readWantedOpfsFiles(
-              buildKey,
-              (result.files || []).map((f) => f.name)
-            );
-            revokeDownloadUrls();
-            opfsFiles.forEach((f, i) => triggerBrowserFileDownload(f.file, i));
-            showOperationResult(
-              "success",
-              `Download complete (${opfsFiles.length} file(s)). Your browser should start saving the file(s) — if blocked, click Save Files above. Click Clear Cache when done to reclaim storage.`
-            );
+          const hasOdin = (result.files || []).some((f) => f.component !== null);
+          const canLoadIntoLocal = hasOdin && state.capabilities.canFlash;
+          if (canLoadIntoLocal) {
+            state.lastDownloadedDir = { dirHandle, files: result.files };
           }
+          const summary =
+            result.files.length === 1
+              ? `Downloaded ${result.files[0].name} to "${dirHandle.name}".`
+              : `Downloaded ${result.files.length} file(s) to "${dirHandle.name}".`;
+          showOperationResult("success", summary, { showLoadIntoLocal: canLoadIntoLocal });
 
           announce("Download complete");
           appendLog("=== Firmware Download Complete ===");
@@ -544,7 +429,6 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 
 // --- Download & Flash Action ---
 async function tryGetCompleteCachedFiles(buildKey, requiredEntries) {
-  if (!hasOpfs()) return null;
   try {
     const cacheInfo = await getOpfsCacheInfo();
     if (!cacheInfo || !cacheInfo.complete || cacheInfo.buildKey !== buildKey) {
@@ -603,11 +487,6 @@ export async function handleDownloadAndFlash({
   }
   const skipWipeConfirmAlreadyAsked = wipeReasons.length > 0;
 
-  if (!hasOpfs()) {
-    reportError("OPFS is not supported in this browser, which is required for Download & Flash.");
-    return;
-  }
-
   const { model, region, version, info } = state.serverInspect;
   const buildKey = `${info.fingerprintHex}:entries`;
   state.lastDownloadedDir = null;
@@ -656,7 +535,6 @@ export async function handleDownloadAndFlash({
 
         if (flashRes.success) {
           await clearOpfsCache();
-          revokeDownloadUrls();
           await refreshOpfsCacheBanner();
           appendLog("Cleared OPFS staging cache after successful flash.");
         } else {

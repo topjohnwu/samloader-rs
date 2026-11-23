@@ -261,7 +261,6 @@ export function updateControlsState() {
     "btn-recheck-bridge",
     "btn-reload-bridge",
     "btn-clear-opfs-cache",
-    "btn-save-opfs-cache",
   ].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.disabled = serverBusy;

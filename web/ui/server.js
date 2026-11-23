@@ -33,9 +33,7 @@ import {
   handleDownloadAndFlash,
   handleDownloadOnly,
   handleLoadIntoLocalFlash,
-  handleSaveOpfsFiles,
   refreshOpfsCacheBanner,
-  revokeDownloadUrls,
 } from "./download.js";
 
 const STORAGE_SOURCE = "samloader.firmwareSource";
@@ -951,7 +949,6 @@ export function setupServerPanel() {
   document.querySelectorAll(".btn-copy-userscript").forEach((btn) => {
     btn.addEventListener("click", () => handleCopyUserscript(btn));
   });
-  document.getElementById("btn-save-opfs-cache")?.addEventListener("click", handleSaveOpfsFiles);
   document.getElementById("btn-clear-opfs-cache")?.addEventListener("click", handleClearOpfsCache);
 
   // Lookup form inputs
@@ -1058,7 +1055,6 @@ export function setupServerPanel() {
   // Sync with connected device DVIF & status updates
   setDeviceUpdateListener(handleDeviceUpdated);
   setupBridgeAnnouncementListener();
-  window.addEventListener("pagehide", revokeDownloadUrls);
 
   updateControlsState();
   checkFusBridge({ quiet: true });
