@@ -94,11 +94,11 @@ export function applyCapabilityLayout() {
   const deviceCard = document.getElementById("device-card");
   if (deviceCard) deviceCard.hidden = !canFlash;
 
-  const deviceEmptyText = document.getElementById("device-empty-text");
-  if (deviceEmptyText) {
-    deviceEmptyText.innerHTML = canDownload
-      ? "<strong>No device connected</strong> — optional for downloading, required for flashing"
-      : "<strong>No device connected</strong> — connect a device to flash firmware";
+  const deviceEmptyHint = document.getElementById("device-empty-hint");
+  if (deviceEmptyHint) {
+    deviceEmptyHint.textContent = canDownload
+      ? "Optional for downloading · Required for flashing"
+      : "Connect a device to flash firmware";
   }
 
   const unsupportedCard = document.getElementById("unsupported-browser-card");

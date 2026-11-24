@@ -170,7 +170,7 @@ export async function refreshPairedDevicesStatus() {
       type: "status",
       chipConnected: false,
       chipLabel: "No Device",
-      summaryText: "Connect a Samsung device in Download Mode or Normal Mode",
+      summaryText: "Pair a Samsung device in Download Mode or Normal Mode",
       dvifQueried: false,
     });
     return;

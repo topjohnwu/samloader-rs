@@ -97,7 +97,7 @@
       <div class="card-header">
         <div>
           <h2 class="card-title">Connect a device</h2>
-          <p id="paired-devices-summary" class="card-subtitle">Connect a Samsung device in Download Mode or Normal Mode</p>
+          <p id="paired-devices-summary" class="card-subtitle">Pair a Samsung device in Download Mode or Normal Mode</p>
         </div>
       </div>
 
@@ -112,23 +112,24 @@
                 <path d="M12 7v5m0 0l-2-2m2 2l2-2"/>
               </svg>
             </span>
-            <span id="device-empty-text" class="device-empty-text">
-              <strong>No device connected</strong> — optional for downloading, required for flashing
-            </span>
+            <div class="device-empty-copy">
+              <span class="device-empty-title">No device connected</span>
+              <span id="device-empty-hint" class="device-empty-hint">Optional for downloading · Required for flashing</span>
+            </div>
           </div>
           <div id="device-pair-toolbar" class="device-pair-toolbar">
-            <button type="button" id="btn-pair-download" class="btn btn-sm btn-primary">
-              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M10 4v12M4 10h12" stroke-linecap="round"/>
+            <button type="button" id="btn-pair-download" class="btn btn-sm btn-primary" title="Pair a Samsung device in Download Mode (Odin)">
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 16h12" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-              Add Download Mode device
+              Add Download Mode
             </button>
-            <button type="button" id="btn-pair-normal" class="btn btn-sm btn-outline">
+            <button type="button" id="btn-pair-normal" class="btn btn-sm btn-outline" title="Pair a Samsung device running Android in Normal Mode">
               <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                 <rect x="6" y="2.5" width="8" height="15" rx="1.8"/>
                 <circle cx="10" cy="14.5" r="0.8" fill="currentColor"/>
               </svg>
-              Add Normal Mode device
+              Add Normal Mode
             </button>
           </div>
         </div>

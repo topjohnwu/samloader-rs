@@ -307,6 +307,16 @@ textarea {
   transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
 }
 
+:root[data-theme="dark"] .select-input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='%23c4c7c5'%3E%3Cpath d='M7 10l5 5 5-5H7z'/%3E%3C/svg%3E");
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .select-input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='%23c4c7c5'%3E%3Cpath d='M7 10l5 5 5-5H7z'/%3E%3C/svg%3E");
+  }
+}
+
 .select-input:hover:not(:disabled) {
   border-color: var(--md-sys-color-outline);
   background-color: var(--md-sys-color-surface-container-low);
@@ -458,7 +468,7 @@ textarea {
 }
 
 .card-body {
-  padding: 24px;
+  padding: 20px 24px;
 }
 
 /* Unsupported Browser Notice */
@@ -586,23 +596,27 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
   flex-wrap: wrap;
+  padding: 16px 18px;
+  border-radius: var(--md-shape-md);
+  border: 1px dashed var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface-container-low);
 }
 
 .device-empty-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
-  flex: 1 1 260px;
+  flex: 1 1 280px;
 }
 
 .empty-icon-pill {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  background-color: var(--md-sys-color-surface-container);
+  background-color: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   display: inline-flex;
   align-items: center;
@@ -611,18 +625,29 @@ textarea {
 }
 
 .empty-icon-pill svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
 }
 
-.device-empty-text {
-  font-size: 0.875rem;
-  color: var(--md-sys-color-on-surface-variant);
+.device-empty-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.device-empty-text strong {
-  color: var(--md-sys-color-on-surface);
+.device-empty-title {
+  font-family: 'DM Sans', 'Roboto', sans-serif;
+  font-size: 0.9375rem;
   font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  line-height: 1.35;
+}
+
+.device-empty-hint {
+  font-size: 0.8125rem;
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.4;
 }
 
 .device-pair-toolbar {
@@ -630,6 +655,7 @@ textarea {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 /* Connected Device List */
@@ -650,6 +676,8 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   padding: 14px 18px;
 }
 
@@ -657,6 +685,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
 }
 
 .device-item-right {
@@ -681,6 +710,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .device-name {
@@ -780,6 +810,7 @@ textarea {
   flex-wrap: wrap;
   padding: 14px 18px;
   border-radius: var(--md-shape-md);
+  border: 1px solid color-mix(in srgb, var(--status-warning) 28%, transparent);
   background-color: var(--status-warning-bg);
   color: var(--md-sys-color-on-surface);
 }
@@ -1877,7 +1908,12 @@ textarea {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  min-height: 46px;
+  min-height: 40px;
+}
+
+.server-lookup-form .text-input-sm,
+.server-custom-version-row .text-input-sm {
+  height: 40px;
 }
 
 .server-lookup-subrow {
@@ -2188,6 +2224,15 @@ textarea {
   .device-empty-bar {
     flex-direction: column;
     align-items: stretch;
+    gap: 14px;
+  }
+
+  .device-empty-info {
+    flex: none;
+  }
+
+  .device-pair-toolbar .btn {
+    flex: 1 1 auto;
   }
 
   .server-field-region {
