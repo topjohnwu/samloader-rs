@@ -64,17 +64,18 @@ export function renderBackendOptions(backendOptions, selectedBackend) {
 }
 
 // Applies static layout visibility and copy based on detected browser capabilities.
-// Called once at startup and again only if capabilities change after WASM loads.
+// Called once at startup and again when browser capabilities or connectivity change.
 export function applyCapabilityLayout() {
   const { canFlash, canDownload } = state.capabilities;
-  const supported = canFlash || canDownload;
+  const canDownloadNow = canDownload && state.isOnline;
+  const supported = canFlash || canDownloadNow;
 
   const brandPill = document.getElementById("brand-pill");
   if (brandPill) {
-    if (canFlash && canDownload) {
+    if (canFlash && canDownloadNow) {
       brandPill.textContent = "Downloader & Flasher";
       brandPill.hidden = false;
-    } else if (canDownload) {
+    } else if (canDownloadNow) {
       brandPill.textContent = "Firmware Downloader";
       brandPill.hidden = false;
     } else if (canFlash) {
@@ -96,7 +97,7 @@ export function applyCapabilityLayout() {
 
   const deviceEmptyHint = document.getElementById("device-empty-hint");
   if (deviceEmptyHint) {
-    deviceEmptyHint.textContent = canDownload
+    deviceEmptyHint.textContent = canDownloadNow
       ? "Optional for downloading · Required for flashing"
       : "Connect a device to flash firmware";
   }
@@ -104,14 +105,27 @@ export function applyCapabilityLayout() {
   const unsupportedCard = document.getElementById("unsupported-browser-card");
   if (unsupportedCard) {
     unsupportedCard.hidden = supported;
-    if (!supported && typeof window !== "undefined" && !window.isSecureContext) {
+    if (!supported) {
       const titleEl = document.getElementById("unsupported-browser-title");
       const subEl = document.getElementById("unsupported-browser-subtitle");
-      if (titleEl) titleEl.textContent = "Secure context required";
-      if (subEl) {
-        subEl.textContent =
-          "This page must be served over HTTPS (or localhost) to access WebUSB, WebSerial, and browser storage.";
+      const bodyEl = unsupportedCard.querySelector(".card-body");
+      const offlineOnly = !canFlash && canDownload && !state.isOnline;
+      const insecure = typeof window !== "undefined" && !window.isSecureContext;
+      if (titleEl) {
+        titleEl.textContent = offlineOnly
+          ? "You're offline"
+          : insecure
+            ? "Secure context required"
+            : "Browser not supported";
       }
+      if (subEl) {
+        subEl.textContent = offlineOnly
+          ? "Firmware downloading requires an internet connection. Reconnect to check versions and download from Samsung servers."
+          : insecure
+            ? "This page must be served over HTTPS (or localhost) to access WebUSB, WebSerial, and browser storage."
+            : "This browser does not support WebUSB/WebSerial flashing or a compatible Tampermonkey bridge for Samsung FUS downloads.";
+      }
+      if (bodyEl) bodyEl.hidden = offlineOnly;
     }
   }
 
@@ -123,15 +137,16 @@ export function applyCapabilityLayout() {
 
   const firmwareTitle = document.getElementById("firmware-card-title");
   if (firmwareTitle) {
-    firmwareTitle.textContent = !canFlash && canDownload ? "Firmware downloader" : "Firmware & flashing";
+    firmwareTitle.textContent =
+      !canFlash && canDownloadNow ? "Firmware downloader" : "Firmware & flashing";
   }
 
   const firmwareSubtitle = document.getElementById("firmware-card-subtitle");
   if (firmwareSubtitle) {
-    if (canFlash && canDownload) {
+    if (canFlash && canDownloadNow) {
       firmwareSubtitle.textContent =
         "Download official firmware from Samsung servers or load local Odin packages";
-    } else if (canDownload) {
+    } else if (canDownloadNow) {
       firmwareSubtitle.textContent =
         "Download official firmware packages directly from Samsung servers";
     } else if (canFlash) {
@@ -141,7 +156,7 @@ export function applyCapabilityLayout() {
   }
 
   const sourceSwitcher = document.getElementById("source-switcher");
-  if (sourceSwitcher) sourceSwitcher.hidden = !(canFlash && canDownload);
+  if (sourceSwitcher) sourceSwitcher.hidden = !(canFlash && canDownloadNow);
 
   const advancedOptions = document.getElementById("advanced-options");
   if (advancedOptions) advancedOptions.hidden = !canFlash;
@@ -159,6 +174,7 @@ export function applyCapabilityLayout() {
 export function updateControlsState() {
   updateAdvancedSummary();
   const { canFlash, canDownload } = state.capabilities;
+  const canDownloadNow = canDownload && state.isOnline;
   if (!canDownload && canFlash) {
     state.firmwareSource = "local";
   } else if (!canFlash && canDownload) {
@@ -179,8 +195,8 @@ export function updateControlsState() {
     return !res || ["queued", "verifying", "invalid"].includes(res.status);
   });
   const hasDownloadDevice = canFlash && state.device?.mode === "download";
-  const isServer = canDownload && (!canFlash || state.firmwareSource === "server");
-  const isLocal = canFlash && (!canDownload || state.firmwareSource === "local");
+  const isServer = canDownloadNow && (!canFlash || state.firmwareSource === "server");
+  const isLocal = canFlash && (!canDownloadNow || state.firmwareSource === "local");
   const busy = state.isBusy;
   const serverBusy = busy || state.serverQuerying;
 
@@ -214,7 +230,7 @@ export function updateControlsState() {
       !hasAction || !hasDownloadDevice || busy || hasPendingOrInvalidMd5;
   }
 
-  const bridgeReady = canDownload && state.fusBridge.connected;
+  const bridgeReady = canDownloadNow && state.fusBridge.connected;
   const modelVal = document.getElementById("server-model")?.value.trim() ?? "";
   const regionVal = document.getElementById("server-region")?.value.trim() ?? "";
   const customVerVal = document.getElementById("server-custom-version")?.value.trim() ?? "";

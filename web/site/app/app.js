@@ -81,6 +81,7 @@ async function setupWasmAndEvents() {
     ];
     if (state.capabilities.canDownload) {
       capabilityDetails.push(`extensions=${state.capabilities.extensionSupport}`);
+      capabilityDetails.push(`online=${state.isOnline ? "yes" : "no"}`);
     }
     appendLog(`Browser capabilities: ${capabilityDetails.join(", ")}`);
 
@@ -120,11 +121,34 @@ async function setupWasmAndEvents() {
 // --- Entry Point ---
 document.addEventListener("DOMContentLoaded", () => {
   state.capabilities = detectBrowserCapabilities();
+  state.isOnline = typeof navigator === "undefined" || navigator.onLine !== false;
   setupThemeToggle();
   applyCapabilityLayout();
 
   if (!state.capabilities.canFlash && !state.capabilities.canDownload) {
     return;
+  }
+
+  if (state.capabilities.canDownload) {
+    const onConnectivityChange = () => {
+      const online = navigator.onLine !== false;
+      if (state.isOnline === online) return;
+      const hadLocalSelection =
+        Object.values(state.slots).some((f) => f !== null) || state.partitions.length > 0;
+      state.isOnline = online;
+      if (online && state.capabilities.canFlash && (hadLocalSelection || state.isBusy)) {
+        state.firmwareSource = "local";
+      }
+      applyCapabilityLayout();
+      updateControlsState();
+      appendLog(
+        online
+          ? "Internet connection restored — download features enabled."
+          : "Offline mode — download features hidden."
+      );
+    };
+    window.addEventListener("online", onConnectivityChange);
+    window.addEventListener("offline", onConnectivityChange);
   }
 
   if ("serviceWorker" in navigator) {

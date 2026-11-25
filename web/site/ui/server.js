@@ -112,11 +112,12 @@ function setLookupError(msg) {
 
 function setFirmwareSource(source, persist = true) {
   const { canFlash, canDownload } = state.capabilities;
+  const canDownloadNow = canDownload && state.isOnline;
   let normalized = source === "local" ? "local" : "server";
-  if (!canDownload && canFlash) normalized = "local";
-  else if (!canFlash && canDownload) normalized = "server";
+  if (!canDownloadNow && canFlash) normalized = "local";
+  else if (!canFlash && canDownloadNow) normalized = "server";
   state.firmwareSource = normalized;
-  if (persist && canFlash && canDownload) {
+  if (persist && canFlash && canDownloadNow) {
     writeStorage(STORAGE_SOURCE, normalized);
   }
   updateControlsState();
@@ -589,6 +590,7 @@ function handleServerEvent(event) {
     case "bridge":
       renderBridgeBanner();
       if (
+        state.isOnline &&
         event.next?.connected &&
         !event.prev?.connected &&
         !userChoseSource &&
@@ -690,7 +692,7 @@ export function setupServerPanel() {
     const preferServerByDefault =
       hasInstalledBridge() || state.capabilities.extensionSupport === "supported";
     state.firmwareSource =
-      !preferServerByDefault || savedSource === "local" ? "local" : "server";
+      !state.isOnline || !preferServerByDefault || savedSource === "local" ? "local" : "server";
   } else {
     state.firmwareSource = "server";
   }

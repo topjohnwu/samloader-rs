@@ -33,6 +33,7 @@ export const state = {
     extensionSupport: "supported",
     isEdgeAndroid: false,
   },
+  isOnline: true,
   selectedBackend: null,
   rebootMode: "normal",
   skipMd5: false,
