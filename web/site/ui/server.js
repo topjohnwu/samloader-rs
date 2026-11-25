@@ -16,7 +16,7 @@
 
 import { hasDeviceInfo, onDeviceChange, queryDeviceInfo } from "../app/device.js";
 import { COMPONENT_META } from "../app/download.js";
-import { EXPECTED_BRIDGE_VERSION } from "../app/fus_bridge.js";
+import { EXPECTED_BRIDGE_VERSION, hasInstalledBridge } from "../app/fus_bridge.js";
 import { appendLog } from "../app/logger.js";
 import {
   checkFirmwareVersions,
@@ -48,6 +48,8 @@ const STORAGE_SOURCE = "samloader.firmwareSource";
 const STORAGE_MODEL = "samloader.serverModel";
 const STORAGE_REGION = "samloader.serverRegion";
 const STORAGE_CONCURRENCY = "samloader.serverConcurrency";
+
+let userChoseSource = false;
 
 const SMART_CSC_CHOICES = [
   { value: "home_csc", label: "Keep Data (HOME_CSC)" },
@@ -123,21 +125,52 @@ function setFirmwareSource(source, persist = true) {
 // --- FUS Bridge Status Banner ---
 function renderBridgeBanner() {
   const setupEl = document.getElementById("fus-bridge-setup");
+  const headerEl = document.getElementById("bridge-setup-header");
+  const actionsEl = document.getElementById("bridge-setup-actions");
   const connectedEl = document.getElementById("fus-bridge-connected");
   const badgeTextEl = document.getElementById("fus-bridge-badge-text");
   const titleEl = document.getElementById("fus-bridge-banner-title");
   const descEl = document.getElementById("fus-bridge-banner-desc");
+  const manualDetails = document.getElementById("bridge-manual-install");
+  const manualBody = document.getElementById("bridge-manual-body");
+  const stepsEl = document.getElementById("bridge-steps");
   const tampermonkeyStep = document.getElementById("bridge-step-tampermonkey");
   const installStepLabel = document.getElementById("bridge-install-step-label");
   const installLink = document.getElementById("link-install-userscript");
   const reloadStep = document.getElementById("bridge-reload-step");
+
+  const placeInstallSteps = (folded) => {
+    if (folded) {
+      if (manualDetails) manualDetails.hidden = false;
+      if (manualBody) {
+        if (stepsEl && stepsEl.parentElement !== manualBody) {
+          manualBody.appendChild(stepsEl);
+        }
+        if (actionsEl && actionsEl.parentElement !== manualBody) {
+          manualBody.appendChild(actionsEl);
+        }
+      }
+      return;
+    }
+
+    if (manualDetails) {
+      manualDetails.hidden = true;
+      manualDetails.open = false;
+    }
+    if (headerEl && actionsEl && actionsEl.parentElement !== headerEl) {
+      headerEl.appendChild(actionsEl);
+    }
+    if (setupEl && stepsEl && stepsEl.parentElement !== setupEl) {
+      setupEl.appendChild(stepsEl);
+    }
+  };
 
   const { connected, version, outdated } = state.fusBridge;
   if (connected && !outdated) {
     if (setupEl) setupEl.hidden = true;
     if (connectedEl) connectedEl.hidden = false;
     if (badgeTextEl) {
-      badgeTextEl.textContent = `FUS Bridge v${version ?? EXPECTED_BRIDGE_VERSION}`;
+      badgeTextEl.textContent = `Helper Script v${version ?? EXPECTED_BRIDGE_VERSION}`;
     }
     return;
   }
@@ -145,32 +178,56 @@ function renderBridgeBanner() {
   if (connectedEl) connectedEl.hidden = true;
   if (setupEl) setupEl.hidden = false;
 
+  const { extensionSupport, isEdgeAndroid } = state.capabilities;
+  const defaultTampermonkeyHtml = isEdgeAndroid
+    ? 'Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> from Edge\'s <strong>Extensions</strong> menu.'
+    : 'Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.';
+  const defaultReloadHtml = "Click <strong>Reload Page</strong> to finish setup.";
+
   if (connected && outdated) {
+    placeInstallSteps(false);
     const installedLabel = version ? `v${version}` : "unknown version";
-    if (titleEl) titleEl.textContent = "FUS Bridge Userscript Outdated";
+    if (titleEl) titleEl.textContent = "Helper Script Update Available";
     if (descEl) {
-      descEl.textContent = `Installed userscript (${installedLabel}) is older than v${EXPECTED_BRIDGE_VERSION}. Update the userscript so this page has the latest fixes and compatibility.`;
+      descEl.textContent = `Your installed helper script (${installedLabel}) is outdated. Update to v${EXPECTED_BRIDGE_VERSION} for the latest fixes and compatibility.`;
     }
     if (tampermonkeyStep) tampermonkeyStep.hidden = true;
-    if (installStepLabel) installStepLabel.textContent = "Update the bridge userscript:";
-    if (installLink) installLink.textContent = "Update Userscript";
+    if (installStepLabel) installStepLabel.textContent = "Update the helper script:";
+    if (installLink) installLink.textContent = "Update Script";
     if (reloadStep) {
       reloadStep.innerHTML =
-        "Click <strong>Reload Page</strong> so your userscript manager loads the updated bridge.";
+        "Click <strong>Reload Page</strong> to use the updated script.";
     }
-  } else {
-    if (titleEl) titleEl.textContent = "FUS Bridge Userscript Required";
+  } else if (extensionSupport === "supported") {
+    placeInstallSteps(false);
+    if (titleEl) titleEl.textContent = "Helper Script Required";
     if (descEl) {
       descEl.textContent =
-        "Samsung FUS blocks browser CORS and serves firmware binaries over plain HTTP. Install the local bridge userscript so this page can fetch firmware directly.";
+        "Web browsers block direct downloads from Samsung's firmware servers. Install a small helper script with Tampermonkey so this page can download firmware directly to your device.";
     }
-    if (tampermonkeyStep) tampermonkeyStep.hidden = false;
-    if (installStepLabel) installStepLabel.textContent = "Install the bridge userscript:";
-    if (installLink) installLink.textContent = "Install Userscript";
-    if (reloadStep) {
-      reloadStep.innerHTML =
-        "Click <strong>Reload Page</strong> so your userscript manager injects the bridge into this tab.";
+    if (tampermonkeyStep) {
+      tampermonkeyStep.hidden = false;
+      tampermonkeyStep.innerHTML = defaultTampermonkeyHtml;
     }
+    if (installStepLabel) installStepLabel.textContent = "Install the helper script:";
+    if (installLink) installLink.textContent = "Install Script";
+    if (reloadStep) reloadStep.innerHTML = defaultReloadHtml;
+  } else {
+    placeInstallSteps(true);
+    if (titleEl) titleEl.textContent = "Downloads Not Supported in This Browser";
+    if (descEl) {
+      descEl.textContent =
+        extensionSupport === "unlikely"
+          ? "Downloading firmware directly from Samsung requires the Tampermonkey browser extension, which isn't supported in Chrome on Android. To download firmware, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android."
+          : "Downloading firmware directly from Samsung requires the Tampermonkey browser extension. If your browser doesn't support extensions, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android.";
+    }
+    if (tampermonkeyStep) {
+      tampermonkeyStep.hidden = false;
+      tampermonkeyStep.innerHTML = defaultTampermonkeyHtml;
+    }
+    if (installStepLabel) installStepLabel.textContent = "Install the helper script:";
+    if (installLink) installLink.textContent = "Install Script";
+    if (reloadStep) reloadStep.innerHTML = defaultReloadHtml;
   }
 }
 
@@ -531,6 +588,16 @@ function handleServerEvent(event) {
   switch (event.type) {
     case "bridge":
       renderBridgeBanner();
+      if (
+        event.next?.connected &&
+        !event.prev?.connected &&
+        !userChoseSource &&
+        state.capabilities.canFlash &&
+        state.capabilities.extensionSupport !== "supported" &&
+        readStorage(STORAGE_SOURCE) !== "local"
+      ) {
+        state.firmwareSource = "server";
+      }
       updateControlsState();
       break;
     case "querying_history": {
@@ -620,7 +687,10 @@ export function setupServerPanel() {
   // Restore persisted UI preferences
   if (canFlash) {
     const savedSource = readStorage(STORAGE_SOURCE);
-    state.firmwareSource = savedSource === "local" ? "local" : "server";
+    const preferServerByDefault =
+      hasInstalledBridge() || state.capabilities.extensionSupport === "supported";
+    state.firmwareSource =
+      !preferServerByDefault || savedSource === "local" ? "local" : "server";
   } else {
     state.firmwareSource = "server";
   }
@@ -649,6 +719,7 @@ export function setupServerPanel() {
   document.querySelectorAll('input[name="firmware-source"]').forEach((radio) => {
     radio.addEventListener("change", () => {
       if (radio.checked) {
+        userChoseSource = true;
         setFirmwareSource(radio.value, true);
       }
     });
@@ -767,7 +838,10 @@ export function setupServerPanel() {
   document
     .getElementById("btn-load-into-local")
     ?.addEventListener("click", () =>
-      void handleLoadIntoLocalFlash(() => setFirmwareSource("local", true))
+      void handleLoadIntoLocalFlash(() => {
+        userChoseSource = true;
+        setFirmwareSource("local", true);
+      })
     );
 
   updateControlsState();

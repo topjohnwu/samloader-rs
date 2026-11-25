@@ -57,6 +57,14 @@ function getInstalledBridge() {
     : null;
 }
 
+/**
+ * Returns whether the FUS bridge userscript is currently attached to `window`.
+ * @returns {boolean}
+ */
+export function hasInstalledBridge() {
+  return getInstalledBridge() !== null;
+}
+
 async function ensureBridge() {
   let bridge = getInstalledBridge();
   if (!bridge) {

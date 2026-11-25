@@ -92,8 +92,8 @@
       </div>
       <div class="card-body">
         <ul class="unsupported-list">
-          <li><strong>Downloading &amp; Flashing:</strong> Use a desktop Chromium browser (Chrome, Edge, Brave, or Opera) with WebUSB/WebSerial and Tampermonkey.</li>
-          <li><strong>Why this browser isn't supported:</strong> Non-Chromium browsers (Firefox, Safari) and iOS browsers lack WebUSB/WebSerial and do not support Chromium's Tampermonkey streaming/cookie bridge.</li>
+          <li><strong>Downloading &amp; Flashing:</strong> Use a desktop Chromium browser (Chrome, Edge, Brave, or Opera) or an extension-capable Android browser (such as Microsoft Edge) with WebUSB/WebSerial and Tampermonkey.</li>
+          <li><strong>Why this browser isn't supported:</strong> This browser lacks WebUSB/WebSerial for flashing (e.g. Safari, iOS browsers, and mobile/older Firefox) and does not support Chromium's File System Access API and Tampermonkey bridge for downloads.</li>
         </ul>
       </div>
     </section>
@@ -217,36 +217,45 @@
           <!-- Userscript Bridge Status / Warning Banner -->
           <div id="fus-bridge-banner" class="fus-bridge-banner">
             <div id="fus-bridge-setup" class="bridge-setup-banner" role="alert" hidden>
-              <div class="bridge-setup-header">
+              <div id="bridge-setup-header" class="bridge-setup-header">
                 <div class="bridge-setup-title-wrap">
                   <svg class="bridge-setup-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <circle cx="10" cy="10" r="8"/>
                     <path d="M10 6.5v4.5M10 13.5h.01" stroke-linecap="round"/>
                   </svg>
-                  <strong id="fus-bridge-banner-title">FUS Bridge Userscript Required</strong>
+                  <strong id="fus-bridge-banner-title">Helper Script Required</strong>
                 </div>
-                <div class="bridge-setup-actions">
+                <div id="bridge-setup-actions" class="bridge-setup-actions">
                   <button type="button" id="btn-reload-bridge" class="btn btn-sm btn-primary-outline">Reload Page</button>
                 </div>
               </div>
               <p id="fus-bridge-banner-desc" class="bridge-setup-desc">
-                Samsung FUS blocks browser CORS and serves firmware binaries over plain HTTP. Install the local bridge userscript so this page can fetch firmware directly.
+                Web browsers block direct downloads from Samsung's firmware servers. Install a small helper script with Tampermonkey so this page can download firmware directly to your device.
               </p>
-              <ol class="bridge-steps">
-                <li id="bridge-step-tampermonkey">Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a>.</li>
+              <details id="bridge-manual-install" class="bridge-manual-install" hidden>
+                <summary class="bridge-manual-summary">
+                  <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>My browser supports extensions — show setup steps</span>
+                </summary>
+                <div id="bridge-manual-body" class="bridge-manual-body"></div>
+              </details>
+              <ol id="bridge-steps" class="bridge-steps">
+                <li id="bridge-step-tampermonkey">Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.</li>
                 <li class="bridge-install-step">
-                  <span id="bridge-install-step-label">Install the bridge userscript:</span>
+                  <span id="bridge-install-step-label">Install the helper script:</span>
                   <span class="bridge-install-actions">
-                    <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Userscript</a>
+                    <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Script</a>
                   </span>
                 </li>
-                <li id="bridge-reload-step">Click <strong>Reload Page</strong> so your userscript manager injects the bridge into this tab.</li>
+                <li id="bridge-reload-step">Click <strong>Reload Page</strong> to finish setup.</li>
               </ol>
             </div>
             <div id="fus-bridge-connected" class="fus-bridge-connected" hidden>
               <div id="fus-bridge-badge" class="fus-bridge-badge">
                 <span class="chip-dot" aria-hidden="true"></span>
-                <span id="fus-bridge-badge-text">FUS Bridge connected</span>
+                <span id="fus-bridge-badge-text">Helper Script connected</span>
               </div>
             </div>
           </div>

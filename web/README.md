@@ -17,19 +17,19 @@ Samsung FUS servers block cross-origin browser `fetch()` requests (CORS) and ser
 
 ### Setup
 
-1. Install **Tampermonkey** (on Chrome MV3, ensure **Allow User Scripts** / Developer Mode is enabled for the extension).
-2. Click **Install Userscript** (or **Copy Script** / **Download `.user.js`** for manual installation) in the web UI banner.
-3. Click **Reload Page** so Tampermonkey injects the bridge into the tab. The badge switches to `FUS Bridge v1.0.0`.
+1. Install the **Tampermonkey** extension (on Chrome MV3, ensure **Allow User Scripts** / Developer Mode is enabled for the extension; on Microsoft Edge for Android, install it from Edge's **Extensions** menu).
+2. Click **Install Script** in the web UI banner.
+3. Click **Reload Page** to finish setup. The status pill switches to `Helper Script v1.0.0`.
 
 The userscript activates only on pages containing `<meta name="samloader-fus-bridge" content="1">`, enforces a strict `https`/`http` allowlist restricted to Samsung's three FUS endpoints (`neofussvr.sslcs.cdngc.net`, `cloud-neofussvr.samsungmobile.com`, and `fota-cloud-dn.ospserver.net`), and exposes a thin `GM.xmlHttpRequest` wrapper to `web/site/app/fus_bridge.js` so streaming and worker relay updates deploy with the web app without reinstalling the script.
 
 ## Browser Compatibility & Storage
 
-| Feature | Desktop Chromium (Chrome / Edge / Brave / Opera) | Other Browsers (Firefox / Safari / iOS) |
+| Feature | Desktop Chromium & Extension-Capable Android (e.g. Edge Android) | Other Browsers (Desktop Firefox / Safari / iOS / Android Chrome) |
 | --- | --- | --- |
 | Firmware Lookup, Inspect & Download Only | Direct resumable disk writes via File System Access API (`showDirectoryPicker`) | Not supported (requires Chromium Tampermonkey) |
 | **Load into Local Flash** (after directory download) | Loads `FileSystemFileHandle`s directly into **Local Files** slots without re-reading MD5 | — |
-| Device Flashing (Odin / AT / **Download & Flash**) | Supported via WebUSB / Web Serial in a Secure Context (`http://localhost`, `127.0.0.1`, or `https://`) | WebUSB / Web Serial unavailable (Debug `Mock Device` only if built with `--features mock`) |
+| Device Flashing (Odin / AT / **Download & Flash**) | Supported via WebUSB / Web Serial in a Secure Context (`http://localhost`, `127.0.0.1`, or `https://`) | **Local Files** flashing supported on Android Chrome (WebUSB / Web Serial) and Desktop Firefox 151+ (Web Serial `vcom`); unavailable on Safari, iOS, and mobile/older Firefox (Debug `Mock Device` only if built with `--features mock`) |
 
 ### OPFS Cache & Resume Checkpoints
 
@@ -77,7 +77,7 @@ python3 -m http.server -d web/site 8000
 
 Then open `http://localhost:8000` in a Chromium-based browser (Chrome, Edge, Brave, Opera).
 
-> **Note:** WebUSB and Web Serial are only exposed in [Secure Contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (`http://localhost`, `http://127.0.0.1`, or `https://`), and require a Chromium-based browser. When built with `--features mock`, you can also select the **Mock Device (Debug)** backend in the UI to test flashing workflows in any browser without physical hardware.
+> **Note:** WebUSB and Web Serial are only exposed in [Secure Contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (`http://localhost`, `http://127.0.0.1`, or `https://`). WebUSB requires a Chromium-based browser, while Web Serial is supported in Chromium-based browsers and Desktop Firefox (151+). When built with `--features mock`, you can also select the **Mock Device (Debug)** backend in the UI to test flashing workflows in any browser without physical hardware.
 
 ## Static File Structure
 

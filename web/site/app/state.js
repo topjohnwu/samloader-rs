@@ -30,6 +30,8 @@ export const state = {
   capabilities: {
     canFlash: true,
     canDownload: true,
+    extensionSupport: "supported",
+    isEdgeAndroid: false,
   },
   selectedBackend: null,
   rebootMode: "normal",

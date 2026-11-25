@@ -75,9 +75,14 @@ async function setupWasmAndEvents() {
       applyCapabilityLayout();
       updateControlsState();
     }
-    appendLog(
-      `Browser capabilities: flashing=${state.capabilities.canFlash ? "supported" : "unsupported"}, downloading=${state.capabilities.canDownload ? "supported" : "unsupported"}`
-    );
+    const capabilityDetails = [
+      `flashing=${state.capabilities.canFlash ? "supported" : "unsupported"}`,
+      `downloading=${state.capabilities.canDownload ? "supported" : "unsupported"}`,
+    ];
+    if (state.capabilities.canDownload) {
+      capabilityDetails.push(`extensions=${state.capabilities.extensionSupport}`);
+    }
+    appendLog(`Browser capabilities: ${capabilityDetails.join(", ")}`);
 
     if (!backendOptions.some((b) => b.id === state.selectedBackend)) {
       const preferVcom = isWindows() && backendOptions.some((b) => b.id === "vcom");

@@ -1373,7 +1373,8 @@ textarea {
 }
 
 .advanced-options[open] .fold-chevron,
-.log-toggle[aria-expanded="true"] .fold-chevron {
+.log-toggle[aria-expanded="true"] .fold-chevron,
+.bridge-manual-install[open] .fold-chevron {
   transform: rotate(90deg);
 }
 
@@ -1863,6 +1864,51 @@ textarea {
 
 .bridge-install-actions .btn {
   text-decoration: none;
+}
+
+.bridge-manual-install {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.bridge-manual-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  border-radius: var(--md-shape-xs);
+}
+
+.bridge-manual-summary::-webkit-details-marker {
+  display: none;
+}
+
+.bridge-manual-summary:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bridge-manual-summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.bridge-manual-summary .fold-chevron {
+  width: 16px;
+  height: 16px;
+  color: currentColor;
+}
+
+.bridge-manual-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .fus-bridge-connected {
