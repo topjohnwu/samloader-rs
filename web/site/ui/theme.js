@@ -21,6 +21,7 @@
 
 const STORAGE_KEY = "theme";
 const THEMES = ["light", "dark", "system"];
+const THEME_COLORS = { light: "#ffffff", dark: "#1b1c1d" };
 
 function readStoredTheme() {
   try {
@@ -32,12 +33,25 @@ function readStoredTheme() {
   }
 }
 
+function syncThemeColor(theme) {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  const resolved =
+    theme === "light" || theme === "dark"
+      ? theme
+      : window.matchMedia?.("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+  meta.content = THEME_COLORS[resolved];
+}
+
 function applyTheme(theme) {
   if (theme === "system") {
     document.documentElement.removeAttribute("data-theme");
   } else {
     document.documentElement.dataset.theme = theme;
   }
+  syncThemeColor(theme);
 }
 
 function syncRadios(theme) {
@@ -72,5 +86,12 @@ export function setupThemeToggle() {
     const updated = readStoredTheme();
     applyTheme(updated);
     syncRadios(updated);
+  });
+
+  // Update theme-color when OS color scheme changes while set to "system"
+  window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener("change", () => {
+    if (readStoredTheme() === "system") {
+      syncThemeColor("system");
+    }
   });
 }

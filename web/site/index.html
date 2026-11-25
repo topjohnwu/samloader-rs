@@ -4,14 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="samloader-fus-bridge" content="1">
+  <meta name="theme-color" content="#ffffff">
   <title>samloader-rs — Firmware Downloader &amp; Odin Web Flasher</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="styles.css">
   <!-- Apply the stored theme before first paint to avoid a flash; see ui/theme.js -->
   <script>
     try {
       const theme = localStorage.getItem("theme");
       if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      const dark = theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.content = dark ? "#1b1c1d" : "#ffffff";
     } catch {}
   </script>
 </head>

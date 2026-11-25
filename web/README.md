@@ -89,6 +89,8 @@ web/
 └── site/                        # Served website document root
     ├── index.html                   # App shell (Samsung Server & Local Files panels)
     ├── styles.css                   # Material Design 3 styling (light/dark tokens)
+    ├── manifest.webmanifest         # PWA manifest for standalone installation
+    ├── sw.js                        # Network-first Service Worker with offline fallback
     ├── samloader-fus-bridge.user.js # Tampermonkey userscript for FUS CORS bypass
     ├── app/
     │   ├── app.js                   # Entry point, WASM init, device hotplug & UI wiring
@@ -118,6 +120,7 @@ web/
     │   ├── theme.js                 # Light / Dark / System theme switcher
     │   └── util.js                  # DOM progress/accessibility helpers and file download trigger
     ├── fonts/                       # Self-hosted DM Sans, Roboto, and Roboto Mono fonts
+    ├── icons/                       # Raster PNG app icons for PWA installation
     └── pkg/                         # Generated wasm-bindgen JS/WASM bundle (built by xtask)
 ```
 

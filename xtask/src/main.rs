@@ -152,12 +152,14 @@ fn run_bindgen(
 const WEB_STATIC_FILES: &[&str] = &[
     "index.html",
     "styles.css",
+    "manifest.webmanifest",
+    "sw.js",
     "samloader-fus-bridge.user.js",
     "favicon.svg",
     "logo.svg",
 ];
 /// Static directories of the web app, relative to `web/site/`.
-const WEB_STATIC_DIRS: &[&str] = &["app", "fonts", "ui", "workers"];
+const WEB_STATIC_DIRS: &[&str] = &["app", "fonts", "icons", "ui", "workers"];
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;
@@ -280,7 +282,38 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    fn collect_files(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                collect_files(root, &path, out)?;
+            } else {
+                if name_str.ends_with(".txt") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("collected path must be inside site root");
+                let rel_posix = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.insert(format!("./{rel_posix}"));
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn web_static_assets_exist() {
@@ -294,5 +327,53 @@ mod tests {
         for dir in WEB_STATIC_DIRS {
             assert!(site.join(dir).is_dir(), "missing static dir web/site/{dir}");
         }
+    }
+
+    #[test]
+    fn sw_precaches_all_web_assets() {
+        let site = workspace_root().join("web").join("site");
+        let sw_source = fs::read_to_string(site.join("sw.js")).expect("read web/site/sw.js");
+        let start = sw_source
+            .find("const PRECACHE_URLS = [")
+            .expect("PRECACHE_URLS declaration in sw.js");
+        let list_body = &sw_source[start..];
+        let end = list_body
+            .find("];")
+            .expect("closing ]; for PRECACHE_URLS in sw.js");
+        let block = &list_body[..end];
+
+        let mut precached = BTreeSet::new();
+        let mut rest = block;
+        while let Some(q1) = rest.find('"') {
+            rest = &rest[q1 + 1..];
+            let q2 = rest
+                .find('"')
+                .expect("unterminated string in PRECACHE_URLS");
+            precached.insert(rest[..q2].to_string());
+            rest = &rest[q2 + 1..];
+        }
+
+        let mut expected = BTreeSet::from([
+            "./".to_string(),
+            "./pkg/samloader_web.js".to_string(),
+            "./pkg/samloader_web_bg.wasm".to_string(),
+        ]);
+        for file in WEB_STATIC_FILES {
+            if *file == "sw.js" || *file == "samloader-fus-bridge.user.js" {
+                continue;
+            }
+            expected.insert(format!("./{file}"));
+        }
+        for dir in WEB_STATIC_DIRS {
+            collect_files(&site, &site.join(dir), &mut expected)
+                .expect("collect static directory files");
+        }
+
+        let missing: Vec<_> = expected.difference(&precached).collect();
+        let extra: Vec<_> = precached.difference(&expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "sw.js PRECACHE_URLS out of sync (missing: {missing:?}, extra: {extra:?})"
+        );
     }
 }
