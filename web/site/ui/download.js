@@ -15,6 +15,7 @@
 // OPFS cache banner, folder picker / confirmation prompts, and download progress UI.
 
 import {
+  COMPONENT_META,
   clearOpfsStagingCache,
   executeDownloadAndFlash,
   executeDownloadOnly,
@@ -25,6 +26,7 @@ import {
 import { reportError } from "../app/logger.js";
 import { updateControlsState } from "./controls.js";
 import {
+  clearDownloadFileProgress,
   hideFlashResult,
   revealActionBar,
   setCancelOperationButton,
@@ -32,7 +34,7 @@ import {
   showOperationResult,
   updateOperationProgress,
 } from "./flash.js";
-import { announce, formatBytes, formatDuration } from "./util.js";
+import { announce, formatBytes, formatDuration, setBarPercent } from "./util.js";
 
 // --- OPFS Cache Banner ---
 function renderOpfsCacheBanner(info) {
@@ -66,6 +68,61 @@ function renderOpfsCacheBanner(info) {
 // --- Download Progress & Result UI Adapter ---
 function createDownloadUiCallbacks() {
   let lastAnnouncedFile = null;
+  const fileRows = new Map();
+
+  const resetFileProgressList = () => {
+    fileRows.clear();
+    clearDownloadFileProgress();
+  };
+
+  const initFileProgressList = (files) => {
+    resetFileProgressList();
+    const listEl = document.getElementById("download-files-progress");
+    const tpl = document.getElementById("download-file-template");
+    if (!listEl || !tpl || !Array.isArray(files) || files.length <= 1) return;
+
+    const fragment = document.createDocumentFragment();
+    for (const { name = "", component = null, uncompressedSize = 0 } of files) {
+      const item = tpl.content.firstElementChild.cloneNode(true);
+      item.querySelector(".download-file-badge").textContent =
+        COMPONENT_META[component]?.badge ?? "FILE";
+      const nameEl = item.querySelector(".download-file-name");
+      nameEl.textContent = name;
+      nameEl.title = name;
+      item
+        .querySelector(".download-file-track")
+        .setAttribute("aria-label", `Progress for ${name}`);
+
+      const metaEl = item.querySelector(".download-file-meta");
+      metaEl.textContent = uncompressedSize > 0 ? formatBytes(uncompressedSize) : "";
+      fragment.appendChild(item);
+
+      fileRows.set(name, {
+        item,
+        statusEl: item.querySelector(".badge"),
+        barEl: item.querySelector(".progress-bar-fill"),
+        metaEl,
+        size: uncompressedSize,
+      });
+    }
+
+    listEl.appendChild(fragment);
+    listEl.hidden = false;
+  };
+
+  const formatTransferMeta = (written, total, speed, etaSecs) => {
+    const parts = [];
+    if (total > 0) {
+      parts.push(`${formatBytes(written)} / ${formatBytes(total)}`);
+    }
+    if (speed > 0) {
+      parts.push(`${formatBytes(speed)}/s`);
+    }
+    if (typeof etaSecs === "number" && Number.isFinite(etaSecs)) {
+      parts.push(`About ${formatDuration(etaSecs)} left`);
+    }
+    return parts.join(" · ");
+  };
 
   return {
     onOperationStart: () => {
@@ -73,8 +130,9 @@ function createDownloadUiCallbacks() {
       setFlashInProgress(true);
       revealActionBar();
     },
-    onDownloadPrepare: (statusText) => {
+    onDownloadPrepare: (statusText, files = []) => {
       lastAnnouncedFile = null;
+      initFileProgressList(files);
       updateOperationProgress({ statusText, percent: 0, detailText: "" });
     },
     onCancelReady: (cancelFn) => {
@@ -94,6 +152,9 @@ function createDownloadUiCallbacks() {
         fileIndex,
         fileCount,
         fileName,
+        fileWritten = 0,
+        fileTotal = 0,
+        fileEtaSecs = null,
         overallWritten = 0,
         overallTotal = 0,
         percent = 0,
@@ -101,32 +162,49 @@ function createDownloadUiCallbacks() {
         etaSecs = null,
       } = data;
 
-      const statusText =
-        params.mode === "zip"
-          ? `Downloading ${fileName || params.version}...`
-          : `Downloading ${fileName} (${fileIndex} of ${fileCount})`;
+      const multiFile = fileRows.size > 1;
+      const statusText = multiFile
+        ? `Downloading firmware (${fileIndex} of ${fileCount})`
+        : `Downloading ${fileName || params.version}...`;
 
       if (fileName && fileName !== lastAnnouncedFile) {
         lastAnnouncedFile = fileName;
-        announce(statusText);
-      }
-
-      const details = [];
-      if (overallTotal > 0) {
-        details.push(`${formatBytes(overallWritten)} / ${formatBytes(overallTotal)}`);
-      }
-      if (wireSpeed > 0) {
-        details.push(`${formatBytes(wireSpeed)}/s`);
-      }
-      if (typeof etaSecs === "number" && Number.isFinite(etaSecs)) {
-        details.push(`About ${formatDuration(etaSecs)} left`);
+        announce(multiFile ? `Downloading ${fileName} (${fileIndex} of ${fileCount})` : statusText);
       }
 
       updateOperationProgress({
         statusText,
         percent,
-        detailText: details.join(" · "),
+        detailText: formatTransferMeta(overallWritten, overallTotal, wireSpeed, etaSecs),
       });
+
+      const row = fileRows.get(fileName);
+      if (row) {
+        const filePct = fileTotal > 0 ? Math.min(100, (fileWritten / fileTotal) * 100) : 100;
+        row.item.className = "download-file-item is-active";
+        row.statusEl.className = "badge badge-hashing";
+        row.statusEl.textContent = `${Math.floor(filePct)}%`;
+        setBarPercent(row.barEl, filePct);
+        row.metaEl.textContent = formatTransferMeta(fileWritten, fileTotal, wireSpeed, fileEtaSecs);
+      }
+    },
+    onFileDone: (data) => {
+      const { fileName, skipped, size, overallWritten, overallTotal } = data || {};
+      if (overallTotal > 0) {
+        updateOperationProgress({
+          percent: (overallWritten / overallTotal) * 100,
+        });
+      }
+      const row = fileRows.get(fileName);
+      if (!row) return;
+
+      row.item.className = "download-file-item is-done";
+      row.statusEl.className = "badge badge-valid";
+      row.statusEl.textContent = skipped ? "Skipped" : "Done";
+      setBarPercent(row.barEl, 100);
+
+      const finalSize = formatBytes(size || row.size);
+      row.metaEl.textContent = skipped ? `${finalSize} · Already complete` : finalSize;
     },
     onCancelled: (cancelMsg) => {
       showOperationResult("warning", cancelMsg);
@@ -138,6 +216,7 @@ function createDownloadUiCallbacks() {
       announce("Download complete");
     },
     onBeforeFlash: () => {
+      resetFileProgressList();
       setCancelOperationButton({ visible: false });
     },
     onFlashAborted: () => {
@@ -152,6 +231,7 @@ function createDownloadUiCallbacks() {
       announce("Download failed");
     },
     onOperationFinally: () => {
+      fileRows.clear();
       setCancelOperationButton({ visible: false });
       setFlashInProgress(false);
     },

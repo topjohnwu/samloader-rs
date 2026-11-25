@@ -556,6 +556,22 @@
               <div id="flash-progress-bar" class="progress-bar-fill main-progress-fill" style="width: 0%"></div>
             </div>
             <span id="flash-detail-text" class="flash-detail-text"></span>
+            <div id="download-files-progress" class="download-files-progress" role="list" aria-label="Download progress per file" hidden></div>
+            <template id="download-file-template">
+              <div class="download-file-item" role="listitem">
+                <div class="flash-progress-header">
+                  <div class="download-file-title">
+                    <span class="slot-badge download-file-badge"></span>
+                    <span class="download-file-name"></span>
+                  </div>
+                  <span class="badge badge-idle">Waiting</span>
+                </div>
+                <div class="main-progress-bg download-file-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <div class="progress-bar-fill" style="width: 0%"></div>
+                </div>
+                <span class="file-size download-file-meta"></span>
+              </div>
+            </template>
           </div>
           <p id="flash-announcer" class="visually-hidden" aria-live="polite"></p>
         </div>

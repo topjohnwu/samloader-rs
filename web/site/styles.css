@@ -1652,6 +1652,87 @@ textarea {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+/* Per-File Download Progress List */
+.download-files-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.download-file-item {
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-sm);
+  background-color: var(--md-sys-color-surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  opacity: 0.72;
+  transition: border-color 0.15s, background-color 0.15s, opacity 0.15s;
+}
+
+.download-file-item.is-active {
+  opacity: 1;
+  border-color: var(--md-sys-color-primary);
+  background-color: var(--md-sys-color-surface-container-low);
+}
+
+.download-file-item.is-done {
+  opacity: 0.92;
+}
+
+.download-file-item.is-active .download-file-badge {
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.download-file-item.is-done .download-file-badge {
+  background-color: var(--status-success-bg);
+  color: var(--status-success);
+}
+
+.download-file-item.is-done .progress-bar-fill {
+  background-color: var(--status-success);
+}
+
+.download-file-item .badge {
+  flex-shrink: 0;
+}
+
+.download-file-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.download-file-badge {
+  min-width: 40px;
+  height: 22px;
+  font-size: 0.68rem;
+  padding: 0 6px;
+}
+
+.download-file-name {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-file-track {
+  height: 5px;
+}
+
+.download-file-meta {
+  min-height: 1.1em;
+}
+
 /* Outcome of the last flash */
 .flash-result {
   display: flex;

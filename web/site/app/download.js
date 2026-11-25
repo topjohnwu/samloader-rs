@@ -102,6 +102,7 @@ export async function runDownloadWorker({
   target,
   params,
   onProgress = null,
+  onFileDone = null,
   onCancelReady = null,
 } = {}) {
   const port = await openBridgePort();
@@ -148,6 +149,9 @@ export async function runDownloadWorker({
         case "FILE_DONE": {
           const verb = data.skipped ? "Skipped (already complete)" : "Downloaded";
           appendLog(`${verb}: ${data.fileName} (${formatBytes(data.size || 0)})`);
+          if (!cancelRequested) {
+            onFileDone?.(data);
+          }
           break;
         }
         case "WARNING":
@@ -263,13 +267,14 @@ async function executeServerOperation(logTitle, targetKind, ui, bodyFn) {
   }
 }
 
-async function performDownload({ target, params, statusText, cancelLog, ui }) {
-  ui?.onDownloadPrepare?.(statusText);
+async function performDownload({ target, params, files = [], statusText, cancelLog, ui }) {
+  ui?.onDownloadPrepare?.(statusText, files);
 
   const outcome = await runDownloadWorker({
     target,
     params,
     onProgress: (data) => ui?.onProgress?.(data, params),
+    onFileDone: (data) => ui?.onFileDone?.(data),
     onCancelReady: (cancel) => ui?.onCancelReady?.(cancel),
   });
   if (target.kind === "opfs") {
@@ -291,7 +296,7 @@ export async function executeDownloadOnly({ selectedEntries = [], pickDirectory,
   if (!state.fusBridge.connected) return;
   if (!state.serverInspect) return;
 
-  const { model, region, version, info } = state.serverInspect;
+  const { model, region, version } = state.serverInspect;
   const mode = state.serverOutputMode === "zip" ? "zip" : "entries";
 
   if (mode === "entries" && selectedEntries.length === 0) return;
@@ -320,6 +325,7 @@ export async function executeDownloadOnly({ selectedEntries = [], pickDirectory,
               concurrency: state.serverConcurrency,
               force: false,
             },
+            files: mode === "entries" ? selectedEntries : [],
             statusText: "Connecting to Samsung FUS...",
             ui,
           });
@@ -430,6 +436,7 @@ export async function executeDownloadAndFlash({
               concurrency: state.serverConcurrency,
               force: false,
             },
+            files: odinEntries,
             statusText: "Preparing OPFS cache & connecting to Samsung FUS...",
             cancelLog: "Download cancelled — OPFS partial checkpoint kept for resume.",
             ui,

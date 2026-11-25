@@ -70,6 +70,13 @@ export function handleProgressEvent(event) {
   }
 }
 
+export function clearDownloadFileProgress() {
+  const listEl = document.getElementById("download-files-progress");
+  if (!listEl) return;
+  listEl.replaceChildren();
+  listEl.hidden = true;
+}
+
 // --- Flash & Operation Panel ---
 // While downloading or flashing, the progress panel replaces the controls in the action bar,
 // and the outcome is shown above them afterwards.
@@ -80,6 +87,7 @@ export function setFlashInProgress(inProgress) {
   if (controls) controls.hidden = inProgress;
   if (panel) panel.hidden = !inProgress;
   if (hint && inProgress) hint.hidden = true;
+  if (!inProgress) clearDownloadFileProgress();
 }
 
 export function setCancelOperationButton({

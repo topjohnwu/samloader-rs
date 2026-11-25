@@ -310,8 +310,8 @@ impl ProgressState {
             self.set_file_written(size, true);
         }
         self.active.set(false);
-        self.overall_base
-            .set(self.overall_base.get().saturating_add(size));
+        let overall_written = self.overall_base.get().saturating_add(size);
+        self.overall_base.set(overall_written);
 
         let obj = js_obj! {
             "type" => "file_done",
@@ -320,6 +320,8 @@ impl ProgressState {
             "fileName" => file_name,
             "skipped" => skipped,
             "size" => size as f64,
+            "overallWritten" => overall_written as f64,
+            "overallTotal" => self.overall_total.get() as f64,
         };
         let _ = self.on_progress.call1(&JsValue::NULL, &obj);
     }
@@ -372,10 +374,12 @@ impl ProgressState {
         } else {
             0.0
         };
-        let eta_secs = if out_speed > 1024.0 && overall_total > overall_written {
-            JsValue::from_f64((overall_total - overall_written) as f64 / out_speed)
-        } else {
-            JsValue::NULL
+        let eta = |remaining: u64| {
+            if out_speed > 1024.0 && remaining > 0 {
+                JsValue::from_f64(remaining as f64 / out_speed)
+            } else {
+                JsValue::NULL
+            }
         };
 
         let obj = {
@@ -387,12 +391,13 @@ impl ProgressState {
                 "fileName" => file_name.as_str(),
                 "fileWritten" => file_written as f64,
                 "fileTotal" => file_total as f64,
+                "fileEtaSecs" => eta(file_total.saturating_sub(file_written)),
                 "overallWritten" => overall_written as f64,
                 "overallTotal" => overall_total as f64,
                 "wireBytes" => wire_bytes as f64,
                 "percent" => percent,
                 "wireSpeed" => wire_speed,
-                "etaSecs" => eta_secs,
+                "etaSecs" => eta(overall_total.saturating_sub(overall_written)),
                 "resumed" => self.resumed.get(),
             }
         };
