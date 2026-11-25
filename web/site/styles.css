@@ -278,13 +278,6 @@ textarea {
 .backend-selector-group {
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-
-.backend-label {
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--md-sys-color-on-surface-variant);
 }
 
 /* M3 Outlined Select */
@@ -2741,10 +2734,6 @@ textarea {
 
   .brand-version {
     font-size: 0.7rem;
-  }
-
-  .backend-label {
-    display: none;
   }
 
   .header-controls {
