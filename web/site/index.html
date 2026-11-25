@@ -35,7 +35,7 @@
         <div id="backend-selector-group" class="backend-selector-group">
           <label for="backend-select" class="backend-label">Backend</label>
           <!-- Filled in once WASM is initialized -->
-          <select id="backend-select" class="select-input" disabled></select>
+          <select id="backend-select" class="select-input" aria-label="USB Backend" disabled></select>
         </div>
         <div id="connection-chip" class="status-chip chip-disconnected">
           <span class="chip-dot"></span>
@@ -403,7 +403,7 @@
             <div class="partition-section-header">
               <div class="partition-section-title-group">
                 <span class="partition-section-title">Individual Partition Files</span>
-                <span class="partition-section-hint">Drag to reorder • Leave target empty to auto-match by filename, or specify a partition name / ID</span>
+                <span class="partition-section-hint">Reorder files to set flash order • Leave target empty to auto-match by filename, or specify a partition name / ID</span>
               </div>
             </div>
             <div id="partition-list" class="partition-list" role="list" aria-label="Individual partition files"></div>

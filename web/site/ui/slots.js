@@ -145,7 +145,7 @@ function renderPartitionList() {
 
   sectionEl.hidden = false;
 
-  state.partitions.forEach((entry) => {
+  state.partitions.forEach((entry, idx) => {
     const item = document.createElement("div");
     item.className = "partition-item";
     item.setAttribute("role", "listitem");
@@ -273,6 +273,31 @@ function renderPartitionList() {
     fileTrigger.appendChild(badge);
     fileTrigger.appendChild(content);
     left.appendChild(dragHandle);
+    if (state.partitions.length > 1) {
+      const moveControls = document.createElement("div");
+      moveControls.className = "partition-move-controls";
+
+      const makeMoveBtn = (direction, edgeDisabled, pathD) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn-partition-move";
+        btn.setAttribute("aria-label", `Move ${entry.file.name} ${direction}`);
+        btn.title = `Move ${direction}`;
+        btn.dataset.edgeDisabled = String(edgeDisabled);
+        btn.disabled = state.isBusy || edgeDisabled;
+        btn.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="${pathD}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        btn.addEventListener("click", () => {
+          movePartitionFile(entry.id, direction === "up" ? -1 : 1);
+        });
+        return btn;
+      };
+
+      moveControls.appendChild(makeMoveBtn("up", idx === 0, "M5 12l5-5 5 5"));
+      moveControls.appendChild(
+        makeMoveBtn("down", idx === state.partitions.length - 1, "M5 8l5 5 5-5")
+      );
+      left.appendChild(moveControls);
+    }
     left.appendChild(fileTrigger);
 
     const right = document.createElement("div");

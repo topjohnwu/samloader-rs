@@ -372,6 +372,10 @@ export function updateControlsState() {
       el.disabled = busy;
     });
 
+  document.querySelectorAll(".btn-partition-move").forEach((el) => {
+    el.disabled = busy || el.dataset.edgeDisabled === "true";
+  });
+
   document.querySelectorAll(".partition-item").forEach((el) => {
     el.draggable = !busy;
   });

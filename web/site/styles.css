@@ -166,6 +166,7 @@
 .dropzone:focus-visible,
 .partition-file-trigger:focus-visible,
 .partition-item:focus-visible,
+.btn-partition-move:focus-visible,
 .log-terminal:focus-visible {
   outline: 2px solid var(--md-sys-color-primary);
   outline-offset: 2px;
@@ -718,12 +719,14 @@ textarea {
   font-size: 0.9375rem;
   font-weight: 500;
   color: var(--md-sys-color-on-surface);
+  overflow-wrap: anywhere;
 }
 
 .device-sub {
   font-family: 'Roboto Mono', monospace;
   font-size: 0.75rem;
   color: var(--md-sys-color-on-surface-variant);
+  overflow-wrap: anywhere;
 }
 
 .mode-badge {
@@ -816,7 +819,8 @@ textarea {
 }
 
 .device-normal-desc {
-  flex: 1 1 320px;
+  flex: 1 1 240px;
+  min-width: 0;
   font-size: 0.875rem;
 }
 
@@ -1221,6 +1225,57 @@ textarea {
   height: 16px;
 }
 
+.partition-move-controls {
+  display: none;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-partition-move {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--md-shape-sm);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface-variant);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.btn-partition-move:hover:not(:disabled) {
+  border-color: var(--md-sys-color-outline);
+  background-color: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface);
+}
+
+.btn-partition-move:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.btn-partition-move svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .partition-move-controls {
+    display: flex;
+  }
+
+  .partition-drag-handle {
+    display: none;
+  }
+
+  .btn-clear-slot {
+    width: 36px;
+    height: 36px;
+  }
+}
+
 .partition-item .slot-badge {
   background-color: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
@@ -1267,18 +1322,6 @@ textarea {
 .partition-target-input:disabled {
   opacity: 0.38;
   cursor: not-allowed;
-}
-
-@media (max-width: 680px) {
-  .partition-item .slot-right {
-    width: 100%;
-    justify-content: flex-end;
-  }
-
-  .partition-target-input {
-    flex: 1;
-    width: auto;
-  }
 }
 
 /* Advanced Options (folded by default) */
@@ -1366,7 +1409,7 @@ textarea {
 
 .options-fields-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 16px;
 }
 
@@ -1422,7 +1465,8 @@ textarea {
 }
 
 .pit-config-box {
-  height: 46px;
+  min-height: 46px;
+  height: auto;
   border-radius: var(--md-shape-sm);
   border-color: var(--md-sys-color-outline-variant);
   justify-content: center;
@@ -1444,12 +1488,6 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
-}
-
-@media (max-width: 640px) {
-  .options-checks-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .option-tile {
@@ -2220,41 +2258,6 @@ textarea {
   margin-left: auto;
 }
 
-@media (max-width: 680px) {
-  .device-empty-bar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 14px;
-  }
-
-  .device-empty-info {
-    flex: none;
-  }
-
-  .device-pair-toolbar .btn {
-    flex: 1 1 auto;
-  }
-
-  .server-field-region {
-    max-width: none;
-  }
-
-  .server-flash-hint {
-    text-align: left;
-  }
-
-  .server-entry-right {
-    width: 100%;
-    justify-content: space-between;
-    margin-left: 0;
-  }
-
-  .source-segmented-xs {
-    max-width: 100%;
-    overflow-x: auto;
-  }
-}
-
 .flash-result-text {
   flex: 1;
   min-width: 0;
@@ -2362,4 +2365,277 @@ textarea {
   color: var(--terminal-text);
   white-space: pre;
   margin: 0;
+}
+
+/* Mobile Responsive Layout */
+@media (max-width: 680px) {
+  .app-header {
+    position: static;
+  }
+
+  .header-inner {
+    padding: 10px 16px;
+    min-height: 0;
+    gap: 10px;
+  }
+
+  .header-brand,
+  .brand-text,
+  .backend-selector-group {
+    min-width: 0;
+  }
+
+  .brand-text {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+
+  .header-controls,
+  .device-actions-group,
+  .slots-header-actions,
+  .server-lookup-actions,
+  .archive-format-group,
+  .archive-concurrency-group,
+  .when-done-group,
+  .action-bar-group,
+  .log-actions {
+    width: 100%;
+  }
+
+  .header-controls,
+  .slots-header-actions,
+  .archive-concurrency-group,
+  .when-done-group,
+  .log-actions {
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .backend-selector-group {
+    flex: 1 1 120px;
+  }
+
+  .backend-selector-group .select-input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .app-container {
+    margin: 16px auto 40px;
+    padding: 0 12px;
+    gap: 14px;
+  }
+
+  .card {
+    border-radius: var(--md-shape-md);
+  }
+
+  .card-header,
+  .card-body {
+    padding: 16px;
+  }
+
+  .device-empty-bar,
+  .device-actions-bar,
+  .server-archive-controls,
+  .archive-format-group,
+  .action-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .device-empty-info {
+    flex: none;
+  }
+
+  .device-item-right {
+    margin-left: auto;
+  }
+
+  .device-pair-toolbar .btn,
+  .device-actions-group .btn,
+  .bridge-setup-actions .btn,
+  .server-lookup-actions .btn,
+  .action-bar-group .btn {
+    flex: 1 1 auto;
+  }
+
+  .device-normal-panel .btn,
+  .opfs-cache-actions,
+  .opfs-cache-actions .btn,
+  .server-custom-version-row .btn,
+  .bridge-setup-actions {
+    width: 100%;
+  }
+
+  .action-bar-group {
+    margin-left: 0;
+    justify-content: stretch;
+  }
+
+  .action-bar-group .btn-flash {
+    flex: 1 1 100%;
+  }
+
+  .when-done-group .select-input-action {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .card-header .source-segmented-group,
+  .archive-format-group .source-segmented-group,
+  .source-segmented-xs {
+    width: 100%;
+    display: flex;
+  }
+
+  .card-header .source-segmented-option,
+  .archive-format-group .source-segmented-option,
+  .source-segmented-xs .source-segmented-option {
+    flex: 1;
+    padding: 4px 8px;
+  }
+
+  .source-segmented-xs {
+    height: auto;
+    min-height: 34px;
+  }
+
+  .source-segmented-xs .source-segmented-option {
+    white-space: normal;
+    text-align: center;
+    line-height: 1.2;
+  }
+
+  .dropzone {
+    flex-wrap: wrap;
+  }
+
+  .slot-box.slot-populated .slot-left,
+  .server-entry-main {
+    flex: 1 1 100%;
+  }
+
+  .slot-box.slot-populated .slot-right {
+    width: 100%;
+    justify-content: space-between;
+    padding-left: 58px;
+  }
+
+  .pit-config-box.slot-populated .slot-right {
+    padding-left: 52px;
+  }
+
+  .partition-item .slot-left,
+  .partition-item .slot-right,
+  .server-entry-right {
+    width: 100%;
+  }
+
+  .partition-item .slot-right {
+    justify-content: flex-end;
+  }
+
+  .partition-target-input {
+    flex: 1 1 140px;
+    width: auto;
+    min-width: 0;
+  }
+
+  .bridge-install-actions {
+    display: flex;
+    margin: 6px 0 0;
+  }
+
+  .server-field-region {
+    max-width: none;
+  }
+
+  .server-entry-right {
+    justify-content: space-between;
+    margin-left: 0;
+  }
+
+  .server-flash-hint {
+    text-align: left;
+  }
+
+  .options-checks-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .log-header {
+    padding: 6px 12px 6px 8px;
+  }
+
+  .log-actions {
+    padding: 0 8px 6px;
+  }
+
+  .log-body {
+    padding: 0 16px 16px;
+  }
+}
+
+@media (max-width: 520px) {
+  .header-inner {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .header-brand {
+    gap: 8px;
+  }
+
+  .brand-logo-wrap {
+    width: 32px;
+    height: 32px;
+    border-radius: var(--md-shape-sm);
+  }
+
+  .brand-text {
+    gap: 3px 6px;
+  }
+
+  .brand-title {
+    font-size: 1.0625rem;
+  }
+
+  .brand-pill {
+    font-size: 0.6875rem;
+    padding: 2px 8px;
+  }
+
+  .brand-version {
+    font-size: 0.7rem;
+  }
+
+  .backend-label {
+    display: none;
+  }
+
+  .header-controls {
+    gap: 6px;
+  }
+
+  .backend-selector-group .select-input {
+    height: 32px;
+    padding: 0 24px 0 10px;
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+  }
+
+  .status-chip,
+  .segmented-group {
+    height: 32px;
+  }
+
+  .status-chip {
+    padding: 0 8px;
+    gap: 5px;
+  }
+
+  .segmented-option {
+    width: 32px;
+  }
 }
