@@ -4,8 +4,8 @@
 // @version      1.0.0
 // @description  Bridges Samsung FUS requests for the samloader-rs web app (Tampermonkey)
 // @author       topjohnwu
-// @updateURL    https://raw.githubusercontent.com/topjohnwu/samloader-rs/main/web/site/samloader-fus-bridge.user.js
-// @downloadURL  https://raw.githubusercontent.com/topjohnwu/samloader-rs/main/web/site/samloader-fus-bridge.user.js
+// @updateURL    https://topjohnwu.github.io/samloader-rs/samloader-fus-bridge.user.js
+// @downloadURL  https://topjohnwu.github.io/samloader-rs/samloader-fus-bridge.user.js
 // @match        *://*/*
 // @sandbox      JavaScript
 // @grant        GM.xmlHttpRequest

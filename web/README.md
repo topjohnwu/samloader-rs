@@ -2,6 +2,8 @@
 
 Browser-based Samsung firmware downloader and Odin flasher powered by [`samloader-fus`](../fus) and [`samloader-odin`](../odin) compiled to WebAssembly, using [WebUSB](https://wicg.github.io/webusb/) (`nusb`) and [Web Serial](https://wicg.github.io/serial/) (`vcom`).
 
+**Live Web App:** [https://topjohnwu.github.io/samloader-rs/](https://topjohnwu.github.io/samloader-rs/)
+
 ## Features
 
 - **Samsung Server Firmware Lookup & Inspection**: Query FUS firmware history (`Latest`, `Previous Stable`, `Beta`) or enter a custom version string, auto-fill Model & Region from a connected Download Mode device (DVIF), highlight the installed bootloader version, and inspect the encrypted ZIP Central Directory before downloading.
@@ -120,6 +122,8 @@ web/
 ```
 
 ## Deploying
+
+Automated GitHub Pages deployment is configured in [`.github/workflows/pages.yml`](../.github/workflows/pages.yml), publishing on GitHub Releases and manual `workflow_dispatch` runs to `https://topjohnwu.github.io/samloader-rs/`.
 
 The web app is a purely static site with no backend server requirements. Fonts are self-hosted from `web/site/fonts/`, so the page makes no third-party requests other than optional Samsung FUS requests via the user's installed bridge userscript.
 

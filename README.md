@@ -33,6 +33,10 @@ Options:
 - Processes and extracts official TAR firmware packages in-memory, avoiding slow disk write operations.
 - Transmits raw LZ4-compressed data directly to supported devices to reduce USB transfer size and time.
 
+## Web App
+
+You can also use `samloader` directly in your browser at **[https://topjohnwu.github.io/samloader-rs/](https://topjohnwu.github.io/samloader-rs/)** without installing anything locally. It runs on desktop Chromium browsers using WebAssembly, WebUSB/Web Serial, and an optional Tampermonkey userscript for Samsung FUS downloads. See [web/README.md](web/README.md) for details and browser compatibility.
+
 ## Install
 
 If you have a working Rust toolchain installed, you can install with:
