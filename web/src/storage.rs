@@ -186,9 +186,13 @@ async fn create_writable(
     Ok(val.unchecked_into())
 }
 
+async fn abort_writable(w: FileSystemWritableFileStream) {
+    let _ = JsFuture::from(w.abort()).await;
+}
+
 async fn close_writable(w: FileSystemWritableFileStream) -> Result<(), String> {
     if let Err(err) = JsFuture::from(w.close()).await {
-        let _ = JsFuture::from(w.abort()).await;
+        abort_writable(w).await;
         return Err(err_str("writable.close()", err));
     }
     Ok(())
@@ -202,7 +206,7 @@ async fn write_bytes_writable(fh: &FileSystemFileHandle, bytes: &[u8]) -> Result
         Err(e) => Err(e),
     };
     if let Err(err) = write_res {
-        let _ = JsFuture::from(w.abort()).await;
+        abort_writable(w).await;
         return Err(err_str("writable.write()", err));
     }
     close_writable(w).await
@@ -775,9 +779,10 @@ async fn dir_is_complete(
     filename: &str,
     min_size: u64,
     max_size: u64,
+    uses_part_file: bool,
 ) -> Result<bool, String> {
     validate_filename(filename)?;
-    if file_exists(dir, &format!("{filename}.part")).await?
+    if (uses_part_file && file_exists(dir, &format!("{filename}.part")).await?)
         || file_exists(dir, &format!("{filename}.part.meta")).await?
     {
         return Ok(false);
@@ -793,31 +798,44 @@ async fn dir_open_part(
     dir: &FileSystemDirectoryHandle,
     filename: &str,
     force: bool,
-) -> Result<OpenedPartDir, String> {
+    uses_part_file: bool,
+) -> Result<(OpenedPartDir, bool), String> {
     validate_filename(filename)?;
-    let part_name = format!("{filename}.part");
+    let data_name = if uses_part_file {
+        format!("{filename}.part")
+    } else {
+        filename.to_string()
+    };
     let meta_name = format!("{filename}.part.meta");
 
-    if force {
-        remove_entry_if_exists(dir, &part_name, false).await?;
+    let had_prior_file = if force {
+        remove_entry_if_exists(dir, &data_name, false).await?;
         remove_entry_if_exists(dir, &meta_name, false).await?;
-    } else if !file_exists(dir, &part_name).await? {
-        remove_entry_if_exists(dir, &meta_name, false).await?;
-    }
+        false
+    } else {
+        let existed = file_exists(dir, &data_name).await?;
+        if !existed {
+            remove_entry_if_exists(dir, &meta_name, false).await?;
+        }
+        existed
+    };
 
-    let data_handle = get_file_handle(dir, &part_name, true)
+    let data_handle = get_file_handle(dir, &data_name, true)
         .await?
-        .ok_or_else(|| format!("Failed to open data file handle '{part_name}'"))?;
+        .ok_or_else(|| format!("Failed to open data file handle '{data_name}'"))?;
 
-    Ok(OpenedPartDir {
-        dir: dir.clone(),
-        data_handle,
-        filename: filename.to_string(),
-        meta_name,
-    })
+    Ok((
+        OpenedPartDir {
+            dir: dir.clone(),
+            data_handle,
+            filename: filename.to_string(),
+            meta_name,
+        },
+        had_prior_file,
+    ))
 }
 
-async fn finalize_part_dir(part_dir: &OpenedPartDir) -> Result<(), String> {
+async fn finalize_opfs_part(part_dir: &OpenedPartDir) -> Result<(), String> {
     move_file_replacing(&part_dir.dir, &part_dir.data_handle, &part_dir.filename).await?;
     remove_entry_if_exists(&part_dir.dir, &part_dir.meta_name, false).await?;
     Ok(())
@@ -854,9 +872,8 @@ impl DownloadStorage {
         max_size: u64,
     ) -> Result<bool, String> {
         match self {
-            Self::Opfs(dir) | Self::Directory(dir) => {
-                dir_is_complete(dir, filename, min_size, max_size).await
-            }
+            Self::Opfs(dir) => dir_is_complete(dir, filename, min_size, max_size, true).await,
+            Self::Directory(dir) => dir_is_complete(dir, filename, min_size, max_size, false).await,
         }
     }
 
@@ -867,7 +884,7 @@ impl DownloadStorage {
     ) -> Result<PartHandle, String> {
         match self {
             Self::Opfs(files_dir) => {
-                let part_dir = dir_open_part(files_dir, filename, force).await?;
+                let (part_dir, _) = dir_open_part(files_dir, filename, force, true).await?;
                 if !has_method(part_dir.data_handle.as_ref(), "createSyncAccessHandle") {
                     return Err(
                         "FileSystemFileHandle.createSyncAccessHandle() must run in a Web Worker"
@@ -888,9 +905,10 @@ impl DownloadStorage {
                 }))
             }
             Self::Directory(dir) => {
-                let part_dir = dir_open_part(dir, filename, force).await?;
+                let (part_dir, had_prior_file) = dir_open_part(dir, filename, force, false).await?;
                 Ok(PartHandle::Directory(DirectoryPartHandle {
                     part_dir,
+                    had_prior_file,
                     writable: None,
                     pending_meta: None,
                 }))
@@ -916,14 +934,19 @@ impl OpfsPartHandle {
 
 pub(crate) struct DirectoryPartHandle {
     part_dir: OpenedPartDir,
+    had_prior_file: bool,
     writable: Option<FileSystemWritableFileStream>,
     pending_meta: Option<Vec<u8>>,
 }
 
 impl DirectoryPartHandle {
-    async fn ensure_writable(&mut self) -> Result<&FileSystemWritableFileStream, String> {
+    async fn ensure_writable(
+        &mut self,
+        keep_existing_data: bool,
+    ) -> Result<&FileSystemWritableFileStream, String> {
         if self.writable.is_none() {
-            self.writable = Some(create_writable(&self.part_dir.data_handle, true).await?);
+            self.writable =
+                Some(create_writable(&self.part_dir.data_handle, keep_existing_data).await?);
         }
         Ok(self.writable.as_ref().expect("writable just initialized"))
     }
@@ -933,6 +956,12 @@ impl DirectoryPartHandle {
             close_writable(active).await?;
         }
         Ok(())
+    }
+
+    async fn abort_writable(&mut self) {
+        if let Some(active) = self.writable.take() {
+            abort_writable(active).await;
+        }
     }
 }
 
@@ -1038,11 +1067,12 @@ impl PartHandle {
                     Err(e) => Err(e),
                 };
                 if let Err(err) = res {
-                    let _ = JsFuture::from(w.abort()).await;
+                    abort_writable(w).await;
                     return Err(err_str("writable.truncate()", err));
                 }
                 close_writable(w).await?;
                 if new_size == 0 {
+                    h.had_prior_file = false;
                     remove_entry_if_exists(&h.part_dir.dir, &h.part_dir.meta_name, false).await?;
                 }
                 Ok(())
@@ -1069,7 +1099,7 @@ impl PartHandle {
                 Ok(())
             }
             Self::Directory(h) => {
-                let active = h.ensure_writable().await?;
+                let active = h.ensure_writable(offset > 0).await?;
                 write_positioned_writable(active, offset, chunk).await
             }
         }
@@ -1115,8 +1145,8 @@ impl PartHandle {
                 Ok(())
             }
             Self::Directory(h) => {
-                // FileSystemWritableFileStream writes to a .crswap file; closing & reopening
-                // mid-transfer forces Chromium to copy the entire .part file into a new .crswap,
+                // FileSystemWritableFileStream writes to a swap file; closing & reopening
+                // mid-transfer forces Chromium to copy the partial file into a new swap file,
                 // causing multi-second stalls on multi-GB files. Keep the stream open and commit
                 // the latest checkpoint atomically in close() on cancellation/error.
                 h.pending_meta = Some(meta_bytes.to_vec());
@@ -1136,12 +1166,15 @@ impl PartHandle {
                     .map_err(|e| err_str("OPFS finalize flush()", e));
                 h.sync_handle.close();
                 flush_res?;
-                finalize_part_dir(&h.part_dir).await
+                finalize_opfs_part(&h.part_dir).await
             }
             Self::Directory(mut h) => {
+                // Directory handles write directly to `{filename}` via WritableFileStream's swap
+                // file because Android SAF `content://` URIs reject `FileHandle.move()`.
                 h.pending_meta = None;
                 h.flush_writable().await?;
-                finalize_part_dir(&h.part_dir).await
+                remove_entry_if_exists(&h.part_dir.dir, &h.part_dir.meta_name, false).await?;
+                Ok(())
             }
         }
     }
@@ -1155,13 +1188,26 @@ impl PartHandle {
                 h.sync_handle.close();
             }
             Self::Directory(mut h) => {
-                let flushed = h.flush_writable().await.is_ok();
-                if flushed
-                    && let Some(meta) = h.pending_meta.take()
-                    && let Ok(Some(mh)) =
-                        get_file_handle(&h.part_dir.dir, &h.part_dir.meta_name, true).await
-                {
-                    let _ = write_bytes_writable(&mh, &meta).await;
+                if let Some(meta) = h.pending_meta.take() {
+                    let flushed = h.flush_writable().await.is_ok();
+                    if flushed {
+                        if let Ok(Some(mh)) =
+                            get_file_handle(&h.part_dir.dir, &h.part_dir.meta_name, true).await
+                        {
+                            let _ = write_bytes_writable(&mh, &meta).await;
+                        }
+                    } else if !h.had_prior_file {
+                        let _ =
+                            remove_entry_if_exists(&h.part_dir.dir, &h.part_dir.filename, false)
+                                .await;
+                    }
+                } else {
+                    h.abort_writable().await;
+                    if !h.had_prior_file {
+                        let _ =
+                            remove_entry_if_exists(&h.part_dir.dir, &h.part_dir.filename, false)
+                                .await;
+                    }
                 }
             }
         }

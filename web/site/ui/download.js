@@ -190,7 +190,7 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
     selectedEntries,
     pickDirectory: async () => {
       // Pick a directory so single-file and full-ZIP downloads can store
-      // `.part` / `.part.meta` sidecars for resumable transfers.
+      // `.part.meta` sidecars for resumable transfers.
       try {
         return await window.showDirectoryPicker({ mode: "readwrite" });
       } catch (err) {
