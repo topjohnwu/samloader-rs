@@ -195,6 +195,18 @@ pub(crate) fn check_xml_status(xml: &str) -> crate::Result<()> {
     parse_xml_status(&doc)
 }
 
+pub(crate) fn is_s3_not_found_xml(xml: &str) -> bool {
+    Document::parse(xml).ok().is_some_and(|doc| {
+        let root = doc.root_element();
+        root.has_tag_name("Error")
+            && root
+                .children()
+                .find(|n| n.has_tag_name("Code"))
+                .and_then(|n| n.text())
+                .is_some_and(|code| matches!(code.trim(), "AccessDenied" | "NoSuchKey"))
+    })
+}
+
 fn get_xml_node_data<'a>(node: Node<'a, 'a>) -> HashMap<&'a str, &'a str> {
     let mut kv = HashMap::new();
     for n in node.descendants().filter(|n| n.has_tag_name("Data")) {

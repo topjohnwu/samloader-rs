@@ -31,6 +31,15 @@ pub enum Error {
         status: String,
     },
 
+    /// No firmware was found on FUS for the requested model and region.
+    #[error("No firmware found for {model} ({region}); check the model number and region/CSC code")]
+    FirmwareNotFound {
+        /// The requested device model.
+        model: String,
+        /// The requested region / CSC code.
+        region: String,
+    },
+
     /// The server returned malformed XML or was missing expected metadata.
     #[error("Invalid server response: {0}")]
     InvalidResponse(String),

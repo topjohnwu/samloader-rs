@@ -44,18 +44,33 @@ async fn fetch_version_xml(
     let version_url =
         format!("https://fota-cloud-dn.ospserver.net:443/firmware/{region}/{model}/version.xml");
     let headers = [("User-Agent", "Kies2.0_FUS")];
-    let version_xml = client
+    let resp = client
         .send(HttpRequest {
             method: HttpMethod::Get,
             url: &version_url,
             headers: &headers,
             body: None,
         })
-        .await?
-        .ensure_success()?
-        .into_text()
         .await?;
 
+    let not_found = || Error::FirmwareNotFound {
+        model: model.to_owned(),
+        region: region.to_owned(),
+    };
+    match resp.status() {
+        404 => return Err(not_found()),
+        403 => {
+            if let Ok(body) = resp.into_text().await
+                && xml::is_s3_not_found_xml(&body)
+            {
+                return Err(not_found());
+            }
+            return Err(HttpError::Status(403).into());
+        }
+        _ => {}
+    }
+
+    let version_xml = resp.ensure_success()?.into_text().await?;
     xml::parse_version_xml(&version_xml)
 }
 
@@ -763,6 +778,51 @@ mod tests {
             assert_eq!(out2, &plaintext[20..]);
             assert_eq!(nonce_calls.load(Ordering::SeqCst), 1);
             assert_eq!(init_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn test_fetch_history_not_found_vs_cdn_403() {
+        block_on(async {
+            let s3_client = MockClient::from_handler(|req| {
+                if req.url.contains("SmartHistory.do") {
+                    let empty_history = br#"<?xml version="1.0" encoding="UTF-8"?><FUSMsg><FUSBody><Results><Status></Status></Results><Put><CmdID>1</CmdID></Put></FUSBody></FUSMsg>"#.to_vec();
+                    return Box::pin(async move { Ok(MockResponse::ok_bytes(empty_history)) });
+                }
+                let s3_xml = br#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>"#.to_vec();
+                Box::pin(async move { Ok(MockResponse::with_status(403, s3_xml)) })
+            });
+            let err = fetch_history(&s3_client, "SM-968B", "BRI")
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                Error::FirmwareNotFound { ref model, ref region }
+                    if model == "SM-968B" && region == "BRI"
+            ));
+
+            let not_found_client = MockClient::from_handler(|req| {
+                if req.url.contains("SmartHistory.do") {
+                    return Box::pin(async { Err(HttpError::Status(503)) });
+                }
+                Box::pin(async { Ok(MockResponse::with_status(404, Vec::new())) })
+            });
+            let err = fetch_history(&not_found_client, "SM-968B", "BRI")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::FirmwareNotFound { .. }));
+
+            let cdn_403_client = MockClient::from_handler(|req| {
+                if req.url.contains("SmartHistory.do") {
+                    return Box::pin(async { Err(HttpError::Status(503)) });
+                }
+                let html = b"<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD></HTML>".to_vec();
+                Box::pin(async move { Ok(MockResponse::with_status(403, html)) })
+            });
+            let err = fetch_history(&cdn_403_client, "SM-S931U1", "XAA")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Http(HttpError::Status(403))));
         });
     }
 }
