@@ -48,7 +48,7 @@ const SPEED_WINDOW_MS: f64 = 3000.0;
 const SPEED_SAMPLE_INTERVAL_MS: f64 = 250.0;
 const DEFAULT_CONCURRENCY: usize = 6;
 const MIN_CONCURRENCY: usize = 1;
-const MAX_CONCURRENCY: usize = 8;
+const MAX_CONCURRENCY: usize = 6;
 const CANCELLED_ERR: &str = "Download cancelled";
 
 fn component_to_js(name: &str) -> JsValue {
@@ -92,7 +92,7 @@ pub struct FusDownloadOptions {
     /// Optional list of archive entry names to extract when `mode` is `"entries"`.
     #[wasm_bindgen(getter_with_clone, js_name = entryNames)]
     pub entry_names: Option<Vec<String>>,
-    /// Parallel HTTP connection count (clamped to `1..=8`, defaults to `6`).
+    /// Parallel HTTP connection count (clamped to `1..=6`, defaults to `6`).
     pub concurrency: Option<f64>,
     /// Overwrites existing complete files and discards any partial download.
     pub force: bool,

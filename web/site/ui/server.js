@@ -708,7 +708,7 @@ export function setupServerPanel() {
     regionInput.value = savedRegion.toUpperCase();
   }
   const savedConcurrency = Number(readStorage(STORAGE_CONCURRENCY));
-  if (savedConcurrency >= 1 && savedConcurrency <= 8) {
+  if (savedConcurrency >= 1 && savedConcurrency <= 6) {
     state.serverConcurrency = savedConcurrency;
   }
   if (concurrencySelect) {
@@ -822,7 +822,7 @@ export function setupServerPanel() {
 
   concurrencySelect?.addEventListener("change", () => {
     const val = Number(concurrencySelect.value);
-    if (val >= 1 && val <= 8) {
+    if (val >= 1 && val <= 6) {
       state.serverConcurrency = val;
       writeStorage(STORAGE_CONCURRENCY, val);
     }
