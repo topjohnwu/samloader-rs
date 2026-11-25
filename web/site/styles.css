@@ -249,22 +249,14 @@ textarea {
   white-space: nowrap;
 }
 
-.brand-pill {
-  font-family: 'DM Sans', 'Roboto', sans-serif;
+.brand-version {
+  font-family: 'Roboto Mono', monospace;
   font-size: 0.75rem;
   font-weight: 500;
   color: var(--md-sys-color-on-primary-container);
   background-color: var(--md-sys-color-primary-container);
-  padding: 4px 10px;
+  padding: 3px 10px;
   border-radius: var(--md-shape-full);
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-
-.brand-version {
-  font-family: 'Roboto Mono', monospace;
-  font-size: 0.75rem;
-  color: var(--md-sys-color-on-surface-variant);
   white-space: nowrap;
 }
 
@@ -2727,13 +2719,9 @@ textarea {
     font-size: 1.0625rem;
   }
 
-  .brand-pill {
-    font-size: 0.6875rem;
-    padding: 2px 8px;
-  }
-
   .brand-version {
     font-size: 0.7rem;
+    padding: 2px 8px;
   }
 
   .header-controls {

@@ -70,22 +70,6 @@ export function applyCapabilityLayout() {
   const canDownloadNow = canDownload && state.isOnline;
   const supported = canFlash || canDownloadNow;
 
-  const brandPill = document.getElementById("brand-pill");
-  if (brandPill) {
-    if (canFlash && canDownloadNow) {
-      brandPill.textContent = "Downloader & Flasher";
-      brandPill.hidden = false;
-    } else if (canDownloadNow) {
-      brandPill.textContent = "Firmware Downloader";
-      brandPill.hidden = false;
-    } else if (canFlash) {
-      brandPill.textContent = "Odin Web Flasher";
-      brandPill.hidden = false;
-    } else {
-      brandPill.hidden = true;
-    }
-  }
-
   const backendGroup = document.getElementById("backend-selector-group");
   if (backendGroup) backendGroup.hidden = !canFlash;
 
