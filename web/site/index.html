@@ -221,25 +221,21 @@
                 </div>
                 <div class="bridge-setup-actions">
                   <button type="button" id="btn-reload-bridge" class="btn btn-sm btn-primary-outline">Reload Page</button>
-                  <button type="button" id="btn-recheck-bridge" class="btn btn-sm btn-outline">Recheck</button>
                 </div>
               </div>
               <p id="fus-bridge-banner-desc" class="bridge-setup-desc">
                 Samsung FUS blocks browser CORS and serves firmware binaries over plain HTTP. Install the local bridge userscript so this page can fetch firmware directly.
               </p>
               <ol class="bridge-steps">
-                <li id="bridge-step-tampermonkey">Install <strong>Tampermonkey</strong>.</li>
+                <li id="bridge-step-tampermonkey">Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a>.</li>
                 <li class="bridge-install-step">
                   <span id="bridge-install-step-label">Install the bridge userscript:</span>
                   <span class="bridge-install-actions">
                     <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Userscript</a>
-                    <button type="button" class="btn btn-sm btn-outline btn-copy-userscript" title="Copy samloader-fus-bridge.user.js source for manual installation">Copy Script</button>
-                    <a class="btn btn-sm btn-outline" href="samloader-fus-bridge.user.js" download="samloader-fus-bridge.user.js" title="Download samloader-fus-bridge.user.js file">Download .user.js</a>
                   </span>
                 </li>
                 <li id="bridge-reload-step">Click <strong>Reload Page</strong> so your userscript manager injects the bridge into this tab.</li>
               </ol>
-              <p id="fus-bridge-feedback" class="bridge-setup-feedback" hidden></p>
             </div>
             <div id="fus-bridge-connected" class="fus-bridge-connected" hidden>
               <div id="fus-bridge-badge" class="fus-bridge-badge">

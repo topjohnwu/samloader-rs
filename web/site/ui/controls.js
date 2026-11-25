@@ -286,7 +286,6 @@ export function updateControlsState() {
   [
     "server-model",
     "server-region",
-    "btn-recheck-bridge",
     "btn-reload-bridge",
     "btn-clear-opfs-cache",
   ].forEach((id) => {

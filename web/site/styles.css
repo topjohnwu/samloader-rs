@@ -1821,12 +1821,6 @@ textarea {
   flex-wrap: wrap;
 }
 
-.bridge-setup-feedback {
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--status-warning);
-}
-
 .bridge-setup-icon {
   width: 20px;
   height: 20px;
@@ -1844,6 +1838,18 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.bridge-steps a:not(.btn) {
+  color: inherit;
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
+.bridge-steps a:not(.btn):focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: var(--md-shape-xs);
 }
 
 .bridge-install-actions {

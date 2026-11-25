@@ -17,14 +17,13 @@
 import { hasDeviceInfo, onDeviceChange, queryDeviceInfo } from "../app/device.js";
 import { COMPONENT_META } from "../app/download.js";
 import { EXPECTED_BRIDGE_VERSION } from "../app/fus_bridge.js";
-import { appendLog, reportError } from "../app/logger.js";
+import { appendLog } from "../app/logger.js";
 import {
   checkFirmwareVersions,
   checkFusBridge,
   clearInspectedArchive,
   clearServerHistory,
   doesVersionMatchBootloader,
-  fetchUserscriptSource,
   getArchiveRows,
   getSelectedEntriesInfo,
   initBridgeAnnouncementListener,
@@ -132,15 +131,10 @@ function renderBridgeBanner() {
   const installStepLabel = document.getElementById("bridge-install-step-label");
   const installLink = document.getElementById("link-install-userscript");
   const reloadStep = document.getElementById("bridge-reload-step");
-  const feedbackEl = document.getElementById("fus-bridge-feedback");
 
   const { connected, version, outdated } = state.fusBridge;
   if (connected && !outdated) {
     if (setupEl) setupEl.hidden = true;
-    if (feedbackEl) {
-      feedbackEl.textContent = "";
-      feedbackEl.hidden = true;
-    }
     if (connectedEl) connectedEl.hidden = false;
     if (badgeTextEl) {
       badgeTextEl.textContent = `FUS Bridge v${version ?? EXPECTED_BRIDGE_VERSION}`;
@@ -177,28 +171,6 @@ function renderBridgeBanner() {
       reloadStep.innerHTML =
         "Click <strong>Reload Page</strong> so your userscript manager injects the bridge into this tab.";
     }
-  }
-}
-
-async function handleCopyUserscript(btn) {
-  const originalLabel = btn.textContent;
-  btn.disabled = true;
-  try {
-    const source = await fetchUserscriptSource();
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard API is unavailable in this browser context");
-    }
-    await navigator.clipboard.writeText(source);
-    btn.textContent = "Copied!";
-    appendLog("Copied samloader-fus-bridge.user.js to clipboard for manual installation.");
-    setTimeout(() => {
-      btn.textContent = originalLabel;
-      btn.disabled = false;
-    }, 2000);
-  } catch (err) {
-    btn.textContent = originalLabel;
-    btn.disabled = false;
-    reportError(`Failed to copy userscript: ${err?.message || err}`);
   }
 }
 
@@ -561,27 +533,6 @@ function handleServerEvent(event) {
       renderBridgeBanner();
       updateControlsState();
       break;
-    case "bridge_checking": {
-      const recheckBtn = document.getElementById("btn-recheck-bridge");
-      const feedbackEl = document.getElementById("fus-bridge-feedback");
-      if (recheckBtn) {
-        recheckBtn.disabled = event.checking;
-        recheckBtn.textContent = event.checking ? "Checking..." : "Recheck";
-      }
-      if (event.checking && feedbackEl) {
-        feedbackEl.textContent = "";
-        feedbackEl.hidden = true;
-      }
-      break;
-    }
-    case "bridge_feedback": {
-      const feedbackEl = document.getElementById("fus-bridge-feedback");
-      if (feedbackEl && event.message) {
-        feedbackEl.textContent = event.message;
-        feedbackEl.hidden = false;
-      }
-      break;
-    }
     case "querying_history": {
       const checkBtn = document.getElementById("btn-check-versions");
       if (checkBtn) {
@@ -703,15 +654,9 @@ export function setupServerPanel() {
     });
   });
 
-  // Userscript bridge reload, recheck, manual copy & OPFS cache actions
+  // Userscript bridge reload & OPFS cache actions
   document.getElementById("btn-reload-bridge")?.addEventListener("click", () => {
     window.location.reload();
-  });
-  document.getElementById("btn-recheck-bridge")?.addEventListener("click", () => {
-    void checkFusBridge();
-  });
-  document.querySelectorAll(".btn-copy-userscript").forEach((btn) => {
-    btn.addEventListener("click", () => void handleCopyUserscript(btn));
   });
   document.getElementById("btn-clear-opfs-cache")?.addEventListener("click", handleClearOpfsCache);
 
@@ -826,5 +771,5 @@ export function setupServerPanel() {
     );
 
   updateControlsState();
-  void checkFusBridge({ quiet: true });
+  void checkFusBridge();
 }

@@ -91,11 +91,7 @@ export function initBridgeAnnouncementListener() {
   });
 }
 
-export async function checkFusBridge({ quiet = false } = {}) {
-  if (!quiet) {
-    notifyServerChange({ type: "bridge_checking", checking: true });
-  }
-
+export async function checkFusBridge() {
   bridgeCheckInFlight = true;
   try {
     const status = await detectFusBridge();
@@ -104,39 +100,16 @@ export async function checkFusBridge({ quiet = false } = {}) {
     applyBridgeStatus({ connected: false });
   } finally {
     bridgeCheckInFlight = false;
-    if (!quiet) {
-      notifyServerChange({ type: "bridge_checking", checking: false });
-    }
   }
 
-  let feedback = "";
   if (state.fusBridge.connected && state.fusBridge.outdated) {
     const installedLabel = state.fusBridge.version
       ? `v${state.fusBridge.version}`
       : "an unknown version";
-    const msg = `FUS Bridge userscript is outdated (installed ${installedLabel}; expected v${EXPECTED_BRIDGE_VERSION}). Update the userscript and click Reload Page.`;
-    if (!quiet) feedback = msg;
-    appendLog(msg);
-  } else if (!quiet && state.fusBridge.connected) {
-    appendLog(`FUS Bridge detected: v${state.fusBridge.version ?? "?"}.`);
-  } else if (!quiet) {
-    const msg =
-      "FUS Bridge not detected yet. If you just installed or updated the userscript, click Reload Page so your userscript manager activates it.";
-    feedback = msg;
-    appendLog(msg);
+    appendLog(
+      `FUS Bridge userscript is outdated (installed ${installedLabel}; expected v${EXPECTED_BRIDGE_VERSION}). Update the userscript and click Reload Page.`
+    );
   }
-
-  if (!quiet) {
-    notifyServerChange({ type: "bridge_feedback", message: feedback });
-  }
-}
-
-export async function fetchUserscriptSource() {
-  const resp = await fetch("samloader-fus-bridge.user.js", { cache: "no-store" });
-  if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}`);
-  }
-  return await resp.text();
 }
 
 // --- Bootloader Matching ---
