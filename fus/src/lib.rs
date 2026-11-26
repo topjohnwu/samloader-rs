@@ -32,6 +32,7 @@ mod parallel;
 mod stream;
 #[cfg(test)]
 mod test_util;
+mod transfer;
 mod xml;
 mod zip;
 
@@ -39,6 +40,9 @@ mod zip;
 pub use data::DataSource;
 pub use parallel::{ParallelDataSource, TransferObserver, TransferWarning};
 pub use stream::{Checkpoint, DataStream, OffsetCheckpoint, ResumableAsyncRead, ResumableStream};
+pub use transfer::{
+    PartSink, TransferConfig, TransferError, validate_resume_checkpoint, write_resumable_stream,
+};
 
 // Domain implementers
 pub use checkpoint::{CheckpointMeta, CheckpointState};

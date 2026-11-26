@@ -15,21 +15,19 @@
 //! Resumable `.part` file management, `SAMLOADR` v5 sidecar checkpoint metadata,
 //! and coalesced blocking disk writing.
 
-use samloader_fus::futures::future::{self, Either};
-use samloader_fus::futures::io::AsyncReadExt;
 use samloader_fus::{
-    Checkpoint, CheckpointMeta, CheckpointState, ResumableAsyncRead, ResumableStream,
+    Checkpoint, CheckpointState, PartSink, ResumableAsyncRead, ResumableStream, TransferConfig,
+    TransferError, validate_resume_checkpoint, write_resumable_stream,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::pin::pin;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::watch;
 
 const CHECKPOINT_INTERVAL: u64 = 32 * 1024 * 1024;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
-const COALESCE_MAX_WAIT: Duration = Duration::from_millis(250);
+const COALESCE_MAX_WAIT_MS: f64 = 250.0;
 
 fn append_ext(path: &Path, ext: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
@@ -57,27 +55,15 @@ fn io_with_path(path: &Path, action: &str, err: io::Error) -> io::Error {
     )
 }
 
-fn persist_checkpoint(
-    file: &File,
-    meta_path: &Path,
-    checksum: [u8; 16],
-    target_size: u64,
-    state: CheckpointState,
-) -> io::Result<()> {
+fn persist_checkpoint_bytes(file: &File, meta_path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Flush data blocks before advancing the persisted sidecar so power loss
     // cannot leave a newer checkpoint pointing past unwritten data.
     let result = (|| {
         file.sync_data()?;
-        let bytes = CheckpointMeta {
-            checksum,
-            target_size,
-            state,
-        }
-        .to_bytes();
         let tmp_path = append_ext(meta_path, ".tmp");
         let replace_res = (|| {
             let mut tmp = File::create(&tmp_path)?;
-            tmp.write_all(&bytes)?;
+            tmp.write_all(bytes)?;
             tmp.sync_data()?;
             drop(tmp);
             std::fs::rename(&tmp_path, meta_path)
@@ -188,17 +174,7 @@ impl PartFile {
                 let meta_bytes = std::fs::read(&meta_path).ok();
                 let valid_resume = meta_bytes
                     .as_deref()
-                    .and_then(|b| CheckpointMeta::from_bytes(b, checksum, target_size))
-                    .and_then(|m| S::Checkpoint::try_from(m.state).ok())
-                    .and_then(|cp| {
-                        let dict_len = source.resume_dict_len(&cp)?;
-                        let out = cp.output_offset();
-                        (cp.source_offset() > 0
-                            && out < target_size
-                            && out <= existing_len
-                            && (dict_len as u64) <= out)
-                            .then_some((cp, dict_len))
-                    });
+                    .and_then(|b| validate_resume_checkpoint(b, checksum, existing_len, source));
 
                 if let Some((cp, dict_len)) = valid_resume {
                     start_pos = cp.output_offset();
@@ -250,7 +226,7 @@ impl PartFile {
         self,
         reader: R,
         cancel_rx: watch::Receiver<bool>,
-        on_written: impl Fn(u64),
+        on_written: impl Fn(u64) + Send,
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
@@ -261,143 +237,78 @@ impl PartFile {
 
     fn write_from_with_interval<R>(
         self,
-        mut reader: R,
+        reader: R,
         checkpoint_interval: u64,
         mut cancel_rx: watch::Receiver<bool>,
-        on_written: impl Fn(u64),
+        on_written: impl Fn(u64) + Send,
     ) -> io::Result<()>
     where
         R: ResumableAsyncRead,
         R::Checkpoint: Into<CheckpointState>,
     {
+        struct FilePartSink<'a, F> {
+            file: File,
+            part_path: &'a Path,
+            meta_path: &'a Path,
+            started_at: Instant,
+            on_written: F,
+        }
+
+        impl<F: Fn(u64) + Send> PartSink for FilePartSink<'_, F> {
+            fn now_ms(&self) -> f64 {
+                self.started_at.elapsed().as_secs_f64() * 1000.0
+            }
+
+            async fn write(&mut self, _offset: u64, data: &[u8]) -> io::Result<()> {
+                self.file
+                    .write_all(data)
+                    .map_err(|e| io_with_path(self.part_path, "write", e))?;
+                (self.on_written)(data.len() as u64);
+                Ok(())
+            }
+
+            async fn save_checkpoint(&mut self, meta_bytes: &[u8]) -> io::Result<()> {
+                persist_checkpoint_bytes(&self.file, self.meta_path, meta_bytes)
+            }
+        }
+
         let handle = tokio::runtime::Handle::current();
 
         tokio::task::block_in_place(move || {
-            let remaining = self.target_size.saturating_sub(self.start_pos);
-            // Keep `buf_size >= 1` so `reader.read` still polls EOF/CRC verification
-            // even on 0-byte streams or streams already resumed at `target_size`.
-            let buf_size = (remaining.min(WRITE_BUF_SIZE as u64) as usize).max(1);
-            let mut buf = vec![0u8; buf_size];
-            let mut filled = 0usize;
-            let mut write_pos = self.start_pos;
-            let mut last_persisted_offset = self.start_pos;
-            let mut latest_cp: Option<R::Checkpoint> = None;
-            let min_delta = checkpoint_interval.max(1);
-            let mut last_flush = Instant::now();
-            let mut file = self.file;
-
-            let flush_buf = |file: &mut File,
-                             buf: &[u8],
-                             filled: &mut usize,
-                             write_pos: &mut u64|
-             -> io::Result<()> {
-                if *filled == 0 {
-                    return Ok(());
-                }
-                let n = *filled;
-                *filled = 0;
-                file.write_all(&buf[..n])
-                    .map_err(|e| io_with_path(&self.part_path, "write", e))?;
-                *write_pos += n as u64;
-                on_written(n as u64);
-                Ok(())
+            let mut sink = FilePartSink {
+                file: self.file,
+                part_path: &self.part_path,
+                meta_path: &self.meta_path,
+                started_at: Instant::now(),
+                on_written,
+            };
+            let config = TransferConfig {
+                write_buf_size: WRITE_BUF_SIZE,
+                checkpoint_interval,
+                coalesce_max_wait_ms: COALESCE_MAX_WAIT_MS,
+                checkpoint_max_wait_ms: None,
             };
 
-            let read_err: io::Error = loop {
-                let read_step = handle.block_on(async {
-                    match future::select(
-                        pin!(wait_cancelled(&mut cancel_rx)),
-                        pin!(reader.read(&mut buf[filled..])),
-                    )
-                    .await
-                    {
-                        Either::Left(_) => Err(cancelled_error()),
-                        Either::Right((res, _)) => res,
-                    }
-                });
+            let res = handle.block_on(write_resumable_stream(
+                reader,
+                &mut sink,
+                self.start_pos,
+                self.target_size,
+                self.checksum,
+                &config,
+                wait_cancelled(&mut cancel_rx),
+            ));
 
-                match read_step {
-                    Ok(0) => {
-                        drop(reader);
-                        flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
-                        if write_pos != self.target_size {
-                            return Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                format!(
-                                    "incomplete download: wrote {write_pos} of {} bytes",
-                                    self.target_size
-                                ),
-                            ));
-                        }
-                        return finalize_part_file(
-                            file,
-                            &self.part_path,
-                            &self.meta_path,
-                            &self.final_path,
-                        );
-                    }
-                    Ok(n) => {
-                        let new_filled = filled + n;
-                        if write_pos
-                            .checked_add(new_filled as u64)
-                            .is_none_or(|end| end > self.target_size)
-                        {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "stream exceeded declared target size",
-                            ));
-                        }
-                        filled = new_filled;
-
-                        let mut cp_due = None;
-                        if let Some(cp) = reader
-                            .checkpoint()
-                            .filter(|cp| cp.output_offset() < self.target_size)
-                        {
-                            if cp.output_offset() >= last_persisted_offset.saturating_add(min_delta)
-                            {
-                                cp_due = Some(cp);
-                            } else {
-                                latest_cp = Some(cp);
-                            }
-                        }
-
-                        if let Some(cp) = cp_due {
-                            let cp_offset = cp.output_offset();
-                            flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
-                            persist_checkpoint(
-                                &file,
-                                &self.meta_path,
-                                self.checksum,
-                                self.target_size,
-                                cp.into(),
-                            )?;
-                            last_persisted_offset = cp_offset;
-                            latest_cp = None;
-                            last_flush = Instant::now();
-                        } else if filled == buf.len() || last_flush.elapsed() >= COALESCE_MAX_WAIT {
-                            flush_buf(&mut file, &buf, &mut filled, &mut write_pos)?;
-                            last_flush = Instant::now();
-                        }
-                    }
-                    Err(e) => break e,
-                }
-            };
-
-            drop(reader);
-            if read_err.kind() != io::ErrorKind::InvalidData
-                && let Some(cp) = latest_cp.filter(|cp| cp.output_offset() > last_persisted_offset)
-                && flush_buf(&mut file, &buf, &mut filled, &mut write_pos).is_ok()
-            {
-                let _ = persist_checkpoint(
-                    &file,
+            match res {
+                Ok(()) => finalize_part_file(
+                    sink.file,
+                    &self.part_path,
                     &self.meta_path,
-                    self.checksum,
-                    self.target_size,
-                    cp.into(),
-                );
+                    &self.final_path,
+                ),
+                Err(TransferError::Cancelled) => Err(cancelled_error()),
+                Err(TransferError::Io(e)) => Err(e),
             }
-            Err(read_err)
         })
     }
 }
@@ -406,12 +317,13 @@ impl PartFile {
 mod tests {
     use super::*;
     use samloader_fus::futures::io::AsyncRead;
-    use samloader_fus::{DataSource, DataStream, OffsetCheckpoint};
+    use samloader_fus::{CheckpointMeta, DataSource, DataStream, OffsetCheckpoint};
     use std::ops::RangeBounds;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
     const TEST_CHECKSUM: [u8; 16] = [0x42; 16];
 

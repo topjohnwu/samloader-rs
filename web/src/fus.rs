@@ -20,11 +20,10 @@ use crate::storage::{DownloadStorage, DownloadTarget, PartHandle};
 use crate::{js_obj, to_js_err};
 use futures::channel::oneshot;
 use futures::future::{Either, FutureExt, Shared, select, try_join_all};
-use futures::io::AsyncReadExt;
 use samloader_fus::{
-    Checkpoint, CheckpointMeta, CheckpointState, DataSource, DataStream, FusClient, OdinComponent,
-    ParallelDataSource, ResumableAsyncRead, ResumableStream, TransferObserver, TransferWarning,
-    ZipArchive, ZipEntry,
+    Checkpoint, CheckpointState, DataSource, DataStream, FusClient, OdinComponent,
+    ParallelDataSource, PartSink, ResumableStream, TransferConfig, TransferError, TransferObserver,
+    TransferWarning, ZipArchive, ZipEntry, validate_resume_checkpoint, write_resumable_stream,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -197,6 +196,18 @@ impl CancelWatcher {
 
     fn is_cancelled(&self) -> bool {
         self.signal.as_ref().is_some_and(AbortSignal::aborted)
+    }
+
+    async fn wait_cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        match &self.cancelled {
+            Some(cancelled) => {
+                let _ = cancelled.clone().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
     }
 
     async fn run<T>(&self, fut: impl Future<Output = T>) -> Result<T, ()> {
@@ -436,20 +447,6 @@ impl TransferObserver for ProgressState {
     }
 }
 
-enum TransferError {
-    Cancelled,
-    Failed(String),
-}
-
-impl TransferError {
-    fn into_js(self) -> JsValue {
-        match self {
-            Self::Cancelled => JsValue::from_str(CANCELLED_ERR),
-            Self::Failed(msg) => JsValue::from_str(&msg),
-        }
-    }
-}
-
 struct TransferContext<'a> {
     storage: &'a DownloadStorage,
     checksum: [u8; 16],
@@ -458,188 +455,44 @@ struct TransferContext<'a> {
     progress: &'a ProgressState,
 }
 
-async fn flush_buf(
-    part: &mut PartHandle,
-    filename: &str,
-    buf: &[u8],
-    filled: &mut usize,
-    write_pos: &mut u64,
-    progress: &ProgressState,
-) -> Result<(), String> {
-    let n = *filled;
-    if n == 0 {
-        return Ok(());
-    }
-    *filled = 0;
-    part.write(*write_pos, &buf[..n])
-        .await
-        .map_err(|e| format!("Failed writing '{filename}': {e}"))?;
-    *write_pos += n as u64;
-    progress.set_file_written(*write_pos, false);
-    Ok(())
+struct WebPartSink<'a> {
+    part: &'a mut PartHandle,
+    filename: &'a str,
+    progress: &'a ProgressState,
 }
 
-async fn write_from_stream<R>(
-    mut reader: R,
-    part: &mut PartHandle,
-    filename: &str,
-    start_pos: u64,
-    target_size: u64,
-    ctx: &TransferContext<'_>,
-) -> Result<(), TransferError>
-where
-    R: ResumableAsyncRead,
-    R::Checkpoint: Into<CheckpointState>,
-{
-    let remaining = target_size.saturating_sub(start_pos);
-    let buf_size = (remaining.min(WRITE_BUF_SIZE as u64) as usize).max(1);
-    let mut buf = vec![0u8; buf_size];
-    let mut filled = 0usize;
-    let mut write_pos = start_pos;
-    let mut last_persisted_offset = start_pos;
-    let mut latest_cp: Option<R::Checkpoint> = None;
-    let min_delta = CHECKPOINT_INTERVAL.max(1);
-    let mut last_flush_ms = js_sys::Date::now();
-    let mut last_checkpoint_ms = last_flush_ms;
-
-    enum ReadOutcome {
-        Cancelled,
-        Data(io::Result<usize>),
+impl PartSink for WebPartSink<'_> {
+    fn now_ms(&self) -> f64 {
+        js_sys::Date::now()
     }
 
-    let (is_cancelled, read_err): (bool, Option<io::Error>) = loop {
-        let step = match ctx.cancel.run(reader.read(&mut buf[filled..])).await {
-            Err(()) => ReadOutcome::Cancelled,
-            Ok(res) => ReadOutcome::Data(res),
-        };
-
-        match step {
-            ReadOutcome::Cancelled => break (true, None),
-            ReadOutcome::Data(Ok(0)) => {
-                drop(reader);
-                flush_buf(
-                    part,
-                    filename,
-                    &buf,
-                    &mut filled,
-                    &mut write_pos,
-                    ctx.progress,
-                )
-                .await
-                .map_err(TransferError::Failed)?;
-                if write_pos != target_size {
-                    return Err(TransferError::Failed(format!(
-                        "Incomplete download for '{filename}': wrote {write_pos} of {target_size} bytes"
-                    )));
-                }
-                return Ok(());
-            }
-            ReadOutcome::Data(Ok(n)) => {
-                let new_filled = filled + n;
-                if write_pos
-                    .checked_add(new_filled as u64)
-                    .is_none_or(|end| end > target_size)
-                {
-                    return Err(TransferError::Failed(format!(
-                        "Stream exceeded declared target size for '{filename}'"
-                    )));
-                }
-                filled = new_filled;
-
-                if let Some(cp) = reader.checkpoint().filter(|cp| {
-                    cp.output_offset() > last_persisted_offset && cp.output_offset() < target_size
-                }) {
-                    latest_cp = Some(cp);
-                }
-
-                let now = js_sys::Date::now();
-                let cp_due = latest_cp.take_if(|cp| {
-                    cp.output_offset() >= last_persisted_offset.saturating_add(min_delta)
-                        || elapsed_at_least(now, last_checkpoint_ms, CHECKPOINT_MAX_WAIT_MS)
-                });
-
-                if let Some(cp) = cp_due {
-                    let cp_offset = cp.output_offset();
-                    flush_buf(
-                        part,
-                        filename,
-                        &buf,
-                        &mut filled,
-                        &mut write_pos,
-                        ctx.progress,
-                    )
-                    .await
-                    .map_err(TransferError::Failed)?;
-                    let meta_bytes = CheckpointMeta {
-                        checksum: ctx.checksum,
-                        target_size,
-                        state: cp.into(),
-                    }
-                    .to_bytes();
-                    part.save_meta(&meta_bytes).await.map_err(|e| {
-                        TransferError::Failed(format!(
-                            "Failed to save checkpoint for '{filename}': {e}"
-                        ))
-                    })?;
-                    last_persisted_offset = cp_offset;
-                    let done_ms = js_sys::Date::now();
-                    last_flush_ms = done_ms;
-                    last_checkpoint_ms = done_ms;
-                } else if filled == buf.len()
-                    || elapsed_at_least(now, last_flush_ms, COALESCE_MAX_WAIT_MS)
-                {
-                    flush_buf(
-                        part,
-                        filename,
-                        &buf,
-                        &mut filled,
-                        &mut write_pos,
-                        ctx.progress,
-                    )
-                    .await
-                    .map_err(TransferError::Failed)?;
-                    last_flush_ms = js_sys::Date::now();
-                }
-            }
-            ReadOutcome::Data(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-            ReadOutcome::Data(Err(e)) => break (false, Some(e)),
-        }
-    };
-
-    drop(reader);
-    let allow_checkpoint = read_err
-        .as_ref()
-        .is_none_or(|e| e.kind() != io::ErrorKind::InvalidData);
-    if allow_checkpoint
-        && let Some(cp) = latest_cp.filter(|cp| cp.output_offset() > last_persisted_offset)
-        && flush_buf(
-            part,
-            filename,
-            &buf,
-            &mut filled,
-            &mut write_pos,
-            ctx.progress,
-        )
-        .await
-        .is_ok()
-    {
-        let meta_bytes = CheckpointMeta {
-            checksum: ctx.checksum,
-            target_size,
-            state: cp.into(),
-        }
-        .to_bytes();
-        let _ = part.save_meta(&meta_bytes).await;
+    async fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+        self.part
+            .write(offset, data)
+            .await
+            .map_err(|e| io::Error::other(format!("Failed writing '{}': {e}", self.filename)))?;
+        self.progress
+            .set_file_written(offset + data.len() as u64, false);
+        Ok(())
     }
 
-    if is_cancelled || ctx.cancel.is_cancelled() {
-        Err(TransferError::Cancelled)
+    async fn save_checkpoint(&mut self, meta_bytes: &[u8]) -> io::Result<()> {
+        self.part.save_meta(meta_bytes).await.map_err(|e| {
+            io::Error::other(format!(
+                "Failed to save checkpoint for '{}': {e}",
+                self.filename
+            ))
+        })
+    }
+}
+
+fn transfer_err_to_js(err: TransferError, filename: &str, cancelled: bool) -> JsValue {
+    if cancelled || matches!(err, TransferError::Cancelled) {
+        JsValue::from_str(CANCELLED_ERR)
+    } else if let TransferError::Io(e) = err {
+        JsValue::from_str(&format!("Download failed for '{filename}': {e}"))
     } else {
-        let err_msg =
-            read_err.map_or_else(|| "Unknown stream error".to_string(), |e| e.to_string());
-        Err(TransferError::Failed(format!(
-            "Download failed for '{filename}': {err_msg}"
-        )))
+        unreachable!()
     }
 }
 
@@ -648,54 +501,44 @@ async fn transfer_file<S>(
     filename: &str,
     file_index: usize,
     ctx: &TransferContext<'_>,
-) -> Result<u64, TransferError>
+) -> Result<u64, JsValue>
 where
     S: ResumableStream,
     S::Checkpoint: Into<CheckpointState> + TryFrom<CheckpointState>,
 {
     if ctx.cancel.is_cancelled() {
-        return Err(TransferError::Cancelled);
+        return Err(JsValue::from_str(CANCELLED_ERR));
     }
 
     let mut part = ctx
         .storage
         .open_part(filename, ctx.force)
         .await
-        .map_err(TransferError::Failed)?;
+        .map_err(|e| JsValue::from_str(&e))?;
     if ctx.cancel.is_cancelled() {
         part.close().await;
-        return Err(TransferError::Cancelled);
+        return Err(JsValue::from_str(CANCELLED_ERR));
     }
 
     let target_size = source.output_size();
-    let transfer_res = async {
+    let transfer_res: Result<(), JsValue> = async {
         let mut start_pos = 0u64;
         let mut resumed_cp: Option<(S::Checkpoint, Vec<u8>)> = None;
         let mut restarted = false;
 
         if !ctx.force {
-            let existing_len = part.size().await.map_err(TransferError::Failed)?;
-            let meta_bytes = part.read_meta().await.map_err(TransferError::Failed)?;
+            let existing_len = part.size().await.map_err(|e| JsValue::from_str(&e))?;
+            let meta_bytes = part.read_meta().await.map_err(|e| JsValue::from_str(&e))?;
             let valid_resume = meta_bytes
                 .as_deref()
-                .and_then(|b| CheckpointMeta::from_bytes(b, ctx.checksum, target_size))
-                .and_then(|m| S::Checkpoint::try_from(m.state).ok())
-                .and_then(|cp| {
-                    let dict_len = source.resume_dict_len(&cp)?;
-                    let out = cp.output_offset();
-                    (cp.source_offset() > 0
-                        && out < target_size
-                        && out <= existing_len
-                        && (dict_len as u64) <= out)
-                        .then_some((cp, dict_len))
-                });
+                .and_then(|b| validate_resume_checkpoint(b, ctx.checksum, existing_len, source));
 
             if let Some((cp, dict_len)) = valid_resume {
                 start_pos = cp.output_offset();
                 if existing_len > start_pos {
                     part.truncate(start_pos)
                         .await
-                        .map_err(TransferError::Failed)?;
+                        .map_err(|e| JsValue::from_str(&e))?;
                 }
                 let mut dict = Vec::new();
                 if dict_len > 0 {
@@ -703,9 +546,9 @@ where
                     let chunk = part
                         .read_at(dict_offset, dict_len)
                         .await
-                        .map_err(TransferError::Failed)?;
+                        .map_err(|e| JsValue::from_str(&e))?;
                     if chunk.len() != dict_len {
-                        return Err(TransferError::Failed(format!(
+                        return Err(JsValue::from_str(&format!(
                             "Short resume dictionary read for '{filename}': expected {dict_len} bytes, got {}",
                             chunk.len()
                         )));
@@ -716,14 +559,14 @@ where
             } else {
                 let had_prior_state = existing_len > 0 || meta_bytes.is_some();
                 if had_prior_state {
-                    part.truncate(0).await.map_err(TransferError::Failed)?;
+                    part.truncate(0).await.map_err(|e| JsValue::from_str(&e))?;
                     restarted = true;
                 }
             }
         }
 
         if ctx.cancel.is_cancelled() {
-            return Err(TransferError::Cancelled);
+            return Err(JsValue::from_str(CANCELLED_ERR));
         }
 
         if restarted {
@@ -751,29 +594,57 @@ where
         ctx.progress
             .start_file(file_index, filename, start_pos, target_size, is_resumed);
 
+        let config = TransferConfig {
+            write_buf_size: WRITE_BUF_SIZE,
+            checkpoint_interval: CHECKPOINT_INTERVAL,
+            coalesce_max_wait_ms: COALESCE_MAX_WAIT_MS,
+            checkpoint_max_wait_ms: Some(CHECKPOINT_MAX_WAIT_MS),
+        };
+        let mut sink = WebPartSink {
+            part: &mut part,
+            filename,
+            progress: ctx.progress,
+        };
+
         match resumed_cp {
             Some((cp, dict)) => {
                 let reader = ctx
                     .cancel
                     .run(source.resume(&cp, &dict))
                     .await
-                    .map_err(|()| TransferError::Cancelled)?
-                    .map_err(|e| {
-                        TransferError::Failed(format!("Failed to resume '{filename}': {e}"))
-                    })?;
+                    .map_err(|()| JsValue::from_str(CANCELLED_ERR))?
+                    .map_err(|e| JsValue::from_str(&format!("Failed to resume '{filename}': {e}")))?;
                 drop(dict);
-                write_from_stream(reader, &mut part, filename, start_pos, target_size, ctx).await
+                write_resumable_stream(
+                    reader,
+                    &mut sink,
+                    start_pos,
+                    target_size,
+                    ctx.checksum,
+                    &config,
+                    ctx.cancel.wait_cancelled(),
+                )
+                .await
+                .map_err(|e| transfer_err_to_js(e, filename, ctx.cancel.is_cancelled()))
             }
             None => {
                 let reader = ctx
                     .cancel
                     .run(source.open())
                     .await
-                    .map_err(|()| TransferError::Cancelled)?
-                    .map_err(|e| {
-                        TransferError::Failed(format!("Failed to start '{filename}': {e}"))
-                    })?;
-                write_from_stream(reader, &mut part, filename, 0, target_size, ctx).await
+                    .map_err(|()| JsValue::from_str(CANCELLED_ERR))?
+                    .map_err(|e| JsValue::from_str(&format!("Failed to start '{filename}': {e}")))?;
+                write_resumable_stream(
+                    reader,
+                    &mut sink,
+                    0,
+                    target_size,
+                    ctx.checksum,
+                    &config,
+                    ctx.cancel.wait_cancelled(),
+                )
+                .await
+                .map_err(|e| transfer_err_to_js(e, filename, ctx.cancel.is_cancelled()))
             }
         }
     }
@@ -781,7 +652,7 @@ where
 
     match transfer_res {
         Ok(()) => {
-            part.finalize().await.map_err(TransferError::Failed)?;
+            part.finalize().await.map_err(|e| JsValue::from_str(&e))?;
             ctx.progress
                 .finish_file(file_index, filename, false, target_size);
             Ok(target_size)
@@ -1002,9 +873,7 @@ pub async fn fus_download(
                     cancel: &cancel,
                     progress: &progress,
                 };
-                let written = transfer_file(&stream, &decrypted_filename, 1, &ctx)
-                    .await
-                    .map_err(TransferError::into_js)?;
+                let written = transfer_file(&stream, &decrypted_filename, 1, &ctx).await?;
 
                 push_downloaded_file(&files_js, &decrypted_filename, None, written);
             }
@@ -1073,9 +942,7 @@ pub async fn fus_download(
                 let component = OdinComponent::from_entry_name(entry_name).map(OdinComponent::key);
 
                 if let Some(stream) = maybe_stream {
-                    let written = transfer_file(&stream, entry_name, file_index, &ctx)
-                        .await
-                        .map_err(TransferError::into_js)?;
+                    let written = transfer_file(&stream, entry_name, file_index, &ctx).await?;
                     push_downloaded_file(&files_js, entry_name, component, written);
                 } else {
                     let size = entry.uncompressed_size();
