@@ -181,6 +181,55 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+const SW_CACHE_DEV_LINE: &str = r#"const CACHE_NAME = "samloader-web-dev";"#;
+
+fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_dist_files(root, &path, out)?;
+        } else {
+            let rel = path
+                .strip_prefix(root)
+                .expect("collected path must be inside dist root");
+            let rel_posix = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if rel_posix != "sw.js" {
+                out.push((rel_posix, path));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fnv1a_hash_dist(dist: &Path) -> Result<u64> {
+    let mut files = Vec::new();
+    collect_dist_files(dist, dist, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let update = |h: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+
+    for (rel, path) in files {
+        update(&mut hash, rel.as_bytes());
+        update(&mut hash, &[0]);
+        let contents = fs::read(&path)
+            .with_context(|| format!("Failed to read staged file {}", path.display()))?;
+        update(&mut hash, &contents);
+        update(&mut hash, &[0xff]);
+    }
+    Ok(hash)
+}
+
 /// Stages the static web app and its generated bindings into `dist`.
 fn stage_dist(root: &Path, pkg_dir: &Path, dist: &Path) -> Result<()> {
     let site = root.join("web").join("site");
@@ -192,7 +241,24 @@ fn stage_dist(root: &Path, pkg_dir: &Path, dist: &Path) -> Result<()> {
     for dir in WEB_STATIC_DIRS {
         copy_dir(&site.join(dir), &dist.join(dir))?;
     }
-    copy_dir(pkg_dir, &dist.join("pkg"))
+    copy_dir(pkg_dir, &dist.join("pkg"))?;
+
+    let hash = fnv1a_hash_dist(dist)?;
+    let sw_path = dist.join("sw.js");
+    let sw_source = fs::read_to_string(&sw_path)
+        .with_context(|| format!("Failed to read {}", sw_path.display()))?;
+    anyhow::ensure!(
+        sw_source.contains(SW_CACHE_DEV_LINE),
+        "Expected placeholder `{SW_CACHE_DEV_LINE}` in sw.js"
+    );
+    let stamped = format!(
+        r#"const CACHE_NAME = "samloader-web-{}-{hash:016x}";"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let sw_updated = sw_source.replacen(SW_CACHE_DEV_LINE, &stamped, 1);
+    fs::write(&sw_path, sw_updated)
+        .with_context(|| format!("Failed to write {}", sw_path.display()))?;
+    Ok(())
 }
 
 fn build_web(args: BuildWebArgs) -> Result<()> {
@@ -375,5 +441,49 @@ mod tests {
             missing.is_empty() && extra.is_empty(),
             "sw.js PRECACHE_URLS out of sync (missing: {missing:?}, extra: {extra:?})"
         );
+    }
+
+    #[test]
+    fn stage_dist_stamps_sw_cache_name() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let base = std::env::temp_dir().join(format!("xtask-dist-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let _guard = TempDir(base.clone());
+
+        let mock_pkg = base.join("pkg");
+        let dist = base.join("dist");
+        fs::create_dir_all(&mock_pkg).unwrap();
+        fs::write(mock_pkg.join("samloader_web.js"), b"// mock js").unwrap();
+        fs::write(mock_pkg.join("samloader_web_bg.wasm"), b"wasm").unwrap();
+
+        let root = workspace_root();
+        stage_dist(&root, &mock_pkg, &dist).unwrap();
+
+        let stamped_sw = fs::read_to_string(dist.join("sw.js")).unwrap();
+        assert!(!stamped_sw.contains(SW_CACHE_DEV_LINE));
+        let prefix = format!(
+            r#"const CACHE_NAME = "samloader-web-{}-"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        let line = stamped_sw
+            .lines()
+            .find(|l| l.starts_with("const CACHE_NAME = "))
+            .expect("CACHE_NAME line in staged sw.js");
+        assert!(line.starts_with(&prefix), "unexpected line: {line}");
+        let hex = line
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(r#"";"#))
+            .expect("closing quote and semicolon");
+        assert_eq!(hex.len(), 16);
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let src_sw = fs::read_to_string(root.join("web/site/sw.js")).unwrap();
+        assert!(src_sw.contains(SW_CACHE_DEV_LINE));
     }
 }

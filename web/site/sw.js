@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const CACHE_NAME = "samloader-web-v1";
+const CACHE_NAME = "samloader-web-dev";
 const PRECACHE_URLS = [
   "./",
   "./index.html",
