@@ -25,29 +25,7 @@ import {
   getOpfsCacheInfo,
 } from "./opfs.js";
 import { loadFilesIntoSlots } from "./slots.js";
-import { state } from "./state.js";
-
-export const COMPONENT_META = {
-  bl: { badge: "BL", slot: "BL", label: "Bootloader" },
-  ap: { badge: "AP", slot: "AP", label: "System / Application" },
-  cp: { badge: "CP", slot: "CP", label: "Modem / Radio" },
-  home_csc: { badge: "CSC", slot: "CSC", label: "Keep Data (HOME_CSC)" },
-  csc: { badge: "CSC", slot: "CSC", label: "Wipe Data (CSC)" },
-  userdata: { badge: "USER", slot: "USERDATA", label: "User Data (wipes data)" },
-};
-
-const opfsCacheListeners = new Set();
-
-export function onOpfsCacheChange(listener) {
-  opfsCacheListeners.add(listener);
-  return () => opfsCacheListeners.delete(listener);
-}
-
-function notifyOpfsCacheChange(info) {
-  for (const listener of opfsCacheListeners) {
-    listener(info);
-  }
-}
+import { COMPONENT_META, notifyStateChange, state } from "./state.js";
 
 export async function mapEntriesToOdinSlots(
   entries,
@@ -80,7 +58,7 @@ export async function refreshOpfsCacheInfo() {
     info = null;
   }
   state.opfsCache = info;
-  notifyOpfsCacheChange(info);
+  notifyStateChange();
   return info;
 }
 

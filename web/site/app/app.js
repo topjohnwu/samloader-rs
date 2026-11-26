@@ -29,14 +29,8 @@ import {
 } from "./device.js";
 import { setupExclusiveGuards } from "./exclusive.js";
 import { appendLog, reportError } from "./logger.js";
-import { state } from "./state.js";
-import {
-  applyCapabilityLayout,
-  renderBackendOptions,
-  setAppVersion,
-  setupControlsPanel,
-  updateControlsState,
-} from "../ui/controls.js";
+import { getDerivedState, notifyStateChange, state } from "./state.js";
+import { setupControlsPanel } from "../ui/controls.js";
 import { setupDevicePanel } from "../ui/device.js";
 import { handleProgressEvent, setupFlashPanel } from "../ui/flash.js";
 import { setupLogPanel } from "../ui/log.js";
@@ -66,14 +60,12 @@ function initPanels() {
     const onConnectivityChange = () => {
       const online = navigator.onLine !== false;
       if (state.isOnline === online) return;
-      const hadLocalSelection =
-        Object.values(state.slots).some((f) => f !== null) || state.partitions.length > 0;
+      const hadLocalSelection = getDerivedState().hasLocalSelection;
       state.isOnline = online;
       if (online && state.capabilities.canFlash && (hadLocalSelection || state.isBusy)) {
         state.firmwareSource = "local";
       }
-      applyCapabilityLayout();
-      updateControlsState();
+      notifyStateChange();
       appendLog(
         online
           ? "Internet connection restored — download features enabled."
@@ -114,16 +106,14 @@ async function setupWasmAndEvents() {
 
     if (state.capabilities.canFlash !== canFlash) {
       state.capabilities.canFlash = canFlash;
-      applyCapabilityLayout();
     }
     initPanels();
-    updateControlsState();
 
     await setProgressCallback(handleProgressEvent);
     appendLog("WASM engine initialized successfully.");
 
     const version = await getVersion();
-    setAppVersion(version);
+    state.appVersion = version;
     appendLog(`samloader-web version: ${version}`);
     appendLog(`Available backends: ${backendOptions.map((b) => b.id).join(", ") || "none"}`);
 
@@ -141,7 +131,8 @@ async function setupWasmAndEvents() {
       const preferVcom = isWindows() && backendOptions.some((b) => b.id === "vcom");
       state.selectedBackend = preferVcom ? "vcom" : (backendOptions[0]?.id ?? null);
     }
-    renderBackendOptions(backendOptions, state.selectedBackend);
+    state.backendOptions = backendOptions;
+    notifyStateChange();
 
     if (canFlash && isWebUsbSupported()) {
       const onUsbHotplug = () => {
@@ -177,10 +168,11 @@ document.addEventListener("DOMContentLoaded", () => {
   state.capabilities = detectBrowserCapabilities();
   state.isOnline = typeof navigator === "undefined" || navigator.onLine !== false;
   setupThemeToggle();
-  applyCapabilityLayout();
 
   if (state.capabilities.canFlash || state.capabilities.canDownload) {
     initPanels();
+  } else {
+    setupControlsPanel();
   }
   void setupWasmAndEvents();
 });

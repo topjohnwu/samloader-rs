@@ -24,7 +24,7 @@ import {
   onLogChange,
   setOpenLogHandler,
 } from "../app/logger.js";
-import { state } from "../app/state.js";
+import { state, subscribe } from "../app/state.js";
 import { downloadFile, localTimestampForFilename } from "./util.js";
 
 const LOG_LINE_HEIGHT = 20;
@@ -160,11 +160,16 @@ export function setupLogPanel() {
     setLogExpanded(toggle.getAttribute("aria-expanded") !== "true");
   });
 
-  document.getElementById("opt-verbose")?.addEventListener("change", async (e) => {
+  const verboseChk = document.getElementById("opt-verbose");
+  verboseChk?.addEventListener("change", async (e) => {
     const enabled = e.target.checked;
     state.verbose = enabled;
     await setVerbose(enabled);
     appendLog(`Verbose logging ${enabled ? "enabled" : "disabled"}.`);
+  });
+
+  subscribe((s) => {
+    if (verboseChk) verboseChk.disabled = s.isBusy;
   });
 
   document.getElementById("btn-clear-log")?.addEventListener("click", clearLog);

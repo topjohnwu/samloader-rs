@@ -18,153 +18,14 @@ import {
   disconnectDevice,
   dumpPit,
   getLastPitDownload,
-  onDeviceChange,
   pairDownload,
   pairNormal,
   queryDeviceInfo,
   rebootOdin,
   rebootToDownload,
 } from "../app/device.js";
-import { state } from "../app/state.js";
-import { updateControlsState } from "./controls.js";
+import { getDerivedState, state, subscribe } from "../app/state.js";
 import { downloadFile } from "./util.js";
-
-function updateConnectionChip(connected, text) {
-  const chip = document.getElementById("connection-chip");
-  if (chip) {
-    chip.className = `status-chip ${connected ? "chip-connected" : "chip-disconnected"}`;
-    const label = chip.querySelector(".chip-label");
-    if (label) label.textContent = text;
-  }
-}
-
-function renderDeviceInfo(info) {
-  const gridEl = document.getElementById("device-info-grid");
-  const boxEl = document.getElementById("device-info-box");
-  if (!gridEl || !boxEl) return;
-
-  if (!info) {
-    gridEl.hidden = true;
-    gridEl.innerHTML = "";
-    boxEl.hidden = true;
-    boxEl.textContent = "";
-    return;
-  }
-
-  if (info.fields.length > 0) {
-    gridEl.innerHTML = "";
-    info.fields.forEach(([label, val]) => {
-      const card = document.createElement("div");
-      card.className =
-        label.toLowerCase() === "storage" || val.length > 20
-          ? "info-stat-card stat-wide"
-          : "info-stat-card";
-
-      const labelEl = document.createElement("span");
-      labelEl.className = "info-stat-label";
-      labelEl.textContent = label;
-
-      const valEl = document.createElement("span");
-      valEl.className = "info-stat-value";
-      valEl.textContent = val;
-      valEl.title = val;
-
-      card.appendChild(labelEl);
-      card.appendChild(valEl);
-      gridEl.appendChild(card);
-    });
-    gridEl.hidden = false;
-    boxEl.hidden = true;
-  } else {
-    boxEl.textContent = "Device detected (Download mode)";
-    boxEl.hidden = false;
-    gridEl.hidden = true;
-  }
-}
-
-function renderDeviceList() {
-  const listWrap = document.getElementById("device-list-wrap");
-  const listEl = document.getElementById("device-list");
-  const emptyEl = document.getElementById("device-empty-state");
-
-  if (!listEl || !listWrap || !emptyEl) return;
-  listEl.innerHTML = "";
-
-  const dev = state.device;
-  if (!dev) {
-    emptyEl.hidden = false;
-    listWrap.hidden = true;
-    updateControlsState();
-    return;
-  }
-
-  emptyEl.hidden = true;
-  listWrap.hidden = false;
-
-  // A Normal Mode device only supports rebooting into Download Mode over AT, while
-  // every other device action needs a Download Mode (Odin) device
-  const isNormal = dev.mode === "normal";
-  const normalPanel = document.getElementById("device-normal-panel");
-  const actionsBar = document.getElementById("device-actions-bar");
-  if (normalPanel) normalPanel.hidden = !isNormal;
-  if (actionsBar) actionsBar.hidden = isNormal;
-
-  const row = document.createElement("div");
-  row.className = "device-item";
-
-  const left = document.createElement("div");
-  left.className = "device-item-left";
-
-  const dot = document.createElement("span");
-  dot.className = `device-status-dot${dev.mode === "normal" ? " dot-normal" : ""}`;
-
-  const meta = document.createElement("div");
-  meta.className = "device-meta";
-
-  const nameEl = document.createElement("span");
-  nameEl.className = "device-name";
-  nameEl.textContent = dev.name;
-
-  const subEl = document.createElement("span");
-  subEl.className = "device-sub";
-  subEl.textContent = dev.subtitle;
-
-  meta.appendChild(nameEl);
-  meta.appendChild(subEl);
-  left.appendChild(dot);
-  left.appendChild(meta);
-
-  const right = document.createElement("div");
-  right.className = "device-item-right";
-
-  const badge = document.createElement("span");
-  if (dev.mode === "download") {
-    badge.className = "mode-badge mode-badge-download";
-    badge.textContent = "Download Mode";
-  } else {
-    badge.className = "mode-badge mode-badge-normal";
-    badge.textContent = "Normal Mode";
-  }
-
-  const disconnectBtn = document.createElement("button");
-  disconnectBtn.type = "button";
-  disconnectBtn.className = "btn-clear-slot btn-disconnect-device";
-  disconnectBtn.title = "Disconnect device";
-  disconnectBtn.setAttribute("aria-label", `Disconnect ${dev.name}`);
-  disconnectBtn.innerHTML = "&times;";
-  disconnectBtn.disabled = state.isBusy;
-  disconnectBtn.addEventListener("click", () => {
-    disconnectDevice(dev);
-  });
-
-  right.appendChild(badge);
-  right.appendChild(disconnectBtn);
-  row.appendChild(left);
-  row.appendChild(right);
-  listEl.appendChild(row);
-
-  updateControlsState();
-}
 
 function savePit() {
   const pit = getLastPitDownload();
@@ -173,37 +34,178 @@ function savePit() {
 }
 
 export function setupDevicePanel() {
-  onDeviceChange((event) => {
-    switch (event.type) {
-      case "info":
-        renderDeviceInfo(event.info);
-        if (event.info) {
-          updateConnectionChip(true, "Device Ready");
-        }
-        break;
-      case "status": {
-        const summaryEl = document.getElementById("paired-devices-summary");
-        if (summaryEl) summaryEl.textContent = event.summaryText;
-        updateConnectionChip(event.chipConnected, event.chipLabel);
-        renderDeviceList();
-        break;
-      }
-      case "pit":
-        updateControlsState();
-        break;
-    }
-  });
+  const els = {
+    chip: document.getElementById("connection-chip"),
+    chipLabel: document.querySelector("#connection-chip .chip-label"),
+    summaryEl: document.getElementById("paired-devices-summary"),
+    listWrap: document.getElementById("device-list-wrap"),
+    listEl: document.getElementById("device-list"),
+    emptyEl: document.getElementById("device-empty-state"),
+    normalPanel: document.getElementById("device-normal-panel"),
+    actionsBar: document.getElementById("device-actions-bar"),
+    gridEl: document.getElementById("device-info-grid"),
+    boxEl: document.getElementById("device-info-box"),
+    pairDownloadBtn: document.getElementById("btn-pair-download"),
+    pairNormalBtn: document.getElementById("btn-pair-normal"),
+    detectBtn: document.getElementById("btn-detect-device"),
+    rebootDownloadBtn: document.getElementById("btn-reboot-download"),
+    odinRebootAndroidBtn: document.getElementById("btn-odin-reboot-android"),
+    odinRebootDownloadBtn: document.getElementById("btn-odin-reboot-download"),
+    dumpPitBtn: document.getElementById("btn-dump-pit"),
+    savePitBtn: document.getElementById("btn-save-pit"),
+  };
 
-  document.getElementById("btn-pair-download")?.addEventListener("click", pairDownload);
-  document.getElementById("btn-pair-normal")?.addEventListener("click", pairNormal);
-  document.getElementById("btn-detect-device")?.addEventListener("click", queryDeviceInfo);
-  document.getElementById("btn-reboot-download")?.addEventListener("click", rebootToDownload);
-  document
-    .getElementById("btn-odin-reboot-android")
-    ?.addEventListener("click", () => rebootOdin("normal"));
-  document
-    .getElementById("btn-odin-reboot-download")
-    ?.addEventListener("click", () => rebootOdin("download"));
-  document.getElementById("btn-dump-pit")?.addEventListener("click", dumpPit);
-  document.getElementById("btn-save-pit")?.addEventListener("click", savePit);
+  let lastRenderedDevice = undefined;
+  let lastRenderedInfo = undefined;
+  let disconnectBtn = null;
+
+  const renderDeviceInfo = (info) => {
+    if (!els.gridEl || !els.boxEl) return;
+    if (!info) {
+      els.gridEl.hidden = true;
+      els.gridEl.replaceChildren();
+      els.boxEl.hidden = true;
+      els.boxEl.textContent = "";
+      return;
+    }
+
+    if (info.fields.length > 0) {
+      els.gridEl.replaceChildren();
+      info.fields.forEach(([label, val]) => {
+        const card = document.createElement("div");
+        card.className =
+          label.toLowerCase() === "storage" || val.length > 20
+            ? "info-stat-card stat-wide"
+            : "info-stat-card";
+
+        const labelEl = document.createElement("span");
+        labelEl.className = "info-stat-label";
+        labelEl.textContent = label;
+
+        const valEl = document.createElement("span");
+        valEl.className = "info-stat-value";
+        valEl.textContent = val;
+        valEl.title = val;
+
+        card.appendChild(labelEl);
+        card.appendChild(valEl);
+        els.gridEl.appendChild(card);
+      });
+      els.gridEl.hidden = false;
+      els.boxEl.hidden = true;
+    } else {
+      els.boxEl.textContent = "Device detected (Download mode)";
+      els.boxEl.hidden = false;
+      els.gridEl.hidden = true;
+    }
+  };
+
+  const renderDeviceRow = (dev) => {
+    if (!els.listEl || !els.listWrap || !els.emptyEl) return;
+    els.listEl.replaceChildren();
+    disconnectBtn = null;
+
+    if (!dev) {
+      els.emptyEl.hidden = false;
+      els.listWrap.hidden = true;
+      return;
+    }
+
+    els.emptyEl.hidden = true;
+    els.listWrap.hidden = false;
+
+    const isNormal = dev.mode === "normal";
+    if (els.normalPanel) els.normalPanel.hidden = !isNormal;
+    if (els.actionsBar) els.actionsBar.hidden = isNormal;
+
+    const row = document.createElement("div");
+    row.className = "device-item";
+
+    const left = document.createElement("div");
+    left.className = "device-item-left";
+
+    const dot = document.createElement("span");
+    dot.className = `device-status-dot${isNormal ? " dot-normal" : ""}`;
+
+    const meta = document.createElement("div");
+    meta.className = "device-meta";
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "device-name";
+    nameEl.textContent = dev.name;
+
+    const subEl = document.createElement("span");
+    subEl.className = "device-sub";
+    subEl.textContent = dev.subtitle;
+
+    meta.appendChild(nameEl);
+    meta.appendChild(subEl);
+    left.appendChild(dot);
+    left.appendChild(meta);
+
+    const right = document.createElement("div");
+    right.className = "device-item-right";
+
+    const badge = document.createElement("span");
+    if (dev.mode === "download") {
+      badge.className = "mode-badge mode-badge-download";
+      badge.textContent = "Download Mode";
+    } else {
+      badge.className = "mode-badge mode-badge-normal";
+      badge.textContent = "Normal Mode";
+    }
+
+    disconnectBtn = document.createElement("button");
+    disconnectBtn.type = "button";
+    disconnectBtn.className = "btn-clear-slot btn-disconnect-device";
+    disconnectBtn.title = "Disconnect device";
+    disconnectBtn.setAttribute("aria-label", `Disconnect ${dev.name}`);
+    disconnectBtn.innerHTML = "&times;";
+    disconnectBtn.addEventListener("click", () => {
+      disconnectDevice(dev);
+    });
+
+    right.appendChild(badge);
+    right.appendChild(disconnectBtn);
+    row.appendChild(left);
+    row.appendChild(right);
+    els.listEl.appendChild(row);
+  };
+
+  const render = (s, d) => {
+    if (els.chip) {
+      els.chip.className = `status-chip ${s.deviceChipConnected ? "chip-connected" : "chip-disconnected"}`;
+    }
+    if (els.chipLabel) els.chipLabel.textContent = s.deviceChipLabel;
+    if (els.summaryEl) els.summaryEl.textContent = s.deviceSummaryText;
+
+    if (s.deviceInfo !== lastRenderedInfo) {
+      lastRenderedInfo = s.deviceInfo;
+      renderDeviceInfo(s.deviceInfo);
+    }
+    if (s.device !== lastRenderedDevice) {
+      lastRenderedDevice = s.device;
+      renderDeviceRow(s.device);
+    }
+
+    if (disconnectBtn) disconnectBtn.disabled = s.isBusy;
+    if (els.pairDownloadBtn) els.pairDownloadBtn.disabled = s.isBusy;
+    if (els.pairNormalBtn) els.pairNormalBtn.disabled = s.isBusy;
+    if (els.detectBtn) els.detectBtn.disabled = s.isBusy || !d.hasDownloadDevice;
+    if (els.odinRebootAndroidBtn) els.odinRebootAndroidBtn.disabled = s.isBusy || !d.hasDownloadDevice;
+    if (els.odinRebootDownloadBtn) els.odinRebootDownloadBtn.disabled = s.isBusy || !d.hasDownloadDevice;
+    if (els.rebootDownloadBtn) els.rebootDownloadBtn.disabled = s.isBusy || !d.hasNormalDevice;
+  };
+
+  els.pairDownloadBtn?.addEventListener("click", pairDownload);
+  els.pairNormalBtn?.addEventListener("click", pairNormal);
+  els.detectBtn?.addEventListener("click", queryDeviceInfo);
+  els.rebootDownloadBtn?.addEventListener("click", rebootToDownload);
+  els.odinRebootAndroidBtn?.addEventListener("click", () => rebootOdin("normal"));
+  els.odinRebootDownloadBtn?.addEventListener("click", () => rebootOdin("download"));
+  els.dumpPitBtn?.addEventListener("click", dumpPit);
+  els.savePitBtn?.addEventListener("click", savePit);
+
+  subscribe(render);
+  render(state, getDerivedState(state));
 }

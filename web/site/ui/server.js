@@ -14,8 +14,7 @@
 
 // Samsung Server panel DOM rendering, input normalization, preferences, and event wiring.
 
-import { hasDeviceInfo, onDeviceChange, queryDeviceInfo } from "../app/device.js";
-import { COMPONENT_META } from "../app/download.js";
+import { hasDeviceInfo, queryDeviceInfo } from "../app/device.js";
 import { EXPECTED_BRIDGE_VERSION, hasInstalledBridge } from "../app/fus_bridge.js";
 import { appendLog } from "../app/logger.js";
 import {
@@ -24,17 +23,19 @@ import {
   clearInspectedArchive,
   clearServerHistory,
   doesVersionMatchBootloader,
-  getArchiveRows,
-  getSelectedEntriesInfo,
   initBridgeAnnouncementListener,
   inspectFirmwareVersion,
-  onServerChange,
   setArchiveRowChecked,
   setServerOutputMode,
   setSmartCscChoice,
 } from "../app/server.js";
-import { state } from "../app/state.js";
-import { updateControlsState } from "./controls.js";
+import {
+  COMPONENT_META,
+  getDerivedState,
+  notifyStateChange,
+  state,
+  subscribe,
+} from "../app/state.js";
 import {
   handleClearOpfsCache,
   handleDownloadAndFlash,
@@ -48,8 +49,6 @@ const STORAGE_SOURCE = "samloader.firmwareSource";
 const STORAGE_MODEL = "samloader.serverModel";
 const STORAGE_REGION = "samloader.serverRegion";
 const STORAGE_CONCURRENCY = "samloader.serverConcurrency";
-
-let userChoseSource = false;
 
 const SMART_CSC_CHOICES = [
   { value: "home_csc", label: "Keep Data (HOME_CSC)" },
@@ -103,13 +102,6 @@ function getLookupRegion() {
   return (document.getElementById("server-region")?.value ?? "").trim().toUpperCase();
 }
 
-function setLookupError(msg) {
-  const el = document.getElementById("server-lookup-error");
-  if (!el) return;
-  el.textContent = msg || "";
-  el.hidden = !msg;
-}
-
 function setFirmwareSource(source, persist = true) {
   const { canFlash, canDownload } = state.capabilities;
   const canDownloadNow = canDownload && state.isOnline;
@@ -120,7 +112,7 @@ function setFirmwareSource(source, persist = true) {
   if (persist && canFlash && canDownloadNow) {
     writeStorage(STORAGE_SOURCE, normalized);
   }
-  updateControlsState();
+  notifyStateChange();
 }
 
 // --- FUS Bridge Status Banner ---
@@ -252,6 +244,8 @@ function updateDeviceBootloaderPill() {
 function syncLookupInputsChange() {
   const model = getLookupModel();
   const region = getLookupRegion();
+  state.serverModel = model;
+  state.serverRegion = region;
 
   if (
     state.serverHistory &&
@@ -266,6 +260,7 @@ function syncLookupInputsChange() {
   ) {
     clearInspectedArchive();
   }
+  notifyStateChange();
 }
 
 function applyDeviceFields({ overwrite = false } = {}) {
@@ -287,24 +282,9 @@ function applyDeviceFields({ overwrite = false } = {}) {
   return filled;
 }
 
-function refreshDeviceVersionState() {
-  updateDeviceBootloaderPill();
-  if (state.serverHistory) {
-    renderVersionDropdown();
-  }
-  updateControlsState();
-}
-
-function handleDeviceUpdated({ dvifQueried }) {
-  if (dvifQueried) {
-    applyDeviceFields({ overwrite: false });
-  }
-  refreshDeviceVersionState();
-}
-
 async function handleDetectFromDevice() {
   if (state.isBusy || state.serverQuerying || state.device?.mode !== "download") return;
-  setLookupError("");
+  state.serverLookupError = "";
 
   if (!hasDeviceInfo()) {
     await queryDeviceInfo();
@@ -316,8 +296,6 @@ async function handleDetectFromDevice() {
   } else {
     appendLog("Connected device did not report Model or Sales Code via DVIF.");
   }
-
-  refreshDeviceVersionState();
 }
 
 // --- Version Dropdown & Archive Rendering ---
@@ -394,59 +372,6 @@ function updateSelectionSummary(info) {
   }
 }
 
-function renderArchiveSection() {
-  const archiveEl = document.getElementById("server-archive-section");
-  const summaryEl = document.getElementById("server-archive-summary");
-  const zipNoteEl = document.getElementById("server-zip-note");
-  const entriesWrapEl = document.getElementById("server-entries-wrap");
-
-  if (!archiveEl || !state.serverInspect) return;
-  const { info } = state.serverInspect;
-
-  if (summaryEl) {
-    summaryEl.replaceChildren();
-    const mainDiv = document.createElement("div");
-    mainDiv.className = "archive-summary-main";
-
-    const fileEl = document.createElement("span");
-    fileEl.className = "archive-summary-filename";
-    fileEl.textContent = info.decryptedFilename;
-
-    const verEl = document.createElement("span");
-    verEl.className = "archive-summary-version";
-    verEl.textContent = `Version: ${info.version}`;
-
-    mainDiv.appendChild(fileEl);
-    mainDiv.appendChild(verEl);
-
-    const sizeEl = document.createElement("span");
-    sizeEl.className = "archive-summary-size";
-    sizeEl.textContent = formatBytes(info.decryptedSize || 0);
-
-    summaryEl.appendChild(mainDiv);
-    summaryEl.appendChild(sizeEl);
-  }
-
-  const isZipMode = state.serverOutputMode === "zip";
-  if (zipNoteEl) {
-    zipNoteEl.hidden = !isZipMode;
-    if (isZipMode) {
-      const flashNote = state.capabilities.canFlash
-        ? " Full .zip archives cannot be flashed directly."
-        : "";
-      zipNoteEl.textContent = `Downloads the full decrypted firmware archive (${info.decryptedFilename}, ${formatBytes(info.decryptedSize || 0)}) without extracting components.${flashNote}`;
-    }
-  }
-  if (entriesWrapEl) {
-    entriesWrapEl.hidden = isZipMode;
-  }
-
-  renderEntryRows();
-  archiveEl.hidden = false;
-  updateSelectionSummary(getSelectedEntriesInfo());
-  updateControlsState();
-}
-
 function getRowDisplay(row) {
   if (row.kind === "smart_csc") {
     const activeEntries =
@@ -461,9 +386,9 @@ function getRowDisplay(row) {
       name: activeNames,
       sub:
         row.cscChoice === "home_csc"
-          ? "Keep user data (HOME_CSC)"
+          ? "Keep Data (HOME_CSC)"
           : row.cscChoice === "csc"
-            ? "Wipes user data (CSC)"
+            ? "Wipe Data (CSC)"
             : state.capabilities.canFlash
               ? "Both CSC packages (download only)"
               : "Both CSC packages",
@@ -494,7 +419,7 @@ function renderEntryRows() {
   if (!listEl) return;
   listEl.replaceChildren();
 
-  getArchiveRows().forEach((row, idx) => {
+  state.archiveRows.forEach((row, idx) => {
     const item = document.createElement("div");
     item.setAttribute("role", "listitem");
 
@@ -585,87 +510,57 @@ function renderEntryRows() {
   });
 }
 
-function handleServerEvent(event) {
-  switch (event.type) {
-    case "bridge":
-      renderBridgeBanner();
-      if (
-        state.isOnline &&
-        event.next?.connected &&
-        !event.prev?.connected &&
-        !userChoseSource &&
-        state.capabilities.canFlash &&
-        state.capabilities.extensionSupport !== "supported" &&
-        readStorage(STORAGE_SOURCE) !== "local"
-      ) {
-        state.firmwareSource = "server";
-      }
-      updateControlsState();
-      break;
-    case "querying_history": {
-      const checkBtn = document.getElementById("btn-check-versions");
-      if (checkBtn) {
-        checkBtn.textContent = event.active ? "Checking…" : "Check Versions";
-      }
-      if (event.active) {
-        const versionSectionEl = document.getElementById("server-version-section");
-        if (versionSectionEl) versionSectionEl.hidden = true;
-      }
-      updateControlsState();
-      break;
-    }
-    case "history": {
-      const versionSectionEl = document.getElementById("server-version-section");
-      if (versionSectionEl) versionSectionEl.hidden = false;
-      updateDeviceBootloaderPill();
-      renderVersionDropdown(event.history?.latest);
-      break;
-    }
-    case "history_cleared": {
-      const versionSection = document.getElementById("server-version-section");
-      const versionSelect = document.getElementById("server-version-select");
-      if (versionSelect?.value === "__custom__") {
-        renderVersionDropdown("__custom__");
-      } else {
-        if (versionSection) versionSection.hidden = true;
-        if (versionSelect) versionSelect.replaceChildren();
-      }
-      break;
-    }
-    case "inspecting": {
-      const loadingEl = document.getElementById("server-inspect-loading");
-      const archiveEl = document.getElementById("server-archive-section");
-      if (event.active && archiveEl) archiveEl.hidden = true;
-      if (loadingEl) loadingEl.hidden = !event.active;
-      break;
-    }
-    case "inspect_ready": {
-      document.querySelectorAll('input[name="server-output-mode"]').forEach((el) => {
-        el.checked = el.value === "entries";
-      });
-      renderArchiveSection();
-      break;
-    }
-    case "output_mode":
-      renderArchiveSection();
-      break;
-    case "inspect_cleared": {
-      const loadingEl = document.getElementById("server-inspect-loading");
-      const archiveEl = document.getElementById("server-archive-section");
-      const listEl = document.getElementById("server-entries-list");
-      if (loadingEl) loadingEl.hidden = true;
-      if (archiveEl) archiveEl.hidden = true;
-      if (listEl) listEl.replaceChildren();
-      break;
-    }
-    case "selection":
-      updateSelectionSummary(event.info);
-      updateControlsState();
-      break;
-    case "lookup_error":
-      setLookupError(event.message);
-      break;
+function renderArchiveSection(renderRows = true) {
+  const archiveEl = document.getElementById("server-archive-section");
+  const summaryEl = document.getElementById("server-archive-summary");
+  const zipNoteEl = document.getElementById("server-zip-note");
+  const entriesWrapEl = document.getElementById("server-entries-wrap");
+
+  if (!archiveEl || !state.serverInspect) return;
+  const { info } = state.serverInspect;
+
+  if (summaryEl) {
+    summaryEl.replaceChildren();
+    const mainDiv = document.createElement("div");
+    mainDiv.className = "archive-summary-main";
+
+    const fileEl = document.createElement("span");
+    fileEl.className = "archive-summary-filename";
+    fileEl.textContent = info.decryptedFilename;
+
+    const verEl = document.createElement("span");
+    verEl.className = "archive-summary-version";
+    verEl.textContent = `Version: ${info.version}`;
+
+    mainDiv.appendChild(fileEl);
+    mainDiv.appendChild(verEl);
+
+    const sizeEl = document.createElement("span");
+    sizeEl.className = "archive-summary-size";
+    sizeEl.textContent = formatBytes(info.decryptedSize || 0);
+
+    summaryEl.appendChild(mainDiv);
+    summaryEl.appendChild(sizeEl);
   }
+
+  const isZipMode = state.serverOutputMode === "zip";
+  if (zipNoteEl) {
+    zipNoteEl.hidden = !isZipMode;
+    if (isZipMode) {
+      const flashNote = state.capabilities.canFlash
+        ? " Full .zip archives cannot be flashed directly."
+        : "";
+      zipNoteEl.textContent = `Downloads the full decrypted firmware archive (${info.decryptedFilename}, ${formatBytes(info.decryptedSize || 0)}) without extracting components.${flashNote}`;
+    }
+  }
+  if (entriesWrapEl) {
+    entriesWrapEl.hidden = isZipMode;
+  }
+
+  if (renderRows) {
+    renderEntryRows();
+  }
+  archiveEl.hidden = false;
 }
 
 // --- Initialization ---
@@ -673,16 +568,9 @@ export function setupServerPanel() {
   const { canFlash, canDownload } = state.capabilities;
   if (!canDownload) {
     state.firmwareSource = "local";
-    updateControlsState();
     return;
   }
 
-  onServerChange(handleServerEvent);
-  onDeviceChange((event) => {
-    if (event.type === "info" || event.type === "status") {
-      handleDeviceUpdated({ dvifQueried: Boolean(event.dvifQueried) });
-    }
-  });
   initBridgeAnnouncementListener();
   setupDownloadUi();
 
@@ -697,9 +585,26 @@ export function setupServerPanel() {
     state.firmwareSource = "server";
   }
 
+  const serverPanel = document.getElementById("server-panel");
   const modelInput = document.getElementById("server-model");
   const regionInput = document.getElementById("server-region");
   const concurrencySelect = document.getElementById("server-concurrency");
+  const versionSection = document.getElementById("server-version-section");
+  const versionSelect = document.getElementById("server-version-select");
+  const customVerInput = document.getElementById("server-custom-version");
+  const customRow = document.getElementById("server-custom-version-row");
+  const inspectLoading = document.getElementById("server-inspect-loading");
+  const archiveSection = document.getElementById("server-archive-section");
+  const entriesList = document.getElementById("server-entries-list");
+  const lookupErrorEl = document.getElementById("server-lookup-error");
+  const detectServerBtn = document.getElementById("btn-detect-server-device");
+  const checkVersionsBtn = document.getElementById("btn-check-versions");
+  const toggleCustomBtn = document.getElementById("btn-toggle-custom-version");
+  const inspectCustomBtn = document.getElementById("btn-inspect-custom");
+  const reloadBridgeBtn = document.getElementById("btn-reload-bridge");
+  const outputModeRadios = Array.from(
+    document.querySelectorAll('input[name="server-output-mode"]')
+  );
 
   const savedModel = readStorage(STORAGE_MODEL);
   if (modelInput && savedModel) {
@@ -709,6 +614,9 @@ export function setupServerPanel() {
   if (regionInput && savedRegion) {
     regionInput.value = savedRegion.toUpperCase();
   }
+  state.serverModel = getLookupModel();
+  state.serverRegion = getLookupRegion();
+
   const savedConcurrency = Number(readStorage(STORAGE_CONCURRENCY));
   if (savedConcurrency >= 1 && savedConcurrency <= 6) {
     state.serverConcurrency = savedConcurrency;
@@ -717,18 +625,153 @@ export function setupServerPanel() {
     concurrencySelect.value = String(state.serverConcurrency);
   }
 
+  let lastBridge = null;
+  let lastCaps = null;
+  let lastHistory = undefined;
+  let lastInspect = undefined;
+  let lastOutputMode = null;
+  let lastCustomOpen = null;
+  let lastBootloaderVer = undefined;
+  let lastDvifSeq = state.dvifQuerySeq;
+
+  const render = (s, d) => {
+    if (serverPanel) serverPanel.hidden = !d.isServer;
+
+    if (s.dvifQuerySeq !== lastDvifSeq) {
+      lastDvifSeq = s.dvifQuerySeq;
+      applyDeviceFields({ overwrite: false });
+    }
+
+    if (s.fusBridge !== lastBridge || s.capabilities !== lastCaps) {
+      const lateBridgeConnect =
+        lastBridge?.checked && !lastBridge?.connected && s.fusBridge.connected;
+      lastBridge = s.fusBridge;
+      lastCaps = s.capabilities;
+      renderBridgeBanner();
+      if (
+        lateBridgeConnect &&
+        s.isOnline &&
+        !s.userChoseSource &&
+        s.capabilities.canFlash &&
+        s.capabilities.extensionSupport !== "supported" &&
+        readStorage(STORAGE_SOURCE) !== "local"
+      ) {
+        s.firmwareSource = "server";
+        notifyStateChange();
+      }
+    }
+
+    if (lookupErrorEl) {
+      lookupErrorEl.textContent = s.serverLookupError || "";
+      lookupErrorEl.hidden = !s.serverLookupError;
+    }
+
+    if (checkVersionsBtn) {
+      checkVersionsBtn.textContent =
+        s.serverQueryPhase === "history" ? "Checking…" : "Check Versions";
+      checkVersionsBtn.disabled =
+        !d.bridgeReady || !s.serverModel || !s.serverRegion || d.serverBusy;
+    }
+
+    if (
+      s.serverHistory !== lastHistory ||
+      s.deviceBootloaderVersion !== lastBootloaderVer ||
+      s.serverCustomVersionOpen !== lastCustomOpen
+    ) {
+      const historyChanged = s.serverHistory !== lastHistory;
+      lastHistory = s.serverHistory;
+      lastBootloaderVer = s.deviceBootloaderVersion;
+      lastCustomOpen = s.serverCustomVersionOpen;
+
+      if (s.serverHistory) {
+        if (versionSection) versionSection.hidden = false;
+        const preferred = s.serverCustomVersionOpen
+          ? "__custom__"
+          : historyChanged
+            ? s.serverHistory.latest
+            : undefined;
+        renderVersionDropdown(preferred);
+      } else if (s.serverCustomVersionOpen) {
+        if (versionSection) versionSection.hidden = false;
+        renderVersionDropdown("__custom__");
+      } else {
+        if (versionSection) versionSection.hidden = true;
+        if (versionSelect) versionSelect.replaceChildren();
+      }
+    }
+
+    if (customRow && versionSelect) {
+      customRow.hidden = versionSelect.value !== "__custom__" && !s.serverCustomVersionOpen;
+    }
+
+    updateDeviceBootloaderPill();
+
+    if (inspectLoading) {
+      inspectLoading.hidden = s.serverQueryPhase !== "inspect";
+    }
+
+    if (s.serverInspect !== lastInspect || s.serverOutputMode !== lastOutputMode) {
+      const inspectChanged = s.serverInspect !== lastInspect;
+      lastInspect = s.serverInspect;
+      lastOutputMode = s.serverOutputMode;
+      if (s.serverInspect) {
+        for (const el of outputModeRadios) {
+          el.checked = el.value === s.serverOutputMode;
+        }
+        renderArchiveSection(inspectChanged);
+      } else {
+        if (archiveSection) archiveSection.hidden = true;
+        if (entriesList) entriesList.replaceChildren();
+      }
+    }
+
+    if (s.serverInspect) {
+      updateSelectionSummary(d.selectedEntriesInfo);
+    }
+
+    if (detectServerBtn) {
+      detectServerBtn.hidden = !s.capabilities.canFlash || !d.hasDownloadDevice;
+      detectServerBtn.disabled = d.serverBusy || !d.hasDownloadDevice;
+    }
+    if (toggleCustomBtn) {
+      toggleCustomBtn.disabled = !d.bridgeReady || d.serverBusy;
+    }
+    if (inspectCustomBtn) {
+      inspectCustomBtn.disabled =
+        !d.bridgeReady ||
+        !s.serverModel ||
+        !s.serverRegion ||
+        !s.serverCustomVersion ||
+        d.serverBusy;
+    }
+    if (modelInput) modelInput.disabled = d.serverBusy;
+    if (regionInput) regionInput.disabled = d.serverBusy;
+    if (reloadBridgeBtn) reloadBridgeBtn.disabled = d.serverBusy;
+    if (versionSelect) versionSelect.disabled = !d.bridgeReady || d.serverBusy;
+    if (customVerInput) customVerInput.disabled = !d.bridgeReady || d.serverBusy;
+    if (concurrencySelect) concurrencySelect.disabled = !d.bridgeReady || d.serverBusy;
+
+    document
+      .querySelectorAll(
+        'input[name="server-output-mode"], .server-entry-check, input[name="server-csc-mode"]'
+      )
+      .forEach((el) => {
+        el.disabled = d.serverBusy;
+      });
+  };
+
   // Source switcher
   document.querySelectorAll('input[name="firmware-source"]').forEach((radio) => {
     radio.addEventListener("change", () => {
       if (radio.checked) {
-        userChoseSource = true;
+        state.userChoseSource = true;
         setFirmwareSource(radio.value, true);
       }
     });
   });
 
   // Userscript bridge reload & OPFS cache actions
-  document.getElementById("btn-reload-bridge")?.addEventListener("click", () => {
+  reloadBridgeBtn?.addEventListener("click", () => {
     window.location.reload();
   });
   document.getElementById("btn-clear-opfs-cache")?.addEventListener("click", handleClearOpfsCache);
@@ -736,20 +779,16 @@ export function setupServerPanel() {
   // Lookup form inputs
   modelInput?.addEventListener("input", () => {
     normalizeUpperInput(modelInput);
-    setLookupError("");
+    state.serverLookupError = "";
     syncLookupInputsChange();
-    updateControlsState();
   });
   regionInput?.addEventListener("input", () => {
     normalizeUpperInput(regionInput);
-    setLookupError("");
+    state.serverLookupError = "";
     syncLookupInputsChange();
-    updateControlsState();
   });
 
-  document
-    .getElementById("btn-detect-server-device")
-    ?.addEventListener("click", handleDetectFromDevice);
+  detectServerBtn?.addEventListener("click", handleDetectFromDevice);
 
   document
     .getElementById("server-lookup-form")
@@ -764,58 +803,49 @@ export function setupServerPanel() {
     });
 
   // Manual custom version toggle
-  document
-    .getElementById("btn-toggle-custom-version")
-    ?.addEventListener("click", () => {
-      if (state.isBusy || state.serverQuerying) return;
-      const versionSection = document.getElementById("server-version-section");
-      if (versionSection) versionSection.hidden = false;
-      updateDeviceBootloaderPill();
-      renderVersionDropdown("__custom__");
-      clearInspectedArchive();
-      document.getElementById("server-custom-version")?.focus();
-      updateControlsState();
-    });
+  toggleCustomBtn?.addEventListener("click", () => {
+    if (state.isBusy || state.serverQuerying) return;
+    state.serverCustomVersionOpen = true;
+    clearInspectedArchive();
+    notifyStateChange();
+    queueMicrotask(() => customVerInput?.focus());
+  });
 
   // Version dropdown & custom version input
-  const versionSelect = document.getElementById("server-version-select");
-  const customVerInput = document.getElementById("server-custom-version");
-
   versionSelect?.addEventListener("change", async () => {
     const val = versionSelect.value;
-    const customRow = document.getElementById("server-custom-version-row");
     if (val === "__custom__") {
-      if (customRow) customRow.hidden = false;
+      state.serverCustomVersionOpen = true;
       clearInspectedArchive();
-      customVerInput?.focus();
-      updateControlsState();
+      notifyStateChange();
+      queueMicrotask(() => customVerInput?.focus());
       return;
     }
-    if (customRow) customRow.hidden = true;
+    state.serverCustomVersionOpen = false;
+    notifyStateChange();
     await inspectFirmwareVersion(getLookupModel(), getLookupRegion(), val);
   });
 
   customVerInput?.addEventListener("input", () => {
-    normalizeUpperInput(customVerInput);
-    updateControlsState();
+    state.serverCustomVersion = normalizeUpperInput(customVerInput);
+    notifyStateChange();
   });
   customVerInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      document.getElementById("btn-inspect-custom")?.click();
+      inspectCustomBtn?.click();
     }
   });
 
-  document
-    .getElementById("btn-inspect-custom")
-    ?.addEventListener("click", async () => {
-      const customVer = normalizeUpperInput(customVerInput);
-      if (!customVer) return;
-      await inspectFirmwareVersion(getLookupModel(), getLookupRegion(), customVer);
-    });
+  inspectCustomBtn?.addEventListener("click", async () => {
+    const customVer = normalizeUpperInput(customVerInput);
+    state.serverCustomVersion = customVer;
+    if (!customVer) return;
+    await inspectFirmwareVersion(getLookupModel(), getLookupRegion(), customVer);
+  });
 
   // Output format & parallel connections
-  document.querySelectorAll('input[name="server-output-mode"]').forEach((radio) => {
+  outputModeRadios.forEach((radio) => {
     radio.addEventListener("change", () => {
       if (!radio.checked) return;
       setServerOutputMode(radio.value);
@@ -833,19 +863,24 @@ export function setupServerPanel() {
   // Action bar buttons
   document
     .getElementById("btn-download-only")
-    ?.addEventListener("click", () => void handleDownloadOnly(getSelectedEntriesInfo()));
+    ?.addEventListener("click", () =>
+      void handleDownloadOnly(getDerivedState(state).selectedEntriesInfo)
+    );
   document
     .getElementById("btn-download-flash")
-    ?.addEventListener("click", () => void handleDownloadAndFlash(getSelectedEntriesInfo()));
+    ?.addEventListener("click", () =>
+      void handleDownloadAndFlash(getDerivedState(state).selectedEntriesInfo)
+    );
   document
     .getElementById("btn-load-into-local")
     ?.addEventListener("click", () =>
       void handleLoadIntoLocalFlash(() => {
-        userChoseSource = true;
+        state.userChoseSource = true;
         setFirmwareSource("local", true);
       })
     );
 
-  updateControlsState();
+  subscribe(render);
+  render(state, getDerivedState(state));
   void checkFusBridge();
 }

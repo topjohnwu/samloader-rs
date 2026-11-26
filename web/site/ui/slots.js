@@ -20,15 +20,13 @@ import {
   clearFirmwareSelections,
   clearSlot,
   movePartitionFile,
-  onSlotsChange,
   removePartitionFile,
   reorderPartitionFile,
   replacePartitionFile,
   setPartitionTarget,
   setSkipMd5,
 } from "../app/slots.js";
-import { PACKAGE_SLOTS, SLOTS, state } from "../app/state.js";
-import { updateControlsState } from "./controls.js";
+import { getDerivedState, PACKAGE_SLOTS, SLOTS, state, subscribe } from "../app/state.js";
 import { formatBytes, isActivationKey, setBarPercent } from "./util.js";
 
 let draggedPartitionId = null;
@@ -137,7 +135,7 @@ function renderPartitionList() {
   const listEl = document.getElementById("partition-list");
   if (!sectionEl || !listEl) return;
 
-  listEl.innerHTML = "";
+  listEl.replaceChildren();
   if (state.partitions.length === 0) {
     sectionEl.hidden = true;
     return;
@@ -158,7 +156,9 @@ function renderPartitionList() {
       if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
         if (movePartitionFile(entry.id, e.key === "ArrowUp" ? -1 : 1)) {
-          document.querySelector(`.partition-item[data-partition-id="${entry.id}"]`)?.focus();
+          queueMicrotask(() => {
+            document.querySelector(`.partition-item[data-partition-id="${entry.id}"]`)?.focus();
+          });
         }
       }
     });
@@ -461,29 +461,68 @@ function setupDropzones() {
 }
 
 export function setupSlotsPanel() {
-  onSlotsChange((event) => {
-    switch (event.type) {
-      case "slot":
-        renderSlotFile(event.slot, event.file);
-        break;
-      case "status":
-        renderSlotStatus(event.slot, event.status, event.percent);
-        break;
-      case "partitions":
-        renderPartitionList();
-        break;
-      case "controls":
-        updateControlsState();
-        break;
-    }
-  });
-
   renderPackageSlots();
   setupDropzones();
 
-  document.getElementById("opt-skip-md5")?.addEventListener("change", (e) => {
+  const localPanel = document.getElementById("local-panel");
+  const skipMd5Chk = document.getElementById("opt-skip-md5");
+  const clearSlotsBtn = document.getElementById("btn-clear-slots");
+  const addPartBtn = document.getElementById("btn-add-partition");
+
+  const lastSlotFiles = Object.fromEntries(SLOTS.map((slot) => [slot, undefined]));
+  const lastMd5 = Object.fromEntries(SLOTS.map((slot) => [slot, undefined]));
+  let lastPartitionsRev = -1;
+
+  const render = (s, d) => {
+    if (localPanel) localPanel.hidden = !d.isLocal;
+
+    for (const slot of SLOTS) {
+      const file = s.slots[slot];
+      if (file !== lastSlotFiles[slot]) {
+        lastSlotFiles[slot] = file;
+        renderSlotFile(slot, file);
+      }
+
+      const md5 = s.md5Results[slot];
+      const prev = lastMd5[slot];
+      if (md5?.status !== prev?.status || md5?.percent !== prev?.percent) {
+        lastMd5[slot] = md5 ? { status: md5.status, percent: md5.percent } : null;
+        renderSlotStatus(slot, md5?.status ?? "empty", md5?.percent);
+      }
+
+      const clearBtn = document.getElementById(`clear-${slot}`);
+      if (clearBtn) clearBtn.disabled = s.isBusy;
+      const dropzone = document.getElementById(`dropzone-${slot}`);
+      dropzone?.setAttribute("aria-disabled", String(s.isBusy));
+    }
+
+    if (s.partitionsRev !== lastPartitionsRev) {
+      lastPartitionsRev = s.partitionsRev;
+      renderPartitionList();
+    } else {
+      document
+        .querySelectorAll(".partition-target-input, .partition-item .btn-clear-slot")
+        .forEach((el) => {
+          el.disabled = s.isBusy;
+        });
+      document.querySelectorAll(".btn-partition-move").forEach((el) => {
+        el.disabled = s.isBusy || el.dataset.edgeDisabled === "true";
+      });
+      document.querySelectorAll(".partition-item").forEach((el) => {
+        el.draggable = !s.isBusy;
+      });
+    }
+
+    if (clearSlotsBtn) clearSlotsBtn.disabled = s.isBusy || !d.hasLocalSelection;
+    if (addPartBtn) addPartBtn.disabled = s.isBusy;
+    if (skipMd5Chk) skipMd5Chk.disabled = s.isBusy;
+  };
+
+  skipMd5Chk?.addEventListener("change", (e) => {
     setSkipMd5(e.target.checked);
   });
+  clearSlotsBtn?.addEventListener("click", clearFirmwareSelections);
 
-  document.getElementById("btn-clear-slots")?.addEventListener("click", clearFirmwareSelections);
+  subscribe(render);
+  render(state, getDerivedState(state));
 }

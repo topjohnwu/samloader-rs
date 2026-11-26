@@ -25,7 +25,7 @@ import {
 } from "./bridge.js";
 import { runExclusive } from "./exclusive.js";
 import { appendLog, reportError, requestOpenLog } from "./logger.js";
-import { state } from "./state.js";
+import { notifyStateChange, state } from "./state.js";
 
 let mockPairedDevice = null;
 
@@ -111,28 +111,14 @@ async function getPairedDevices(backend = "nusb") {
   }));
 }
 
-const deviceListeners = new Set();
-
-let lastDeviceInfo = null;
 let refreshGen = 0;
 
 // The most recently dumped PIT, kept after the device reboots so it can still be saved.
 // It is named after the device model if it was queried (DVIF) before dumping.
 let lastPit = null;
 
-export function onDeviceChange(listener) {
-  deviceListeners.add(listener);
-  return () => deviceListeners.delete(listener);
-}
-
-function notifyDeviceChange(event) {
-  for (const listener of deviceListeners) {
-    listener(event);
-  }
-}
-
 export function hasDeviceInfo() {
-  return lastDeviceInfo !== null;
+  return state.deviceInfo !== null;
 }
 
 export function getLastPitDownload() {
@@ -144,16 +130,19 @@ export function getLastPitDownload() {
   };
 }
 
-function setDeviceInfo(info) {
-  lastDeviceInfo = info ?? null;
+function setDeviceInfo(info, { queried = false } = {}) {
+  state.deviceInfo = info ?? null;
   state.deviceModel = info?.model ?? null;
   state.deviceSalesCode = info?.salesCode ?? null;
   state.deviceBootloaderVersion = info?.bootloaderVersion ?? null;
-  notifyDeviceChange({
-    type: "info",
-    info: lastDeviceInfo,
-    dvifQueried: Boolean(info),
-  });
+  if (info && state.device) {
+    state.deviceChipConnected = true;
+    state.deviceChipLabel = "Device Ready";
+  }
+  if (queried && info) {
+    state.dvifQuerySeq++;
+  }
+  notifyStateChange();
 }
 
 // Identifies a paired device across refreshes. Web Serial ports have no serial number,
@@ -181,7 +170,7 @@ export async function queryDeviceInfo() {
       const info = await detectDownloadDevice({
         backend: state.selectedBackend,
       });
-      setDeviceInfo(info);
+      setDeviceInfo(info, { queried: true });
     } catch (err) {
       reportError(`Detection failed: ${err}`);
     }
@@ -197,13 +186,10 @@ export async function refreshPairedDevicesStatus() {
   if (!backend) {
     setDeviceInfo(null);
     state.device = null;
-    notifyDeviceChange({
-      type: "status",
-      chipConnected: false,
-      chipLabel: "No Backend",
-      summaryText: "No USB backend is available in this build",
-      dvifQueried: false,
-    });
+    state.deviceChipConnected = false;
+    state.deviceChipLabel = "No Backend";
+    state.deviceSummaryText = "No USB backend is available in this build";
+    notifyStateChange();
     return;
   }
 
@@ -211,13 +197,10 @@ export async function refreshPairedDevicesStatus() {
     setDeviceInfo(null);
     state.device = null;
     const label = backend === "vcom" ? "WebSerial" : "WebUSB";
-    notifyDeviceChange({
-      type: "status",
-      chipConnected: false,
-      chipLabel: `${label} Unavailable`,
-      summaryText: `${label} is not supported in this browser`,
-      dvifQueried: false,
-    });
+    state.deviceChipConnected = false;
+    state.deviceChipLabel = `${label} Unavailable`;
+    state.deviceSummaryText = `${label} is not supported in this browser`;
+    notifyStateChange();
     return;
   }
 
@@ -248,43 +231,37 @@ export async function refreshPairedDevicesStatus() {
 
   if (!d) {
     state.device = null;
-    notifyDeviceChange({
-      type: "status",
-      chipConnected: false,
-      chipLabel: "No Device",
-      summaryText: "Pair a Samsung device in Download Mode or Normal Mode",
-      dvifQueried: false,
-    });
+    state.deviceChipConnected = false;
+    state.deviceChipLabel = "No Device";
+    state.deviceSummaryText = "Pair a Samsung device in Download Mode or Normal Mode";
+    notifyStateChange();
     return;
   }
 
-  const vid = d.vendorId.toString(16).padStart(4, "0");
-  const pid = d.productId.toString(16).padStart(4, "0");
-  const name =
-    d.productName ||
-    (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
-  const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
-  state.device = {
-    key,
-    name,
-    subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
-    mode,
-    disconnect: d.disconnect,
-  };
+  if (!sameDevice) {
+    const vid = d.vendorId.toString(16).padStart(4, "0");
+    const pid = d.productId.toString(16).padStart(4, "0");
+    const name =
+      d.productName ||
+      (mode === "download" ? "Samsung Download Mode Device" : "Samsung USB Device");
+    const serialPart = d.serialNumber ? ` • Serial ${d.serialNumber}` : "";
+    state.device = {
+      key,
+      name,
+      subtitle: `USB VID:PID ${vid}:${pid}${serialPart}`,
+      mode,
+      disconnect: d.disconnect,
+    };
+  }
 
-  const summaryText =
+  const ready = sameDevice && hasDeviceInfo();
+  state.deviceChipConnected = true;
+  state.deviceChipLabel = ready ? "Device Ready" : "Device Paired";
+  state.deviceSummaryText =
     mode === "download"
       ? "Download Mode device paired"
       : "Normal Mode device paired. Reboot it into Download Mode to flash firmware";
-  const ready = sameDevice && hasDeviceInfo();
-
-  notifyDeviceChange({
-    type: "status",
-    chipConnected: true,
-    chipLabel: ready ? "Device Ready" : "Device Paired",
-    summaryText,
-    dvifQueried: false,
-  });
+  notifyStateChange();
 }
 
 export async function pairDownload() {
@@ -367,7 +344,7 @@ export async function dumpPit() {
       appendLog(pit.text);
       lastPit = { data: pit.data, model: state.deviceModel };
       state.hasLastPit = true;
-      notifyDeviceChange({ type: "pit" });
+      notifyStateChange();
       // The PIT table is printed to the log, so show it
       requestOpenLog();
     } catch (err) {

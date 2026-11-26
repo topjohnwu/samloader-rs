@@ -19,12 +19,11 @@ import {
   executeDownloadAndFlash,
   executeDownloadOnly,
   loadLastDownloadIntoLocalSlots,
-  onOpfsCacheChange,
   refreshOpfsCacheInfo,
 } from "../app/download.js";
 import { createTransferSpeedTracker, formatTransferMeta } from "../app/format.js";
 import { reportError } from "../app/logger.js";
-import { updateControlsState } from "./controls.js";
+import { getDerivedState, state, subscribe } from "../app/state.js";
 import {
   beginOperation,
   clearDownloadFileRows,
@@ -48,7 +47,6 @@ function renderOpfsCacheBanner(info) {
 
   if (!banner || !info) {
     if (banner) banner.hidden = true;
-    updateControlsState();
     return;
   }
 
@@ -66,7 +64,6 @@ function renderOpfsCacheBanner(info) {
     metaEl.textContent = `${formatBytes(info.totalBytes || 0)} · ${statusLabel}`;
   }
   banner.hidden = false;
-  updateControlsState();
 }
 
 // --- Download Progress & Result UI Adapter ---
@@ -195,7 +192,17 @@ function createDownloadUiCallbacks() {
 }
 
 export function setupDownloadUi() {
-  onOpfsCacheChange(renderOpfsCacheBanner);
+  const clearBtn = document.getElementById("btn-clear-opfs-cache");
+  let lastCache = undefined;
+  const render = (s, d) => {
+    if (s.opfsCache !== lastCache) {
+      lastCache = s.opfsCache;
+      renderOpfsCacheBanner(s.opfsCache);
+    }
+    if (clearBtn) clearBtn.disabled = d.serverBusy;
+  };
+  subscribe(render);
+  render(state, getDerivedState(state));
   void refreshOpfsCacheInfo();
 }
 
@@ -243,7 +250,7 @@ export async function handleDownloadOnly({ selectedEntries = [] } = {}) {
 export async function handleDownloadAndFlash(selectionInfo = {}) {
   await executeDownloadAndFlash({
     ...selectionInfo,
-    eraseChecked: Boolean(document.getElementById("opt-nand-erase")?.checked),
+    eraseChecked: Boolean(state.flashOptions.erase),
     confirmWipe: (wipeReasons) =>
       confirm(`${wipeReasons.join("\n")}\n\nThis will wipe the device's data. Continue?`),
     ui: createDownloadUiCallbacks(),

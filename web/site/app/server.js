@@ -24,28 +24,10 @@ import {
   onFusBridgeReady,
 } from "./fus_bridge.js";
 import { appendLog, reportError } from "./logger.js";
-import { state } from "./state.js";
+import { notifyStateChange, state } from "./state.js";
 
-const serverListeners = new Set();
-
-let archiveRows = [];
 let inspectGen = 0;
 let bridgeCheckInFlight = false;
-
-export function onServerChange(listener) {
-  serverListeners.add(listener);
-  return () => serverListeners.delete(listener);
-}
-
-function notifyServerChange(event) {
-  for (const listener of serverListeners) {
-    listener(event);
-  }
-}
-
-export function getArchiveRows() {
-  return archiveRows;
-}
 
 // --- FUS Bridge Status & Probing ---
 function applyBridgeStatus(status) {
@@ -70,7 +52,7 @@ function applyBridgeStatus(status) {
 
   state.fusBridge = next;
   if (changed) {
-    notifyServerChange({ type: "bridge", prev, next });
+    notifyStateChange();
   }
   return { prev, next, changed };
 }
@@ -128,13 +110,13 @@ function buildArchiveRows(entries) {
   const combineCsc = homeCsc.length === 1 && wipeCsc.length === 1;
 
   let addedSmartCsc = false;
-  archiveRows = [];
+  const rows = [];
 
   for (const entry of entries) {
     if (combineCsc && (entry.component === "home_csc" || entry.component === "csc")) {
       if (!addedSmartCsc) {
         addedSmartCsc = true;
-        archiveRows.push({
+        rows.push({
           kind: "smart_csc",
           checked: true,
           cscChoice: "home_csc",
@@ -146,120 +128,47 @@ function buildArchiveRows(entries) {
     }
 
     const defaultChecked = ["bl", "ap", "cp", "home_csc", "csc"].includes(entry.component);
-    archiveRows.push({
+    rows.push({
       kind: "single",
       entry,
       checked: defaultChecked,
     });
   }
-}
 
-export function getSelectedEntriesInfo() {
-  const selectedEntries = [];
-  let hasBothCsc = false;
-
-  for (const row of archiveRows) {
-    if (!row.checked) continue;
-    if (row.kind === "smart_csc") {
-      if (row.cscChoice === "home_csc") {
-        selectedEntries.push(row.homeEntry);
-      } else if (row.cscChoice === "csc") {
-        selectedEntries.push(row.wipeEntry);
-      } else {
-        selectedEntries.push(row.homeEntry, row.wipeEntry);
-        hasBothCsc = true;
-      }
-    } else {
-      selectedEntries.push(row.entry);
-    }
-  }
-
-  if (
-    !hasBothCsc &&
-    selectedEntries.some((e) => e.component === "home_csc") &&
-    selectedEntries.some((e) => e.component === "csc")
-  ) {
-    hasBothCsc = true;
-  }
-
-  const totalBytes = selectedEntries.reduce((sum, e) => sum + (e.uncompressedSize || 0), 0);
-  const odinEntries = selectedEntries.filter((e) => e.component !== null);
-  const hasCscWipe = selectedEntries.some((e) => e.component === "csc");
-  const hasUserdata = selectedEntries.some((e) => e.component === "userdata");
-
-  return {
-    selectedEntries,
-    odinEntries,
-    totalBytes,
-    hasBothCsc,
-    hasCscWipe,
-    hasUserdata,
-  };
-}
-
-export function syncArchiveSelectionState() {
-  const info = getSelectedEntriesInfo();
-  const { selectedEntries, odinEntries, hasBothCsc } = info;
-
-  if (!state.serverInspect) {
-    state.serverSelection = {
-      validForDownload: false,
-      validForFlash: false,
-      hasBothCsc: false,
-      hasOdinComponent: false,
-    };
-  } else if (state.serverOutputMode === "zip") {
-    state.serverSelection = {
-      validForDownload: true,
-      validForFlash: false,
-      hasBothCsc: false,
-      hasOdinComponent: false,
-    };
-  } else {
-    state.serverSelection = {
-      validForDownload: selectedEntries.length > 0,
-      validForFlash: odinEntries.length > 0 && !hasBothCsc,
-      hasBothCsc,
-      hasOdinComponent: odinEntries.length > 0,
-    };
-  }
-
-  notifyServerChange({ type: "selection", info });
+  state.archiveRows = rows;
 }
 
 export function setArchiveRowChecked(idx, checked) {
-  const row = archiveRows[idx];
+  const row = state.archiveRows[idx];
   if (!row) return;
   row.checked = Boolean(checked);
-  syncArchiveSelectionState();
+  notifyStateChange();
 }
 
 export function setSmartCscChoice(idx, choice) {
-  const row = archiveRows[idx];
+  const row = state.archiveRows[idx];
   if (!row || row.kind !== "smart_csc") return;
   row.cscChoice = choice;
   row.checked = true;
-  syncArchiveSelectionState();
+  notifyStateChange();
 }
 
 export function setServerOutputMode(mode) {
   state.serverOutputMode = mode === "zip" ? "zip" : "entries";
-  syncArchiveSelectionState();
-  notifyServerChange({ type: "output_mode", mode: state.serverOutputMode });
+  notifyStateChange();
 }
 
 // --- Version Lookup & Inspection ---
 export function clearInspectedArchive() {
   inspectGen++;
   state.serverInspect = null;
-  archiveRows = [];
-  notifyServerChange({ type: "inspect_cleared" });
-  syncArchiveSelectionState();
+  state.archiveRows = [];
+  notifyStateChange();
 }
 
 export function clearServerHistory() {
   state.serverHistory = null;
-  notifyServerChange({ type: "history_cleared" });
+  notifyStateChange();
 }
 
 export async function checkFirmwareVersions(model, region) {
@@ -267,18 +176,20 @@ export async function checkFirmwareVersions(model, region) {
   if (!state.fusBridge.connected) return;
   if (!model || !region) return;
 
-  notifyServerChange({ type: "lookup_error", message: "" });
+  state.serverLookupError = "";
   state.serverHistory = null;
   clearInspectedArchive();
 
   state.serverQuerying = true;
-  notifyServerChange({ type: "querying_history", active: true });
+  state.serverQueryPhase = "history";
+  notifyStateChange();
   appendLog(`Checking Samsung FUS firmware versions for ${model} (${region})...`);
 
   try {
     const transport = await getMainThreadFusTransport();
     const history = await fusFetchHistory(model, region, transport);
     state.serverHistory = { ...history, model, region };
+    state.serverCustomVersionOpen = !history.latest;
 
     const count =
       (history.latest ? 1 : 0) +
@@ -287,8 +198,8 @@ export async function checkFirmwareVersions(model, region) {
     appendLog(`Found ${count} firmware version(s); latest is ${history.latest}.`);
 
     state.serverQuerying = false;
-    notifyServerChange({ type: "history", history: state.serverHistory });
-    notifyServerChange({ type: "querying_history", active: false });
+    state.serverQueryPhase = null;
+    notifyStateChange();
 
     if (history.latest) {
       await inspectFirmwareVersion(model, region, history.latest);
@@ -297,8 +208,9 @@ export async function checkFirmwareVersions(model, region) {
     const msg = err?.message || String(err);
     reportError(`FUS version lookup failed: ${msg}`);
     state.serverQuerying = false;
-    notifyServerChange({ type: "lookup_error", message: `Version lookup failed: ${msg}` });
-    notifyServerChange({ type: "querying_history", active: false });
+    state.serverQueryPhase = null;
+    state.serverLookupError = `Version lookup failed: ${msg}`;
+    notifyStateChange();
   }
 }
 
@@ -308,13 +220,13 @@ export async function inspectFirmwareVersion(model, region, version) {
   if (!state.fusBridge.connected) return;
 
   const myGen = ++inspectGen;
-  notifyServerChange({ type: "lookup_error", message: "" });
+  state.serverLookupError = "";
   state.serverInspect = null;
-  archiveRows = [];
+  state.archiveRows = [];
 
   state.serverQuerying = true;
-  notifyServerChange({ type: "inspecting", active: true });
-  syncArchiveSelectionState();
+  state.serverQueryPhase = "inspect";
+  notifyStateChange();
   appendLog(`Inspecting firmware ${version} for ${model} (${region})...`);
 
   try {
@@ -334,17 +246,18 @@ export async function inspectFirmwareVersion(model, region, version) {
     appendLog(
       `Inspected ${info.decryptedFilename} (${formatBytes(info.decryptedSize)}, ${(info.entries || []).length} entries).`
     );
-    notifyServerChange({ type: "inspect_ready", inspect: state.serverInspect });
+    notifyStateChange();
   } catch (err) {
     if (myGen !== inspectGen) return;
     const msg = err?.message || String(err);
     reportError(`FUS inspect failed: ${msg}`);
-    notifyServerChange({ type: "lookup_error", message: `Inspect failed: ${msg}` });
+    state.serverLookupError = `Inspect failed: ${msg}`;
+    notifyStateChange();
   } finally {
     if (myGen === inspectGen) {
       state.serverQuerying = false;
-      notifyServerChange({ type: "inspecting", active: false });
-      syncArchiveSelectionState();
+      state.serverQueryPhase = null;
+      notifyStateChange();
     }
   }
 }

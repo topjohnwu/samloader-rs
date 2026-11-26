@@ -14,9 +14,8 @@
 
 // Shared action-bar operation progress, per-file download rows, cancel button, and result banner.
 
-import { COMPONENT_META } from "../app/download.js";
 import { formatTransferMeta } from "../app/format.js";
-import { state } from "../app/state.js";
+import { COMPONENT_META, state, subscribe } from "../app/state.js";
 import { openLog } from "./log.js";
 import { formatBytes, setBarPercent } from "./util.js";
 
@@ -176,6 +175,11 @@ export function endOperation() {
 }
 
 export function setupOperationPanel() {
+  const loadLocalBtn = document.getElementById("btn-load-into-local");
+  subscribe((s) => {
+    if (loadLocalBtn) loadLocalBtn.disabled = s.isBusy;
+  });
+
   document.getElementById("btn-dismiss-result")?.addEventListener("click", hideOperationResult);
   document.getElementById("btn-show-log")?.addEventListener("click", () => {
     openLog();

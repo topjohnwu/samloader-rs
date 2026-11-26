@@ -16,32 +16,19 @@
 
 import { formatBytes } from "./format.js";
 import { appendLog } from "./logger.js";
-import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
-
-const slotListeners = new Set();
-
-export function onSlotsChange(listener) {
-  slotListeners.add(listener);
-  return () => slotListeners.delete(listener);
-}
-
-function notifySlotsChange(event) {
-  for (const listener of slotListeners) {
-    listener(event);
-  }
-}
+import { notifyStateChange, PACKAGE_SLOTS, SLOTS, state } from "./state.js";
 
 export function isMd5File(file) {
   return file.name.toLowerCase().endsWith(".md5");
 }
 
-function setSlotStatus(slot, status, percent, error) {
+function setSlotStatus(slot, status, percent = 0, error) {
   if (status === "empty") {
     delete state.md5Results[slot];
   } else {
-    state.md5Results[slot] = { status, error };
+    state.md5Results[slot] = { status, percent, error };
   }
-  notifySlotsChange({ type: "status", slot, status, percent, error });
+  notifyStateChange();
 }
 
 // --- MD5 Verification Queue ---
@@ -97,7 +84,6 @@ function pumpMd5Queue() {
     if (error) {
       appendLog(`[MD5 ERROR] ${slot}: ${error}`);
     }
-    notifySlotsChange({ type: "controls" });
     pumpMd5Queue();
   };
 
@@ -132,24 +118,21 @@ export function assignFileToSlot(slot, file, { trustCrc = false } = {}) {
 
   cancelMd5(slot);
   state.slots[slot] = file;
-  notifySlotsChange({ type: "slot", slot, file });
 
   const loaded = `Loaded ${slot}: ${file.name} (${formatBytes(file.size)})`;
   if (!isMd5File(file)) {
-    setSlotStatus(slot, "ready");
+    setSlotStatus(slot, "ready", 100);
     appendLog(loaded);
   } else if (trustCrc) {
-    setSlotStatus(slot, "ready");
+    setSlotStatus(slot, "ready", 100);
     appendLog(`${loaded} — ZIP CRC-32 verified`);
   } else if (state.skipMd5) {
-    setSlotStatus(slot, "skipped");
+    setSlotStatus(slot, "skipped", 100);
     appendLog(`${loaded} — MD5 check skipped`);
   } else {
     enqueueMd5(slot);
     appendLog(`${loaded} — queued for MD5 check`);
   }
-
-  notifySlotsChange({ type: "controls" });
 }
 
 export function loadFilesIntoSlots(slotFiles) {
@@ -174,13 +157,13 @@ export function setSkipMd5(skip) {
     if (skip && status !== "valid" && status !== "ready") {
       // Stop any queued or active verification and mark unverified slots as skipped
       cancelMd5(slot);
-      setSlotStatus(slot, "skipped");
+      setSlotStatus(slot, "skipped", 100);
     } else if (!skip && status === "skipped") {
       enqueueMd5(slot);
     }
   });
 
-  notifySlotsChange({ type: "controls" });
+  notifyStateChange();
 }
 
 export function clearSlot(slot) {
@@ -188,9 +171,7 @@ export function clearSlot(slot) {
 
   cancelMd5(slot);
   state.slots[slot] = null;
-  setSlotStatus(slot, "empty");
-  notifySlotsChange({ type: "slot", slot, file: null });
-  notifySlotsChange({ type: "controls" });
+  setSlotStatus(slot, "empty", 0);
 }
 
 // Clears the package slots and partition files. The PIT file is an advanced option
@@ -214,8 +195,8 @@ export function addPartitionFiles(fileList) {
     appendLog(`Added partition file: ${file.name} (${formatBytes(file.size)})`);
   });
 
-  notifySlotsChange({ type: "partitions" });
-  notifySlotsChange({ type: "controls" });
+  state.partitionsRev++;
+  notifyStateChange();
 }
 
 export function removePartitionFile(id) {
@@ -224,16 +205,16 @@ export function removePartitionFile(id) {
   if (idx === -1) return;
   const [removed] = state.partitions.splice(idx, 1);
   appendLog(`Removed partition file: ${removed.file.name}`);
-  notifySlotsChange({ type: "partitions" });
-  notifySlotsChange({ type: "controls" });
+  state.partitionsRev++;
+  notifyStateChange();
 }
 
 export function clearAllPartitions() {
   if (state.isBusy) return;
   if (state.partitions.length === 0) return;
   state.partitions = [];
-  notifySlotsChange({ type: "partitions" });
-  notifySlotsChange({ type: "controls" });
+  state.partitionsRev++;
+  notifyStateChange();
 }
 
 export function reorderPartitionFile(draggedId, targetId, insertAfter) {
@@ -250,7 +231,8 @@ export function reorderPartitionFile(draggedId, targetId, insertAfter) {
 
   const insertIdx = insertAfter ? toIdx + 1 : toIdx;
   state.partitions.splice(insertIdx, 0, moved);
-  notifySlotsChange({ type: "partitions" });
+  state.partitionsRev++;
+  notifyStateChange();
 }
 
 export function movePartitionFile(id, delta) {
@@ -260,7 +242,8 @@ export function movePartitionFile(id, delta) {
   if (from === -1 || to < 0 || to >= state.partitions.length) return false;
   const [moved] = state.partitions.splice(from, 1);
   state.partitions.splice(to, 0, moved);
-  notifySlotsChange({ type: "partitions" });
+  state.partitionsRev++;
+  notifyStateChange();
   return true;
 }
 
@@ -270,8 +253,8 @@ export function replacePartitionFile(id, file) {
   if (!entry) return;
   entry.file = file;
   appendLog(`Updated partition file: ${file.name} (${formatBytes(file.size)})`);
-  notifySlotsChange({ type: "partitions" });
-  notifySlotsChange({ type: "controls" });
+  state.partitionsRev++;
+  notifyStateChange();
 }
 
 export function setPartitionTarget(id, target) {

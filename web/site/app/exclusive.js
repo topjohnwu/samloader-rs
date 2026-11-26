@@ -14,14 +14,9 @@
 
 // Exclusive operation guard, screen wake lock, and tab-close protection.
 
-import { state } from "./state.js";
+import { notifyStateChange, state } from "./state.js";
 
 let wakeLock = null;
-let busyChangeListener = null;
-
-export function setBusyChangeListener(listener) {
-  busyChangeListener = listener;
-}
 
 async function acquireWakeLock() {
   if (wakeLock || typeof navigator === "undefined" || !navigator.wakeLock) return;
@@ -68,7 +63,7 @@ export function setupExclusiveGuards() {
 export async function runExclusiveWithSetup(prepareFn, fn) {
   if (state.isBusy) return;
   state.isBusy = true;
-  busyChangeListener?.(true);
+  notifyStateChange();
   try {
     const setupResult = await prepareFn();
     if (setupResult === false) return;
@@ -77,7 +72,7 @@ export async function runExclusiveWithSetup(prepareFn, fn) {
   } finally {
     state.isBusy = false;
     await releaseWakeLock();
-    busyChangeListener?.(false);
+    notifyStateChange();
   }
 }
 

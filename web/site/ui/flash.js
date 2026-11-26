@@ -76,22 +76,17 @@ export function handleProgressEvent(event) {
 }
 
 function readFlashOptions() {
-  const eraseChk = document.getElementById("opt-nand-erase");
-  const disableVerityChk = document.getElementById("opt-disable-verity");
-  const disableVerificationChk = document.getElementById("opt-disable-verification");
-  const skipSizeCheckChk = document.getElementById("opt-skip-size-check");
-  const salesCodeInput = document.getElementById("opt-sales-code");
+  const { erase, disableVerity, disableVerification, skipSizeCheck, salesCode } =
+    state.flashOptions;
+  const trimmedCode = (salesCode || "").trim().toUpperCase();
 
   return {
     reboot: state.rebootMode,
-    erase: eraseChk ? eraseChk.checked : false,
-    disable_verity: disableVerityChk ? disableVerityChk.checked : false,
-    disable_verification: disableVerificationChk ? disableVerificationChk.checked : false,
-    skip_size_check: skipSizeCheckChk ? skipSizeCheckChk.checked : false,
-    sales_code:
-      salesCodeInput && salesCodeInput.value.trim()
-        ? salesCodeInput.value.trim().toUpperCase()
-        : undefined,
+    erase: Boolean(erase),
+    disable_verity: Boolean(disableVerity),
+    disable_verification: Boolean(disableVerification),
+    skip_size_check: Boolean(skipSizeCheck),
+    sales_code: trimmedCode || undefined,
   };
 }
 
