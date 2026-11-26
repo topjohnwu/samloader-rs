@@ -459,12 +459,17 @@ export async function executeDownloadAndFlash({
         ui?.onBeforeFlash?.();
         const flashRes = await executeFlashWithFiles(slotFiles, {
           skipWipeConfirmAlreadyAsked,
+          manageLifecycle: false,
         });
 
         if (flashRes.success) {
-          await clearOpfsCache();
-          await refreshOpfsCacheInfo();
-          appendLog("Cleared OPFS staging cache after successful flash.");
+          try {
+            await clearOpfsCache();
+            await refreshOpfsCacheInfo();
+            appendLog("Cleared OPFS staging cache after successful flash.");
+          } catch (err) {
+            appendLog(`[OPFS WARNING] Flash succeeded, but failed to clear staging cache: ${err?.message || err}`);
+          }
         } else {
           await refreshOpfsCacheInfo();
           if (flashRes.aborted) {

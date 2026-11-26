@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Odin flashing orchestration, wipe confirmation, and transfer speed/ETA smoothing.
+// Odin flashing orchestration and wipe confirmation.
 
 import { prepareFlash } from "./bridge.js";
 import { runExclusive } from "./exclusive.js";
@@ -20,40 +20,10 @@ import { formatBytes } from "./format.js";
 import { appendLog, reportError } from "./logger.js";
 import { PACKAGE_SLOTS, state } from "./state.js";
 
-// --- Flash Speed & ETA ---
-const STATS_SAMPLE_MS = 1000;
-
-let flashStats = null;
 let flashHandlers = {};
 
 export function setFlashHandlers(handlers) {
   flashHandlers = handlers || {};
-}
-
-export function resetFlashStats() {
-  flashStats = null;
-}
-
-// Samples the bytes sent to the device and the overall progress at most once per
-// STATS_SAMPLE_MS, smoothing the transfer speed and progress rate with an
-// exponential moving average
-export function updateFlashStats(sent, overallPercent) {
-  const now = performance.now();
-  if (!flashStats || sent < flashStats.sent) {
-    flashStats = { time: now, sent, overallPercent, speed: null, rate: null };
-    return flashStats;
-  }
-  const elapsedMs = now - flashStats.time;
-  if (elapsedMs >= STATS_SAMPLE_MS) {
-    const seconds = elapsedMs / 1000;
-    const ema = (prev, value) => (prev === null ? value : prev * 0.7 + value * 0.3);
-    flashStats.speed = ema(flashStats.speed, (sent - flashStats.sent) / seconds);
-    flashStats.rate = ema(flashStats.rate, (overallPercent - flashStats.overallPercent) / seconds);
-    flashStats.time = now;
-    flashStats.sent = sent;
-    flashStats.overallPercent = overallPercent;
-  }
-  return flashStats;
 }
 
 export function rebootOutcome(rebootMode = state.rebootMode) {
@@ -67,9 +37,15 @@ export function rebootOutcome(rebootMode = state.rebootMode) {
   }
 }
 
-async function runFlashWithFiles(files, { skipWipeConfirmAlreadyAsked = false } = {}) {
-  resetFlashStats();
-  flashHandlers.onStart?.();
+async function runFlashWithFiles(
+  files,
+  { skipWipeConfirmAlreadyAsked = false, manageLifecycle = true } = {}
+) {
+  if (manageLifecycle) {
+    flashHandlers.onStart?.();
+  } else {
+    flashHandlers.onPhaseStart?.();
+  }
   appendLog("=== Starting Flashing Session ===");
 
   const preparedFiles = { ...files };
@@ -136,7 +112,9 @@ async function runFlashWithFiles(files, { skipWipeConfirmAlreadyAsked = false } 
     reportError(`[FLASH ERROR] ${err}`);
     return { success: false, aborted: false, error: err };
   } finally {
-    flashHandlers.onFinally?.();
+    if (manageLifecycle) {
+      flashHandlers.onFinally?.();
+    }
   }
 }
 

@@ -48,6 +48,7 @@ const PRECACHE_URLS = [
   "./ui/download.js",
   "./ui/flash.js",
   "./ui/log.js",
+  "./ui/operation.js",
   "./ui/server.js",
   "./ui/slots.js",
   "./ui/theme.js",

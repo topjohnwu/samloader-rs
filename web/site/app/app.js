@@ -40,6 +40,7 @@ import {
 import { setupDevicePanel } from "../ui/device.js";
 import { handleProgressEvent, setupFlashPanel } from "../ui/flash.js";
 import { setupLogPanel } from "../ui/log.js";
+import { setupOperationPanel } from "../ui/operation.js";
 import { setupServerPanel } from "../ui/server.js";
 import { setupSlotsPanel } from "../ui/slots.js";
 import { setupThemeToggle } from "../ui/theme.js";
@@ -92,6 +93,7 @@ function initPanels() {
   setupExclusiveGuards();
   setupControlsPanel();
   setupLogPanel();
+  setupOperationPanel();
   setupFlashPanel();
   setupDevicePanel();
   setupSlotsPanel();

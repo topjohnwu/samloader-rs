@@ -26,7 +26,6 @@ use samloader_fus::{
     TransferWarning, ZipArchive, ZipEntry, validate_resume_checkpoint, write_resumable_stream,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::io;
@@ -40,8 +39,6 @@ const CHECKPOINT_MAX_WAIT_MS: f64 = 15_000.0;
 const WRITE_BUF_SIZE: usize = 2 * 1024 * 1024;
 const COALESCE_MAX_WAIT_MS: f64 = 250.0;
 const PROGRESS_THROTTLE_MS: f64 = 100.0;
-const SPEED_WINDOW_MS: f64 = 3000.0;
-const SPEED_SAMPLE_INTERVAL_MS: f64 = 250.0;
 const DEFAULT_CONCURRENCY: usize = 6;
 const MIN_CONCURRENCY: usize = 1;
 const MAX_CONCURRENCY: usize = 6;
@@ -250,8 +247,6 @@ fn elapsed_at_least(now_ms: f64, last_ms: f64, threshold_ms: f64) -> bool {
 
 struct ProgressState {
     wire_bytes: Cell<u64>,
-    session_out_bytes: Cell<u64>,
-    samples: RefCell<VecDeque<(f64, u64, u64)>>,
     last_emit_ms: Cell<f64>,
     overall_base: Cell<u64>,
     overall_total: Cell<u64>,
@@ -270,8 +265,6 @@ impl ProgressState {
     fn new_arc(file_count: usize, overall_total: u64, on_progress: js_sys::Function) -> Arc<Self> {
         Arc::new(Self {
             wire_bytes: Cell::new(0),
-            session_out_bytes: Cell::new(0),
-            samples: RefCell::new(VecDeque::with_capacity(16)),
             last_emit_ms: Cell::new(f64::NEG_INFINITY),
             overall_base: Cell::new(0),
             overall_total: Cell::new(overall_total),
@@ -304,12 +297,7 @@ impl ProgressState {
     }
 
     fn set_file_written(&self, written: u64, force: bool) {
-        let prev = self.file_written.replace(written);
-        self.session_out_bytes.set(
-            self.session_out_bytes
-                .get()
-                .saturating_add(written.saturating_sub(prev)),
-        );
+        self.file_written.set(written);
         self.emit_progress(force);
     }
 
@@ -334,29 +322,6 @@ impl ProgressState {
         let _ = self.on_progress.call1(&JsValue::NULL, &obj);
     }
 
-    fn compute_speeds(&self, now_ms: f64, wire_bytes: u64, session_out: u64) -> (f64, f64) {
-        let mut samples = self.samples.borrow_mut();
-        if samples.back().is_none_or(|&(last_t, _, _)| {
-            elapsed_at_least(now_ms, last_t, SPEED_SAMPLE_INTERVAL_MS)
-        }) {
-            samples.push_back((now_ms, wire_bytes, session_out));
-            while samples.len() > 2 && elapsed_at_least(now_ms, samples[1].0, SPEED_WINDOW_MS) {
-                samples.pop_front();
-            }
-        }
-        let Some(&(oldest_t, oldest_wire, oldest_out)) = samples.front() else {
-            return (0.0, 0.0);
-        };
-        let dt_secs = (now_ms - oldest_t) / 1000.0;
-        if dt_secs >= 0.25 {
-            let wire_speed = wire_bytes.saturating_sub(oldest_wire) as f64 / dt_secs;
-            let out_speed = session_out.saturating_sub(oldest_out) as f64 / dt_secs;
-            (wire_speed, out_speed)
-        } else {
-            (0.0, 0.0)
-        }
-    }
-
     fn emit_progress(&self, force: bool) {
         if !self.active.get() {
             return;
@@ -372,8 +337,6 @@ impl ProgressState {
         let overall_written = self.overall_base.get().saturating_add(file_written);
         let overall_total = self.overall_total.get();
         let wire_bytes = self.wire_bytes.get();
-        let (wire_speed, out_speed) =
-            self.compute_speeds(now, wire_bytes, self.session_out_bytes.get());
 
         let percent = if overall_total > 0 {
             (overall_written as f64 / overall_total as f64) * 100.0
@@ -381,13 +344,6 @@ impl ProgressState {
             (file_written as f64 / file_total as f64) * 100.0
         } else {
             0.0
-        };
-        let eta = |remaining: u64| {
-            if out_speed > 1024.0 && remaining > 0 {
-                JsValue::from_f64(remaining as f64 / out_speed)
-            } else {
-                JsValue::NULL
-            }
         };
 
         let obj = {
@@ -399,13 +355,10 @@ impl ProgressState {
                 "fileName" => file_name.as_str(),
                 "fileWritten" => file_written as f64,
                 "fileTotal" => file_total as f64,
-                "fileEtaSecs" => eta(file_total.saturating_sub(file_written)),
                 "overallWritten" => overall_written as f64,
                 "overallTotal" => overall_total as f64,
                 "wireBytes" => wire_bytes as f64,
                 "percent" => percent,
-                "wireSpeed" => wire_speed,
-                "etaSecs" => eta(overall_total.saturating_sub(overall_written)),
                 "resumed" => self.resumed.get(),
             }
         };
