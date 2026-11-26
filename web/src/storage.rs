@@ -780,18 +780,18 @@ async fn dir_is_complete(
     min_size: u64,
     max_size: u64,
     uses_part_file: bool,
-) -> Result<bool, String> {
+) -> Result<Option<u64>, String> {
     validate_filename(filename)?;
     if (uses_part_file && file_exists(dir, &format!("{filename}.part")).await?)
         || file_exists(dir, &format!("{filename}.part.meta")).await?
     {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(file) = get_file_if_exists(dir, filename).await? else {
-        return Ok(false);
+        return Ok(None);
     };
     let size = file.size() as u64;
-    Ok(size >= min_size && size <= max_size)
+    Ok((size >= min_size && size <= max_size).then_some(size))
 }
 
 async fn dir_open_part(
@@ -870,7 +870,7 @@ impl DownloadStorage {
         filename: &str,
         min_size: u64,
         max_size: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<u64>, String> {
         match self {
             Self::Opfs(dir) => dir_is_complete(dir, filename, min_size, max_size, true).await,
             Self::Directory(dir) => dir_is_complete(dir, filename, min_size, max_size, false).await,

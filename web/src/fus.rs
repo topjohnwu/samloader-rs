@@ -990,21 +990,25 @@ pub async fn fus_download(
         DownloadMode::Zip => {
             let progress = ProgressState::new_arc(1, size_bounds.1, on_progress);
 
-            let complete = !parsed.force
-                && run_cancellable(
+            let existing_size = if parsed.force {
+                None
+            } else {
+                run_cancellable(
                     &cancel,
                     storage.is_complete(&decrypted_filename, size_bounds.0, size_bounds.1),
                 )
-                .await?;
+                .await?
+            };
 
-            if complete {
-                progress.finish_file(1, &decrypted_filename, true, size_bounds.1);
+            if let Some(size) = existing_size {
+                progress.overall_total.set(size);
+                progress.finish_file(1, &decrypted_filename, true, size);
                 record_downloaded_file(
                     &files_js,
                     &mut completed_files,
                     &decrypted_filename,
                     None,
-                    size_bounds.1,
+                    size,
                 );
             } else {
                 let session = run_cancellable(&cancel, client.init_download(info)).await?;
@@ -1061,7 +1065,8 @@ pub async fn fus_download(
                 let size = entry.uncompressed_size();
                 let complete = !parsed.force
                     && run_cancellable(&cancel, storage.is_complete(entry.name(), size, size))
-                        .await?;
+                        .await?
+                        .is_some();
                 to_open.push((!complete).then_some(entry));
             }
 

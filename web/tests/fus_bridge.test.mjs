@@ -248,7 +248,7 @@ describe("direct main-thread transport", () => {
 
 describe("worker MessagePort credit-based pull relay", () => {
   test("coalesces 24 MiB of 32 KiB chunks with byte-exact integrity and sync fast path", async () => {
-    const port = await openBridgePort();
+    const { port } = await openBridgePort();
     const worker = createFusHttpTransport(port);
     try {
       const CHUNK_SIZE = 32 * 1024;
@@ -313,7 +313,7 @@ describe("worker MessagePort credit-based pull relay", () => {
   });
 
   test("enforces credit-based backpressure while consumer is paused", async () => {
-    const port = await openBridgePort();
+    const { port } = await openBridgePort();
     const worker = createFusHttpTransport(port);
     try {
       let emittedMiB = 0;
@@ -361,7 +361,7 @@ describe("worker MessagePort credit-based pull relay", () => {
   });
 
   test("flushes slow small chunks via coalescing timer without losing bytes", async () => {
-    const port = await openBridgePort();
+    const { port } = await openBridgePort();
     const worker = createFusHttpTransport(port);
     try {
       gmHandler = (details) => {
@@ -407,7 +407,7 @@ describe("worker MessagePort credit-based pull relay", () => {
   });
 
   test("propagates mid-stream abort and handles 401 non-stream onload + dispose", async () => {
-    const port = await openBridgePort();
+    const { port } = await openBridgePort();
     const worker = createFusHttpTransport(port);
 
     let aborted = false;
@@ -479,6 +479,50 @@ describe("worker MessagePort credit-based pull relay", () => {
       null
     );
     await assert.rejects(() => h3.response, /closed/);
+  });
+
+  test("host dispose aborts active stream even without client close message", async () => {
+    const { port, dispose } = await openBridgePort();
+    const worker = createFusHttpTransport(port);
+
+    let aborted = false;
+    let cancelled = false;
+    gmHandler = (details) => {
+      let step = 0;
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (step++ === 0) controller.enqueue(new Uint8Array([1, 2]));
+          else return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      setTimeout(() => {
+        details.onloadstart({ status: 206, readyState: 2, responseHeaders: "", response: stream });
+      }, 2);
+      return {
+        abort() {
+          aborted = true;
+        },
+      };
+    };
+
+    const h = worker(
+      "GET",
+      "http://cloud-neofussvr.samsungmobile.com/NF_SmartDownloadBinaryForMass.do?file=host-dispose",
+      [["Range", "bytes=0-1048575"]],
+      null
+    );
+    await h.response;
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Simulate worker.terminate() without sending a client "close" message
+    dispose();
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(cancelled, true);
+    assert.equal(aborted, true);
+    worker.dispose();
   });
 });
 

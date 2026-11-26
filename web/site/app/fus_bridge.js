@@ -367,13 +367,19 @@ function createDirectFusHttpTransport(bridge) {
             status,
             headers: parseResponseHeaders(resp.responseHeaders),
             next: async () => {
-              const { done, value } = await activeReader.read();
-              if (done) {
+              try {
+                const { done, value } = await activeReader.read();
+                if (done) {
+                  globalActiveRequests.delete(entry);
+                  reader = null;
+                  return null;
+                }
+                return value;
+              } catch (err) {
                 globalActiveRequests.delete(entry);
                 reader = null;
-                return null;
+                throw err;
               }
-              return value;
             },
           });
         }
@@ -557,6 +563,17 @@ export function attachBridgePortHost(port, bridge) {
       .catch((err) => fail(err?.message || String(err)));
   }
 
+  const dispose = () => {
+    for (const entry of Array.from(active.values())) entry.abort();
+    active.clear();
+    port.onmessage = null;
+    try {
+      port.close();
+    } catch {
+      // Ignore close errors
+    }
+  };
+
   port.onmessage = ({ data: msg }) => {
     if (!msg || typeof msg !== "object") return;
     switch (msg.type) {
@@ -570,24 +587,18 @@ export function attachBridgePortHost(port, bridge) {
         active.get(msg.id)?.abort();
         break;
       case "close":
-        for (const entry of Array.from(active.values())) entry.abort();
-        active.clear();
-        port.onmessage = null;
-        try {
-          port.close();
-        } catch {
-          // Ignore close errors
-        }
+        dispose();
         break;
     }
   };
   port.start();
+  return dispose;
 }
 
 /**
  * Opens a `MessageChannel` whose host end executes requests through the userscript bridge,
- * returning the client `MessagePort` for `workers/download.js`.
- * @returns {Promise<MessagePort>}
+ * returning `{ port, dispose }` for `workers/download.js`.
+ * @returns {Promise<{ port: MessagePort, dispose: () => void }>}
  */
 export async function openBridgePort() {
   if (typeof window === "undefined" || window.location.origin === "null") {
@@ -595,8 +606,8 @@ export async function openBridgePort() {
   }
   const bridge = await ensureBridge();
   const channel = new MessageChannel();
-  attachBridgePortHost(channel.port1, bridge);
-  return channel.port2;
+  const dispose = attachBridgePortHost(channel.port1, bridge);
+  return { port: channel.port2, dispose };
 }
 
 /**

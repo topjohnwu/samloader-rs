@@ -445,10 +445,52 @@ export async function verifyPackageMd5(file) {
  * @returns {Promise<FlashJob>} Job with `flashes_userdata(): boolean`, `erases_userdata(): boolean`,
  *   `execute(backend: string, wait: boolean): Promise<void>` (consumes the job), and `free(): void`
  */
+const FLASH_OPTION_KEYS = new Set([
+  "reboot",
+  "erase",
+  "disable_verity",
+  "disable_verification",
+  "skip_size_check",
+  "sales_code",
+  "skip",
+]);
+
+const FUS_DOWNLOAD_OPTION_KEYS = new Set([
+  "model",
+  "region",
+  "version",
+  "mode",
+  "entryNames",
+  "concurrency",
+  "force",
+]);
+
+function buildWasmOptions(Ctor, input, allowedKeys) {
+  if (input != null && typeof input !== "object") {
+    throw new Error("Options must be an object");
+  }
+  const opts = new Ctor();
+  try {
+    if (input) {
+      for (const [key, value] of Object.entries(input)) {
+        if (!allowedKeys.has(key)) {
+          throw new Error(`Unknown option "${key}"`);
+        }
+        if (value != null) {
+          opts[key] = value;
+        }
+      }
+    }
+    return opts;
+  } catch (err) {
+    opts.free();
+    throw err;
+  }
+}
+
 export async function prepareFlash(files, options = {}) {
   await initWasm();
-  // The generated setters convert each value; unset options keep their defaults
-  const flashOptions = Object.assign(new FlashOptions(), options);
+  const flashOptions = buildWasmOptions(FlashOptions, options, FLASH_OPTION_KEYS);
   return await prepare_flash(files, flashOptions);
 }
 
@@ -491,17 +533,7 @@ export async function fusDownload(params, target, transport, onProgress, signal)
   if (!params || typeof params !== "object") {
     throw new Error("Download parameters must be an object");
   }
-  const options = new FusDownloadOptions();
-  try {
-    for (const [key, value] of Object.entries(params)) {
-      if (value != null) {
-        options[key] = value;
-      }
-    }
-  } catch (err) {
-    options.free();
-    throw err;
-  }
+  const options = buildWasmOptions(FusDownloadOptions, params, FUS_DOWNLOAD_OPTION_KEYS);
   return await fus_download(options, target, transport, onProgress, signal);
 }
 

@@ -54,7 +54,7 @@ async function benchStream({ totalMiB, chunkKiB }) {
   const totalBytes = totalMiB * 1024 * 1024;
   const chunkBytes = chunkKiB * 1024;
   const totalChunks = totalBytes / chunkBytes;
-  const port = await openBridgePort();
+  const { port } = await openBridgePort();
   const worker = createFusHttpTransport(port);
 
   try {

@@ -105,7 +105,7 @@ export async function runDownloadWorker({
   onFileDone = null,
   onCancelReady = null,
 } = {}) {
-  const port = await openBridgePort();
+  const { port, dispose: disposeHost } = await openBridgePort();
   let worker;
   try {
     worker = new Worker(new URL("../workers/download.js", import.meta.url), {
@@ -117,6 +117,7 @@ export async function runDownloadWorker({
     } catch {
       // Ignore close errors
     }
+    disposeHost();
     throw err;
   }
 
@@ -135,6 +136,7 @@ export async function runDownloadWorker({
       if (settled) return;
       settled = true;
       worker.terminate();
+      disposeHost();
       fn();
     };
 

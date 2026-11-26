@@ -53,10 +53,68 @@ function isWindows() {
   return /^win/i.test(navigator.platform || "") || /\bwindows\b/i.test(navigator.userAgent || "");
 }
 
+let panelsInitialized = false;
+
+function initPanels() {
+  if (panelsInitialized) return;
+  panelsInitialized = true;
+
+  if (state.capabilities.canDownload) {
+    const onConnectivityChange = () => {
+      const online = navigator.onLine !== false;
+      if (state.isOnline === online) return;
+      const hadLocalSelection =
+        Object.values(state.slots).some((f) => f !== null) || state.partitions.length > 0;
+      state.isOnline = online;
+      if (online && state.capabilities.canFlash && (hadLocalSelection || state.isBusy)) {
+        state.firmwareSource = "local";
+      }
+      applyCapabilityLayout();
+      updateControlsState();
+      appendLog(
+        online
+          ? "Internet connection restored — download features enabled."
+          : "Offline mode — download features hidden."
+      );
+    };
+    window.addEventListener("online", onConnectivityChange);
+    window.addEventListener("offline", onConnectivityChange);
+  }
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    });
+  }
+
+  setupExclusiveGuards();
+  setupControlsPanel();
+  setupLogPanel();
+  setupFlashPanel();
+  setupDevicePanel();
+  setupSlotsPanel();
+  setupServerPanel();
+}
+
 // --- WASM & Hotplug Initialization ---
 async function setupWasmAndEvents() {
   try {
     await initWasm();
+    const allBackendOptions = await getBackendOptions();
+    const backendOptions = allBackendOptions.filter((b) => isBackendSupported(b.id));
+    const canFlash = backendOptions.length > 0;
+
+    if (!canFlash && !state.capabilities.canDownload) {
+      return;
+    }
+
+    if (state.capabilities.canFlash !== canFlash) {
+      state.capabilities.canFlash = canFlash;
+      applyCapabilityLayout();
+    }
+    initPanels();
+    updateControlsState();
+
     await setProgressCallback(handleProgressEvent);
     setupLogScroller();
     appendLog("WASM engine initialized successfully.");
@@ -64,17 +122,8 @@ async function setupWasmAndEvents() {
     const version = await getVersion();
     setAppVersion(version);
     appendLog(`samloader-web version: ${version}`);
-
-    const allBackendOptions = await getBackendOptions();
-    const backendOptions = allBackendOptions.filter((b) => isBackendSupported(b.id));
     appendLog(`Available backends: ${backendOptions.map((b) => b.id).join(", ") || "none"}`);
 
-    const canFlash = backendOptions.length > 0;
-    if (state.capabilities.canFlash !== canFlash) {
-      state.capabilities.canFlash = canFlash;
-      applyCapabilityLayout();
-      updateControlsState();
-    }
     const capabilityDetails = [
       `flashing=${state.capabilities.canFlash ? "supported" : "unsupported"}`,
       `downloading=${state.capabilities.canDownload ? "supported" : "unsupported"}`,
@@ -114,7 +163,9 @@ async function setupWasmAndEvents() {
       await refreshPairedDevicesStatus();
     }
   } catch (err) {
-    reportError(`WASM Initialization Error: ${err}`);
+    if (panelsInitialized) {
+      reportError(`WASM Initialization Error: ${err}`);
+    }
   }
 }
 
@@ -125,44 +176,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setupThemeToggle();
   applyCapabilityLayout();
 
-  if (!state.capabilities.canFlash && !state.capabilities.canDownload) {
-    return;
+  if (state.capabilities.canFlash || state.capabilities.canDownload) {
+    initPanels();
   }
-
-  if (state.capabilities.canDownload) {
-    const onConnectivityChange = () => {
-      const online = navigator.onLine !== false;
-      if (state.isOnline === online) return;
-      const hadLocalSelection =
-        Object.values(state.slots).some((f) => f !== null) || state.partitions.length > 0;
-      state.isOnline = online;
-      if (online && state.capabilities.canFlash && (hadLocalSelection || state.isBusy)) {
-        state.firmwareSource = "local";
-      }
-      applyCapabilityLayout();
-      updateControlsState();
-      appendLog(
-        online
-          ? "Internet connection restored — download features enabled."
-          : "Offline mode — download features hidden."
-      );
-    };
-    window.addEventListener("online", onConnectivityChange);
-    window.addEventListener("offline", onConnectivityChange);
-  }
-
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
-    });
-  }
-
-  setupExclusiveGuards();
-  setupControlsPanel();
-  setupLogPanel();
-  setupFlashPanel();
-  setupDevicePanel();
-  setupSlotsPanel();
-  setupServerPanel();
   void setupWasmAndEvents();
 });
