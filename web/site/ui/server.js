@@ -116,47 +116,67 @@ function setFirmwareSource(source, persist = true) {
 }
 
 // --- FUS Bridge Status Banner ---
+function getBridgeBannerSpec() {
+  const { connected, version, outdated } = state.fusBridge;
+  const { extensionSupport, isEdgeAndroid } = state.capabilities;
+  const tampermonkeyHtml = isEdgeAndroid
+    ? 'Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> from Edge\'s <strong>Extensions</strong> menu.'
+    : 'Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.';
+
+  if (connected && outdated) {
+    const installedLabel = version ? `v${version}` : "unknown version";
+    return {
+      folded: false,
+      title: "Helper Script Update Available",
+      desc: `Your installed helper script (${installedLabel}) is outdated. Update to v${EXPECTED_BRIDGE_VERSION} for the latest fixes and compatibility.`,
+      showTampermonkey: false,
+      tampermonkeyHtml,
+      installLabel: "Update the helper script:",
+      installText: "Update Script",
+      reloadHtml: "Click <strong>Reload Page</strong> to use the updated script.",
+    };
+  }
+
+  if (extensionSupport === "supported") {
+    return {
+      folded: false,
+      title: "Helper Script Required",
+      desc: "Web browsers block direct downloads from Samsung's firmware servers. Install a small helper script with Tampermonkey so this page can download firmware directly to your device.",
+      showTampermonkey: true,
+      tampermonkeyHtml,
+      installLabel: "Install the helper script:",
+      installText: "Install Script",
+      reloadHtml: "Click <strong>Reload Page</strong> to finish setup.",
+    };
+  }
+
+  return {
+    folded: true,
+    title: "Downloads Not Supported in This Browser",
+    desc:
+      extensionSupport === "unlikely"
+        ? "Downloading firmware directly from Samsung requires the Tampermonkey browser extension, which isn't supported in Chrome on Android. To download firmware, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android."
+        : "Downloading firmware directly from Samsung requires the Tampermonkey browser extension. If your browser doesn't support extensions, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android.",
+    showTampermonkey: true,
+    tampermonkeyHtml,
+    installLabel: "Install the helper script:",
+    installText: "Install Script",
+    reloadHtml: "Click <strong>Reload Page</strong> to finish setup.",
+  };
+}
+
 function renderBridgeBanner() {
   const setupEl = document.getElementById("fus-bridge-setup");
-  const headerEl = document.getElementById("bridge-setup-header");
-  const actionsEl = document.getElementById("bridge-setup-actions");
   const connectedEl = document.getElementById("fus-bridge-connected");
   const badgeTextEl = document.getElementById("fus-bridge-badge-text");
   const titleEl = document.getElementById("fus-bridge-banner-title");
   const descEl = document.getElementById("fus-bridge-banner-desc");
-  const manualDetails = document.getElementById("bridge-manual-install");
-  const manualBody = document.getElementById("bridge-manual-body");
-  const stepsEl = document.getElementById("bridge-steps");
+  const manualToggle = document.getElementById("btn-bridge-manual-toggle");
+  const stepsPanel = document.getElementById("bridge-steps-panel");
   const tampermonkeyStep = document.getElementById("bridge-step-tampermonkey");
   const installStepLabel = document.getElementById("bridge-install-step-label");
   const installLink = document.getElementById("link-install-userscript");
   const reloadStep = document.getElementById("bridge-reload-step");
-
-  const placeInstallSteps = (folded) => {
-    if (folded) {
-      if (manualDetails) manualDetails.hidden = false;
-      if (manualBody) {
-        if (stepsEl && stepsEl.parentElement !== manualBody) {
-          manualBody.appendChild(stepsEl);
-        }
-        if (actionsEl && actionsEl.parentElement !== manualBody) {
-          manualBody.appendChild(actionsEl);
-        }
-      }
-      return;
-    }
-
-    if (manualDetails) {
-      manualDetails.hidden = true;
-      manualDetails.open = false;
-    }
-    if (headerEl && actionsEl && actionsEl.parentElement !== headerEl) {
-      headerEl.appendChild(actionsEl);
-    }
-    if (setupEl && stepsEl && stepsEl.parentElement !== setupEl) {
-      setupEl.appendChild(stepsEl);
-    }
-  };
 
   const { connected, version, outdated } = state.fusBridge;
   if (connected && !outdated) {
@@ -169,59 +189,34 @@ function renderBridgeBanner() {
   }
 
   if (connectedEl) connectedEl.hidden = true;
-  if (setupEl) setupEl.hidden = false;
+  if (!setupEl) return;
+  setupEl.hidden = false;
 
-  const { extensionSupport, isEdgeAndroid } = state.capabilities;
-  const defaultTampermonkeyHtml = isEdgeAndroid
-    ? 'Install <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> from Edge\'s <strong>Extensions</strong> menu.'
-    : 'Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.';
-  const defaultReloadHtml = "Click <strong>Reload Page</strong> to finish setup.";
-
-  if (connected && outdated) {
-    placeInstallSteps(false);
-    const installedLabel = version ? `v${version}` : "unknown version";
-    if (titleEl) titleEl.textContent = "Helper Script Update Available";
-    if (descEl) {
-      descEl.textContent = `Your installed helper script (${installedLabel}) is outdated. Update to v${EXPECTED_BRIDGE_VERSION} for the latest fixes and compatibility.`;
-    }
-    if (tampermonkeyStep) tampermonkeyStep.hidden = true;
-    if (installStepLabel) installStepLabel.textContent = "Update the helper script:";
-    if (installLink) installLink.textContent = "Update Script";
-    if (reloadStep) {
-      reloadStep.innerHTML =
-        "Click <strong>Reload Page</strong> to use the updated script.";
-    }
-  } else if (extensionSupport === "supported") {
-    placeInstallSteps(false);
-    if (titleEl) titleEl.textContent = "Helper Script Required";
-    if (descEl) {
-      descEl.textContent =
-        "Web browsers block direct downloads from Samsung's firmware servers. Install a small helper script with Tampermonkey so this page can download firmware directly to your device.";
-    }
-    if (tampermonkeyStep) {
-      tampermonkeyStep.hidden = false;
-      tampermonkeyStep.innerHTML = defaultTampermonkeyHtml;
-    }
-    if (installStepLabel) installStepLabel.textContent = "Install the helper script:";
-    if (installLink) installLink.textContent = "Install Script";
-    if (reloadStep) reloadStep.innerHTML = defaultReloadHtml;
-  } else {
-    placeInstallSteps(true);
-    if (titleEl) titleEl.textContent = "Downloads Not Supported in This Browser";
-    if (descEl) {
-      descEl.textContent =
-        extensionSupport === "unlikely"
-          ? "Downloading firmware directly from Samsung requires the Tampermonkey browser extension, which isn't supported in Chrome on Android. To download firmware, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android."
-          : "Downloading firmware directly from Samsung requires the Tampermonkey browser extension. If your browser doesn't support extensions, open this page on a computer (Chrome, Edge, Brave, or Opera) or in Microsoft Edge on Android.";
-    }
-    if (tampermonkeyStep) {
-      tampermonkeyStep.hidden = false;
-      tampermonkeyStep.innerHTML = defaultTampermonkeyHtml;
-    }
-    if (installStepLabel) installStepLabel.textContent = "Install the helper script:";
-    if (installLink) installLink.textContent = "Install Script";
-    if (reloadStep) reloadStep.innerHTML = defaultReloadHtml;
+  const spec = getBridgeBannerSpec();
+  setupEl.dataset.folded = String(spec.folded);
+  const manualOpen = spec.folded && setupEl.dataset.manualOpen === "true";
+  if (!spec.folded) {
+    delete setupEl.dataset.manualOpen;
   }
+
+  if (manualToggle) {
+    manualToggle.hidden = !spec.folded;
+    manualToggle.setAttribute("aria-expanded", String(manualOpen));
+  }
+  if (stepsPanel) {
+    stepsPanel.hidden = spec.folded && !manualOpen;
+  }
+  if (titleEl) titleEl.textContent = spec.title;
+  if (descEl) descEl.textContent = spec.desc;
+  if (tampermonkeyStep) {
+    tampermonkeyStep.hidden = !spec.showTampermonkey;
+    if (spec.showTampermonkey) {
+      tampermonkeyStep.innerHTML = spec.tampermonkeyHtml;
+    }
+  }
+  if (installStepLabel) installStepLabel.textContent = spec.installLabel;
+  if (installLink) installLink.textContent = spec.installText;
+  if (reloadStep) reloadStep.innerHTML = spec.reloadHtml;
 }
 
 // --- DVIF Auto-Fill & Bootloader Pill ---
@@ -510,7 +505,7 @@ function renderEntryRows() {
   });
 }
 
-function renderArchiveSection(renderRows = true) {
+function renderArchiveSection(inspectChanged = true) {
   const archiveEl = document.getElementById("server-archive-section");
   const summaryEl = document.getElementById("server-archive-summary");
   const zipNoteEl = document.getElementById("server-zip-note");
@@ -519,7 +514,7 @@ function renderArchiveSection(renderRows = true) {
   if (!archiveEl || !state.serverInspect) return;
   const { info } = state.serverInspect;
 
-  if (summaryEl) {
+  if (inspectChanged && summaryEl) {
     summaryEl.replaceChildren();
     const mainDiv = document.createElement("div");
     mainDiv.className = "archive-summary-main";
@@ -557,7 +552,7 @@ function renderArchiveSection(renderRows = true) {
     entriesWrapEl.hidden = isZipMode;
   }
 
-  if (renderRows) {
+  if (inspectChanged) {
     renderEntryRows();
   }
   archiveEl.hidden = false;
@@ -770,7 +765,17 @@ export function setupServerPanel() {
     });
   });
 
-  // Userscript bridge reload & OPFS cache actions
+  // Userscript bridge manual toggle, reload & OPFS cache actions
+  document.getElementById("btn-bridge-manual-toggle")?.addEventListener("click", () => {
+    const setupEl = document.getElementById("fus-bridge-setup");
+    const manualToggle = document.getElementById("btn-bridge-manual-toggle");
+    const stepsPanel = document.getElementById("bridge-steps-panel");
+    if (!setupEl || !manualToggle || !stepsPanel) return;
+    const nextOpen = setupEl.dataset.manualOpen !== "true";
+    setupEl.dataset.manualOpen = String(nextOpen);
+    manualToggle.setAttribute("aria-expanded", String(nextOpen));
+    stepsPanel.hidden = !nextOpen;
+  });
   reloadBridgeBtn?.addEventListener("click", () => {
     window.location.reload();
   });
@@ -838,10 +843,14 @@ export function setupServerPanel() {
   });
 
   inspectCustomBtn?.addEventListener("click", async () => {
+    const model = getLookupModel();
+    const region = getLookupRegion();
     const customVer = normalizeUpperInput(customVerInput);
     state.serverCustomVersion = customVer;
-    if (!customVer) return;
-    await inspectFirmwareVersion(getLookupModel(), getLookupRegion(), customVer);
+    if (!model || !region || !customVer) return;
+    writeStorage(STORAGE_MODEL, model);
+    writeStorage(STORAGE_REGION, region);
+    await inspectFirmwareVersion(model, region, customVer);
   });
 
   // Output format & parallel connections

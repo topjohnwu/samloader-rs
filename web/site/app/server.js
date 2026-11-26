@@ -197,12 +197,12 @@ export async function checkFirmwareVersions(model, region) {
       (history.beta?.length ?? 0);
     appendLog(`Found ${count} firmware version(s); latest is ${history.latest}.`);
 
-    state.serverQuerying = false;
-    state.serverQueryPhase = null;
-    notifyStateChange();
-
     if (history.latest) {
       await inspectFirmwareVersion(model, region, history.latest);
+    } else {
+      state.serverQuerying = false;
+      state.serverQueryPhase = null;
+      notifyStateChange();
     }
   } catch (err) {
     const msg = err?.message || String(err);

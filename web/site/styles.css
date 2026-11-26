@@ -1359,7 +1359,7 @@ textarea {
 
 .advanced-options[open] .fold-chevron,
 .log-toggle[aria-expanded="true"] .fold-chevron,
-.bridge-manual-install[open] .fold-chevron {
+.bridge-manual-summary[aria-expanded="true"] .fold-chevron {
   transform: rotate(90deg);
 }
 
@@ -1932,26 +1932,24 @@ textarea {
   text-decoration: none;
 }
 
-.bridge-manual-install {
-  margin-top: 2px;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-}
-
 .bridge-manual-summary {
   display: inline-flex;
   align-items: center;
+  align-self: flex-start;
   gap: 6px;
+  margin-top: 2px;
+  padding: 8px 0 0;
+  border: none;
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  width: 100%;
+  background: none;
+  color: inherit;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
-  list-style: none;
   user-select: none;
   border-radius: var(--md-shape-xs);
-}
-
-.bridge-manual-summary::-webkit-details-marker {
-  display: none;
+  text-align: left;
 }
 
 .bridge-manual-summary:hover {
@@ -1970,11 +1968,14 @@ textarea {
   color: currentColor;
 }
 
-.bridge-manual-body {
+.bridge-steps-panel {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 8px;
+}
+
+.bridge-setup-banner[data-folded="true"]:not([data-manual-open="true"]) .bridge-setup-actions {
+  display: none;
 }
 
 .fus-bridge-connected {

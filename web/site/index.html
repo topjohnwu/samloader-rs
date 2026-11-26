@@ -230,25 +230,24 @@
               <p id="fus-bridge-banner-desc" class="bridge-setup-desc">
                 Web browsers block direct downloads from Samsung's firmware servers. Install a small helper script with Tampermonkey so this page can download firmware directly to your device.
               </p>
-              <details id="bridge-manual-install" class="bridge-manual-install" hidden>
-                <summary class="bridge-manual-summary">
-                  <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <span>My browser supports extensions — show setup steps</span>
-                </summary>
-                <div id="bridge-manual-body" class="bridge-manual-body"></div>
-              </details>
-              <ol id="bridge-steps" class="bridge-steps">
-                <li id="bridge-step-tampermonkey">Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.</li>
-                <li class="bridge-install-step">
-                  <span id="bridge-install-step-label">Install the helper script:</span>
-                  <span class="bridge-install-actions">
-                    <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Script</a>
-                  </span>
-                </li>
-                <li id="bridge-reload-step">Click <strong>Reload Page</strong> to finish setup.</li>
-              </ol>
+              <button type="button" id="btn-bridge-manual-toggle" class="bridge-manual-summary" aria-expanded="false" aria-controls="bridge-steps-panel" hidden>
+                <svg class="fold-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M8 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span>My browser supports extensions — show setup steps</span>
+              </button>
+              <div id="bridge-steps-panel" class="bridge-steps-panel">
+                <ol id="bridge-steps" class="bridge-steps">
+                  <li id="bridge-step-tampermonkey">Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> extension.</li>
+                  <li class="bridge-install-step">
+                    <span id="bridge-install-step-label">Install the helper script:</span>
+                    <span class="bridge-install-actions">
+                      <a id="link-install-userscript" class="btn btn-sm btn-primary" href="samloader-fus-bridge.user.js" target="_blank" rel="noopener">Install Script</a>
+                    </span>
+                  </li>
+                  <li id="bridge-reload-step">Click <strong>Reload Page</strong> to finish setup.</li>
+                </ol>
+              </div>
             </div>
             <div id="fus-bridge-connected" class="fus-bridge-connected" hidden>
               <div id="fus-bridge-badge" class="fus-bridge-badge">

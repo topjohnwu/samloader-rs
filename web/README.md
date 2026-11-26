@@ -102,19 +102,21 @@ web/
     │   ├── flash.js                 # Flash job orchestration & EMA speed/ETA tracking
     │   ├── format.js                # Byte-size and duration formatting helpers
     │   ├── fus_bridge.js            # Main-thread & Worker MessagePort transport over userscript
-    │   ├── logger.js                # App logging and error-reporting facade over WASM buffer
+    │   ├── logger.js                # App log buffer and error-reporting hooks
+    │   ├── opfs.js                  # OPFS staging manifest management and cache queries
     │   ├── server.js                # FUS bridge probing, history lookup, inspect & selection state
     │   ├── slots.js                 # Odin slot/partition state & sequential MD5 worker queue
-    │   └── state.js                 # Shared application state and Odin slot metadata
+    │   └── state.js                 # Shared state, reactive store, and derived selectors
     ├── workers/
     │   ├── download.js              # Module Web Worker running concurrent FUS downloads & DEFLATE
     │   └── md5.js                   # Module Web Worker running streaming .tar.md5 checks
     ├── ui/
-    │   ├── controls.js              # View visibility, button enablement & header/advanced controls
+    │   ├── controls.js              # Layout visibility, header, advanced options & action buttons
     │   ├── device.js                # Device list, DVIF telemetry grid & PIT save UI
-    │   ├── download.js              # OPFS cache banner, picker/wipe prompts & progress UI
-    │   ├── flash.js                 # Flashing progress bar, outcome banner & action bar UI
-    │   ├── log.js                   # Virtualized Rust-backed activity log panel
+    │   ├── download.js              # OPFS cache banner, picker/wipe prompts & progress adapter
+    │   ├── flash.js                 # Flash progress speed/ETA & outcome adapter
+    │   ├── log.js                   # Virtualized activity log panel
+    │   ├── operation.js             # Shared action-bar progress, cancel & result banner controller
     │   ├── server.js                # Samsung Server panel rendering, preferences & events
     │   ├── slots.js                 # Package slot dropzones, MD5 badges & sortable partitions UI
     │   ├── theme.js                 # Light / Dark / System theme switcher
