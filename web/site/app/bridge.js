@@ -15,15 +15,12 @@
 import init, {
   FlashOptions,
   FusDownloadOptions,
-  clear_opfs_cache,
   detect_download_device,
   device_mode,
   fus_download,
   fus_fetch_history,
   fus_inspect_firmware,
   get_backend_options,
-  opfs_build_files,
-  opfs_cache_info,
   pair_download_device,
   pair_samsung_device,
   prepare_flash,
@@ -37,19 +34,6 @@ import init, {
 } from "../pkg/samloader_web.js";
 
 let initPromise = null;
-let mockPairedDevice = null;
-
-function createMockDevice(productId) {
-  return {
-    vendorId: 0x04e8,
-    productId,
-    productName: "Samsung SM-F968B (Simulated)",
-    serialNumber: "C1A2B3C4",
-    disconnect: async () => {
-      mockPairedDevice = null;
-    },
-  };
-}
 
 /**
  * Initializes the samloader-web WASM module if not already initialized.
@@ -114,90 +98,6 @@ export function deviceMode(vid, pid) {
 }
 
 /**
- * Checks whether the current browser context supports WebUSB.
- */
-export function isWebUsbSupported() {
-  return typeof navigator !== "undefined" && "usb" in navigator;
-}
-
-/**
- * Checks whether the current browser context supports WebSerial.
- */
-export function isWebSerialSupported() {
-  return typeof navigator !== "undefined" && "serial" in navigator;
-}
-
-/**
- * Checks whether the current browser context supports the specified backend.
- * @param {string} backend Backend option ("nusb", "vcom", "mock")
- */
-export function isBackendSupported(backend) {
-  if (backend === "mock") return true;
-  if (backend === "vcom") return isWebSerialSupported();
-  if (backend === "nusb") return isWebUsbSupported();
-  return false;
-}
-
-/**
- * Lists currently paired devices for the specified backend with a normalized shape.
- * @param {string} [backend="nusb"] Backend option ("nusb", "vcom", "mock")
- */
-export async function getPairedDevices(backend = "nusb") {
-  if (backend === "mock") {
-    return mockPairedDevice ? [mockPairedDevice] : [];
-  }
-  if (backend === "vcom") {
-    if (!isWebSerialSupported()) {
-      return [];
-    }
-    const ports = await navigator.serial.getPorts();
-    return ports
-      .map((port) => {
-        const info = port.getInfo ? port.getInfo() : {};
-        return {
-          vendorId: info.usbVendorId,
-          productId: info.usbProductId,
-          productName: "Samsung Serial Port",
-          serialNumber: undefined,
-          disconnect: async () => {
-            try {
-              await port.close();
-            } catch {
-              // Port may not be open
-            }
-            if (typeof port.forget === "function") {
-              await port.forget();
-            }
-          },
-        };
-      })
-      .filter((d) => d.vendorId != null && d.productId != null);
-  }
-  if (backend !== "nusb" || !isWebUsbSupported()) {
-    return [];
-  }
-  const devices = await navigator.usb.getDevices();
-  return devices.map((d) => ({
-    vendorId: d.vendorId,
-    productId: d.productId,
-    productName: d.productName,
-    serialNumber: d.serialNumber,
-    disconnect: async () => {
-      if (d.opened) {
-        try {
-          await d.close();
-        } catch {
-          // Device may already be closing
-        }
-      }
-      if (typeof d.forget === "function") {
-        await d.forget();
-      }
-    },
-  }));
-}
-
-/**
  * Prompts the browser's device picker filtered for Samsung Download Mode PIDs.
  * Must be invoked from a user gesture (click handler).
  * @param {string} [backend] Optional backend name ("nusb", "vcom", "mock")
@@ -205,9 +105,6 @@ export async function getPairedDevices(backend = "nusb") {
 export async function pairDownloadDevice(backend) {
   await initWasm();
   await pair_download_device(backend);
-  if (backend === "mock") {
-    mockPairedDevice = createMockDevice(0x685d);
-  }
 }
 
 /**
@@ -219,9 +116,6 @@ export async function pairDownloadDevice(backend) {
 export async function pairSamsungDevice(backend) {
   await initWasm();
   await pair_samsung_device(backend);
-  if (backend === "mock") {
-    mockPairedDevice = createMockDevice(0x6860);
-  }
 }
 
 /**
@@ -409,31 +303,4 @@ export async function fusDownload(params, target, transport, onProgress, signal)
   }
   const options = buildWasmOptions(FusDownloadOptions, params, FUS_DOWNLOAD_OPTION_KEYS);
   return await fus_download(options, target, transport, onProgress, signal);
-}
-
-/**
- * Reads the OPFS staging manifest and sums the byte sizes of cached files.
- * @returns {Promise<{ buildKey: string, model: string, region: string, version: string, decryptedFilename: string, fingerprintHex: string, totalBytes: number, complete: boolean, files: { name: string, component: string | null, size: number }[] } | null>}
- */
-export async function getOpfsCacheInfo() {
-  await initWasm();
-  return await opfs_cache_info();
-}
-
-/**
- * Opens seekable `File` handles for every completed file in the staged OPFS build `buildKey`.
- * @param {string} buildKey
- * @returns {Promise<{ name: string, component: string | null, file: File }[]>}
- */
-export async function getOpfsBuildFiles(buildKey) {
-  await initWasm();
-  return await opfs_build_files(buildKey);
-}
-
-/**
- * Recursively deletes the `samloader-staging/` directory in OPFS.
- */
-export async function clearOpfsCache() {
-  await initWasm();
-  await clear_opfs_cache();
 }

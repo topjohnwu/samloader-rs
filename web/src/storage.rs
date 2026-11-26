@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! Browser storage adapters (OPFS `FileSystemSyncAccessHandle` and File System Access
-//! `FileSystemDirectoryHandle`) plus OPFS staging manifest management.
+//! `FileSystemDirectoryHandle`).
 
-use crate::{js_err_string, js_obj};
+use crate::js_err_string;
 use futures::channel::oneshot;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,15 +23,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     File, FileSystemCreateWritableOptions, FileSystemDirectoryHandle, FileSystemFileHandle,
-    FileSystemGetDirectoryOptions, FileSystemGetFileOptions, FileSystemHandle,
-    FileSystemHandleKind, FileSystemReadWriteOptions, FileSystemRemoveOptions,
-    FileSystemSyncAccessHandle, FileSystemWritableFileStream, MessageChannel, StorageManager,
-    WriteCommandType, WriteParams,
+    FileSystemGetFileOptions, FileSystemReadWriteOptions, FileSystemRemoveOptions,
+    FileSystemSyncAccessHandle, FileSystemWritableFileStream, MessageChannel, WriteCommandType,
+    WriteParams,
 };
-
-const STAGING_DIR_NAME: &str = "samloader-staging";
-const MANIFEST_FILE_NAME: &str = "manifest.json";
-const FILES_DIR_NAME: &str = "files";
 
 #[wasm_bindgen]
 extern "C" {
@@ -85,62 +80,36 @@ fn validate_filename(filename: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn get_storage_manager() -> Option<StorageManager> {
-    let global = js_sys::global();
-    let nav = js_sys::Reflect::get(&global, &"navigator".into()).ok()?;
-    let storage = js_sys::Reflect::get(&nav, &"storage".into()).ok()?;
-    storage.dyn_into::<StorageManager>().ok()
-}
-
-async fn get_opfs_root_opt() -> Result<Option<FileSystemDirectoryHandle>, String> {
-    let Some(manager) = get_storage_manager() else {
-        return Ok(None);
-    };
-    let dir = JsFuture::from(manager.get_directory())
-        .await
-        .map_err(|e| err_str("navigator.storage.getDirectory()", e))?;
-    Ok(Some(dir.unchecked_into()))
-}
-
-async fn get_opfs_root() -> Result<FileSystemDirectoryHandle, String> {
-    get_opfs_root_opt().await?.ok_or_else(|| {
-        "Origin Private File System (OPFS) is not supported in this context".to_string()
-    })
-}
-
-async fn get_dir_handle(
-    parent: &FileSystemDirectoryHandle,
-    name: &str,
-    create: bool,
-) -> Result<Option<FileSystemDirectoryHandle>, String> {
-    let opts = FileSystemGetDirectoryOptions::new();
-    opts.set_create(create);
-    match JsFuture::from(parent.get_directory_handle_with_options(name, &opts)).await {
-        Ok(val) => Ok(Some(val.unchecked_into())),
-        Err(err) if !create && is_not_found(&err) => Ok(None),
-        Err(err) => Err(err_str(&format!("getDirectoryHandle('{name}')"), err)),
-    }
-}
-
-async fn get_file_handle(
+async fn get_file_opt(
     dir: &FileSystemDirectoryHandle,
     name: &str,
-    create: bool,
 ) -> Result<Option<FileSystemFileHandle>, String> {
     let opts = FileSystemGetFileOptions::new();
-    opts.set_create(create);
+    opts.set_create(false);
     match JsFuture::from(dir.get_file_handle_with_options(name, &opts)).await {
         Ok(val) => Ok(Some(val.unchecked_into())),
-        Err(err) if !create && is_not_found(&err) => Ok(None),
+        Err(err) if is_not_found(&err) => Ok(None),
         Err(err) => Err(err_str(&format!("getFileHandle('{name}')"), err)),
     }
+}
+
+async fn ensure_file(
+    dir: &FileSystemDirectoryHandle,
+    name: &str,
+) -> Result<FileSystemFileHandle, String> {
+    let opts = FileSystemGetFileOptions::new();
+    opts.set_create(true);
+    let val = JsFuture::from(dir.get_file_handle_with_options(name, &opts))
+        .await
+        .map_err(|e| err_str(&format!("getFileHandle('{name}')"), e))?;
+    Ok(val.unchecked_into())
 }
 
 async fn get_file_if_exists(
     dir: &FileSystemDirectoryHandle,
     name: &str,
 ) -> Result<Option<File>, String> {
-    let Some(fh) = get_file_handle(dir, name, false).await? else {
+    let Some(fh) = get_file_opt(dir, name).await? else {
         return Ok(None);
     };
     let file = JsFuture::from(fh.get_file())
@@ -150,7 +119,7 @@ async fn get_file_if_exists(
 }
 
 async fn file_exists(dir: &FileSystemDirectoryHandle, name: &str) -> Result<bool, String> {
-    Ok(get_file_handle(dir, name, false).await?.is_some())
+    Ok(get_file_opt(dir, name).await?.is_some())
 }
 
 async fn remove_entry_if_exists(
@@ -287,368 +256,6 @@ async fn move_file_replacing(
     Ok(())
 }
 
-// --- OPFS Manifest ---
-
-#[derive(Clone, Debug)]
-pub(crate) struct OpfsFileEntry {
-    pub name: String,
-    pub component: Option<String>,
-    pub size: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct OpfsBuildMeta {
-    pub build_key: String,
-    pub model: String,
-    pub region: String,
-    pub version: String,
-    pub decrypted_filename: String,
-    pub fingerprint_hex: String,
-}
-
-#[derive(Clone, Debug)]
-struct OpfsManifest {
-    meta: OpfsBuildMeta,
-    complete: bool,
-    files: Vec<OpfsFileEntry>,
-}
-
-impl OpfsManifest {
-    fn to_js(&self, total_bytes: Option<u64>) -> JsValue {
-        let files_js = js_sys::Array::new();
-        for f in &self.files {
-            let component = match &f.component {
-                Some(c) => JsValue::from_str(c),
-                None => JsValue::NULL,
-            };
-            files_js.push(&js_obj! {
-                "name" => f.name.as_str(),
-                "component" => component,
-                "size" => f.size as f64,
-            });
-        }
-        let obj = js_obj! {
-            "buildKey" => self.meta.build_key.as_str(),
-            "model" => self.meta.model.as_str(),
-            "region" => self.meta.region.as_str(),
-            "version" => self.meta.version.as_str(),
-            "decryptedFilename" => self.meta.decrypted_filename.as_str(),
-            "fingerprintHex" => self.meta.fingerprint_hex.as_str(),
-            "complete" => self.complete,
-            "files" => files_js,
-        };
-        if let Some(bytes) = total_bytes {
-            let _ = js_sys::Reflect::set(&obj, &"totalBytes".into(), &(bytes as f64).into());
-        }
-        obj
-    }
-
-    fn from_json(raw: &str) -> Option<Self> {
-        let val = js_sys::JSON::parse(raw).ok()?;
-        if val.is_null() || !val.is_object() {
-            return None;
-        }
-        let build_key = get_prop_str(&val, "buildKey")?;
-        let complete = js_sys::Reflect::get(&val, &"complete".into())
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let mut files = Vec::new();
-        if let Ok(arr_val) = js_sys::Reflect::get(&val, &"files".into())
-            && let Ok(arr) = arr_val.dyn_into::<js_sys::Array>()
-        {
-            for item in arr.iter() {
-                if let Some(name) = get_prop_str(&item, "name") {
-                    let component = get_prop_str(&item, "component");
-                    let size = js_sys::Reflect::get(&item, &"size".into())
-                        .ok()
-                        .and_then(|v| v.as_f64())
-                        .filter(|n| n.is_finite() && *n >= 0.0)
-                        .unwrap_or(0.0) as u64;
-                    files.push(OpfsFileEntry {
-                        name,
-                        component,
-                        size,
-                    });
-                }
-            }
-        }
-        Some(Self {
-            meta: OpfsBuildMeta {
-                build_key,
-                model: get_prop_str(&val, "model").unwrap_or_default(),
-                region: get_prop_str(&val, "region").unwrap_or_default(),
-                version: get_prop_str(&val, "version").unwrap_or_default(),
-                decrypted_filename: get_prop_str(&val, "decryptedFilename").unwrap_or_default(),
-                fingerprint_hex: get_prop_str(&val, "fingerprintHex").unwrap_or_default(),
-            },
-            complete,
-            files,
-        })
-    }
-}
-
-async fn read_manifest(
-    staging_dir: &FileSystemDirectoryHandle,
-) -> Result<Option<OpfsManifest>, String> {
-    let Some(file) = get_file_if_exists(staging_dir, MANIFEST_FILE_NAME).await? else {
-        return Ok(None);
-    };
-    let bytes = read_file_bytes(&file).await?;
-    let Ok(raw) = String::from_utf8(bytes) else {
-        return Ok(None);
-    };
-    Ok(OpfsManifest::from_json(&raw))
-}
-
-async fn write_manifest(
-    staging_dir: &FileSystemDirectoryHandle,
-    manifest: &OpfsManifest,
-) -> Result<(), String> {
-    let text = js_sys::JSON::stringify(&manifest.to_js(None))
-        .map_err(|e| err_str("JSON.stringify(manifest)", e))?
-        .as_string()
-        .ok_or_else(|| "JSON.stringify(manifest) did not return a string".to_string())?;
-    let fh = get_file_handle(staging_dir, MANIFEST_FILE_NAME, true)
-        .await?
-        .ok_or_else(|| "Failed to create manifest file handle".to_string())?;
-
-    if !has_method(fh.as_ref(), "createSyncAccessHandle") {
-        return Err("OPFS manifest write must run in a Web Worker".to_string());
-    }
-    let sync_val = JsFuture::from(fh.create_sync_access_handle())
-        .await
-        .map_err(|e| err_str("manifest createSyncAccessHandle()", e))?;
-    let sync_handle: FileSystemSyncAccessHandle = sync_val.unchecked_into();
-    let res = (|| {
-        sync_handle
-            .truncate_with_f64(0.0)
-            .map_err(|e| err_str("manifest truncate()", e))?;
-        write_sync_all(&sync_handle, text.as_bytes(), 0)?;
-        sync_handle
-            .flush()
-            .map_err(|e| err_str("manifest flush()", e))
-    })();
-    sync_handle.close();
-    res
-}
-
-pub(crate) async fn prepare_opfs_build(meta: &OpfsBuildMeta) -> Result<(), String> {
-    if meta.build_key.is_empty() {
-        return Err("prepare_opfs_build requires a non-empty buildKey".to_string());
-    }
-    let root = get_opfs_root().await?;
-    let staging_dir = get_dir_handle(&root, STAGING_DIR_NAME, true)
-        .await?
-        .ok_or_else(|| "Failed to open OPFS staging directory".to_string())?;
-    let existing = read_manifest(&staging_dir).await?;
-    let same_build = existing
-        .as_ref()
-        .is_some_and(|m| m.meta.build_key == meta.build_key);
-
-    if !same_build {
-        remove_entry_if_exists(&staging_dir, FILES_DIR_NAME, true).await?;
-    }
-    let _ = get_dir_handle(&staging_dir, FILES_DIR_NAME, true).await?;
-
-    let pick = |new: &str, old: Option<&str>| {
-        if !new.is_empty() {
-            new.to_string()
-        } else {
-            old.unwrap_or_default().to_string()
-        }
-    };
-    let old_meta = existing.as_ref().map(|m| &m.meta);
-    let next_manifest = OpfsManifest {
-        meta: OpfsBuildMeta {
-            build_key: meta.build_key.clone(),
-            model: pick(&meta.model, old_meta.map(|m| m.model.as_str())),
-            region: pick(&meta.region, old_meta.map(|m| m.region.as_str())),
-            version: pick(&meta.version, old_meta.map(|m| m.version.as_str())),
-            decrypted_filename: pick(
-                &meta.decrypted_filename,
-                old_meta.map(|m| m.decrypted_filename.as_str()),
-            ),
-            fingerprint_hex: pick(
-                &meta.fingerprint_hex,
-                old_meta.map(|m| m.fingerprint_hex.as_str()),
-            ),
-        },
-        complete: false,
-        files: if same_build {
-            existing.map(|m| m.files).unwrap_or_default()
-        } else {
-            Vec::new()
-        },
-    };
-    write_manifest(&staging_dir, &next_manifest).await
-}
-
-pub(crate) async fn mark_opfs_build_complete(
-    build_key: &str,
-    files: &[OpfsFileEntry],
-) -> Result<(), String> {
-    let root = get_opfs_root().await?;
-    let staging_dir = get_dir_handle(&root, STAGING_DIR_NAME, true)
-        .await?
-        .ok_or_else(|| "Failed to open OPFS staging directory".to_string())?;
-    let mut manifest = read_manifest(&staging_dir)
-        .await?
-        .filter(|m| m.meta.build_key == build_key)
-        .ok_or_else(|| "OPFS staging manifest does not match buildKey".to_string())?;
-    manifest.complete = true;
-    manifest.files = files.to_vec();
-    write_manifest(&staging_dir, &manifest).await
-}
-
-// --- Exported OPFS Cache Management API ---
-
-/// Reads the OPFS staging manifest and sums the actual byte sizes of files in `files/`
-/// (including active `.part` files). Returns `null` if OPFS is unavailable or empty.
-#[wasm_bindgen]
-pub async fn opfs_cache_info() -> Result<JsValue, JsValue> {
-    let Some(root) = get_opfs_root_opt()
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-    else {
-        return Ok(JsValue::NULL);
-    };
-    let Some(staging_dir) = get_dir_handle(&root, STAGING_DIR_NAME, false)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-    else {
-        return Ok(JsValue::NULL);
-    };
-
-    let manifest = read_manifest(&staging_dir)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?;
-
-    let mut total_bytes = 0u64;
-    let mut has_files = false;
-    if let Some(files_dir) = get_dir_handle(&staging_dir, FILES_DIR_NAME, false)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-    {
-        let iter = files_dir.entries();
-        loop {
-            let promise = iter
-                .next()
-                .map_err(|e| JsValue::from_str(&js_err_string(&e)))?;
-            let step = JsFuture::from(promise)
-                .await
-                .map_err(|e| JsValue::from_str(&js_err_string(&e)))?;
-            if js_sys::Reflect::get(&step, &"done".into())
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true)
-            {
-                break;
-            }
-            let Ok(pair_val) = js_sys::Reflect::get(&step, &"value".into()) else {
-                continue;
-            };
-            let Ok(pair) = pair_val.dyn_into::<js_sys::Array>() else {
-                continue;
-            };
-            let Some(name) = pair.get(0).as_string() else {
-                continue;
-            };
-            let handle: FileSystemHandle = pair.get(1).unchecked_into();
-            if handle.kind() != FileSystemHandleKind::File {
-                continue;
-            }
-            has_files = true;
-            if name.ends_with(".part.meta") {
-                continue;
-            }
-            let fh: FileSystemFileHandle = handle.unchecked_into();
-            if let Ok(file_val) = JsFuture::from(fh.get_file()).await {
-                let file: File = file_val.unchecked_into();
-                total_bytes = total_bytes.saturating_add(file.size() as u64);
-            }
-        }
-    }
-
-    match manifest {
-        Some(m) => Ok(m.to_js(Some(total_bytes))),
-        None if !has_files && total_bytes == 0 => Ok(JsValue::NULL),
-        None => Ok(js_obj! {
-            "buildKey" => "",
-            "model" => "",
-            "region" => "",
-            "version" => "Unindexed cached files",
-            "decryptedFilename" => "",
-            "fingerprintHex" => "",
-            "totalBytes" => total_bytes as f64,
-            "complete" => false,
-            "files" => js_sys::Array::new(),
-        }),
-    }
-}
-
-/// Opens seekable `File` handles for every completed file in the staged OPFS build `build_key`.
-#[wasm_bindgen]
-pub async fn opfs_build_files(build_key: String) -> Result<JsValue, JsValue> {
-    let root = get_opfs_root().await.map_err(|e| JsValue::from_str(&e))?;
-    let staging_dir = get_dir_handle(&root, STAGING_DIR_NAME, false)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-        .ok_or_else(|| JsValue::from_str("OPFS staging directory not found"))?;
-    let manifest = read_manifest(&staging_dir)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-        .filter(|m| m.meta.build_key == build_key)
-        .ok_or_else(|| {
-            JsValue::from_str("OPFS staging manifest does not match requested buildKey")
-        })?;
-    if !manifest.complete {
-        return Err(JsValue::from_str("OPFS build is not complete"));
-    }
-
-    let files_dir = get_dir_handle(&staging_dir, FILES_DIR_NAME, false)
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-        .ok_or_else(|| JsValue::from_str("OPFS files directory not found"))?;
-
-    let results = js_sys::Array::new();
-    for entry in &manifest.files {
-        validate_filename(&entry.name).map_err(|e| JsValue::from_str(&e))?;
-        let fh = get_file_handle(&files_dir, &entry.name, false)
-            .await
-            .map_err(|e| JsValue::from_str(&e))?
-            .ok_or_else(|| JsValue::from_str(&format!("Cached file '{}' not found", entry.name)))?;
-        let file: File = JsFuture::from(fh.get_file())
-            .await
-            .map_err(|e| JsValue::from_str(&err_str("getFile()", e)))?
-            .unchecked_into();
-        let component = match &entry.component {
-            Some(c) => JsValue::from_str(c),
-            None => JsValue::NULL,
-        };
-        results.push(&js_obj! {
-            "name" => entry.name.as_str(),
-            "component" => component,
-            "file" => file,
-        });
-    }
-    Ok(results.into())
-}
-
-/// Recursively deletes the `samloader-staging/` directory in OPFS.
-#[wasm_bindgen]
-pub async fn clear_opfs_cache() -> Result<(), JsValue> {
-    let Some(root) = get_opfs_root_opt()
-        .await
-        .map_err(|e| JsValue::from_str(&e))?
-    else {
-        return Ok(());
-    };
-    remove_entry_if_exists(&root, STAGING_DIR_NAME, true)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
-}
-
 // --- Macrotask Yielder (prevents tight OPFS DEFLATE bursts from starving MessagePort / CANCEL) ---
 
 struct MacrotaskYielder {
@@ -701,10 +308,7 @@ impl Drop for MacrotaskYielder {
 // --- Download Storage Backends ---
 
 pub(crate) enum DownloadTarget {
-    Opfs {
-        build_key: String,
-        meta: OpfsBuildMeta,
-    },
+    Opfs(FileSystemDirectoryHandle),
     Directory(FileSystemDirectoryHandle),
 }
 
@@ -714,49 +318,13 @@ impl DownloadTarget {
             return Err("Missing download storage target".to_string());
         }
         let kind = get_prop_str(val, "kind").unwrap_or_default();
+        let handle = js_sys::Reflect::get(val, &"dirHandle".into())
+            .map_err(|e| err_str("target.dirHandle", e))?
+            .dyn_into::<FileSystemDirectoryHandle>()
+            .map_err(|_| "Storage target requires a valid FileSystemDirectoryHandle".to_string())?;
         match kind.as_str() {
-            "opfs" => {
-                let build_key = get_prop_str(val, "buildKey")
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| "OPFS storage target requires buildKey".to_string())?;
-                let meta_val = js_sys::Reflect::get(val, &"meta".into())
-                    .ok()
-                    .filter(|v| !v.is_null() && v.is_object());
-                let meta = OpfsBuildMeta {
-                    build_key: build_key.clone(),
-                    model: meta_val
-                        .as_ref()
-                        .and_then(|m| get_prop_str(m, "model"))
-                        .unwrap_or_default(),
-                    region: meta_val
-                        .as_ref()
-                        .and_then(|m| get_prop_str(m, "region"))
-                        .unwrap_or_default(),
-                    version: meta_val
-                        .as_ref()
-                        .and_then(|m| get_prop_str(m, "version"))
-                        .unwrap_or_default(),
-                    decrypted_filename: meta_val
-                        .as_ref()
-                        .and_then(|m| get_prop_str(m, "decryptedFilename"))
-                        .unwrap_or_default(),
-                    fingerprint_hex: meta_val
-                        .as_ref()
-                        .and_then(|m| get_prop_str(m, "fingerprintHex"))
-                        .unwrap_or_default(),
-                };
-                Ok(Self::Opfs { build_key, meta })
-            }
-            "directory" => {
-                let handle = js_sys::Reflect::get(val, &"dirHandle".into())
-                    .map_err(|e| err_str("target.dirHandle", e))?
-                    .dyn_into::<FileSystemDirectoryHandle>()
-                    .map_err(|_| {
-                        "Directory storage target requires a valid FileSystemDirectoryHandle"
-                            .to_string()
-                    })?;
-                Ok(Self::Directory(handle))
-            }
+            "opfs" => Ok(Self::Opfs(handle)),
+            "directory" => Ok(Self::Directory(handle)),
             other => Err(format!("Unsupported storage target kind: {other}")),
         }
     }
@@ -820,9 +388,7 @@ async fn dir_open_part(
         existed
     };
 
-    let data_handle = get_file_handle(dir, &data_name, true)
-        .await?
-        .ok_or_else(|| format!("Failed to open data file handle '{data_name}'"))?;
+    let data_handle = ensure_file(dir, &data_name).await?;
 
     Ok((
         OpenedPartDir {
@@ -842,26 +408,10 @@ async fn finalize_opfs_part(part_dir: &OpenedPartDir) -> Result<(), String> {
 }
 
 impl DownloadStorage {
-    pub(crate) async fn open(target: &DownloadTarget) -> Result<Self, String> {
+    pub(crate) fn open(target: &DownloadTarget) -> Self {
         match target {
-            DownloadTarget::Opfs { build_key, .. } => {
-                let root = get_opfs_root().await?;
-                let staging_dir = get_dir_handle(&root, STAGING_DIR_NAME, true)
-                    .await?
-                    .ok_or_else(|| "Failed to open OPFS staging directory".to_string())?;
-                let manifest = read_manifest(&staging_dir).await?;
-                if !manifest
-                    .as_ref()
-                    .is_some_and(|m| m.meta.build_key == *build_key)
-                {
-                    return Err("OPFS staging manifest missing or buildKey mismatch".to_string());
-                }
-                let files_dir = get_dir_handle(&staging_dir, FILES_DIR_NAME, true)
-                    .await?
-                    .ok_or_else(|| "Failed to open OPFS files directory".to_string())?;
-                Ok(Self::Opfs(files_dir))
-            }
-            DownloadTarget::Directory(dir) => Ok(Self::Directory(dir.clone())),
+            DownloadTarget::Opfs(dir) => Self::Opfs(dir.clone()),
+            DownloadTarget::Directory(dir) => Self::Directory(dir.clone()),
         }
     }
 
@@ -1115,11 +665,7 @@ impl PartHandle {
                     .flush()
                     .map_err(|e| err_str("OPFS data flush()", e))?;
                 if h.meta_sync.is_none() {
-                    let meta_fh = get_file_handle(&h.part_dir.dir, &h.part_dir.meta_name, true)
-                        .await?
-                        .ok_or_else(|| {
-                            "Failed to open OPFS checkpoint metadata file".to_string()
-                        })?;
+                    let meta_fh = ensure_file(&h.part_dir.dir, &h.part_dir.meta_name).await?;
                     let meta_sync: FileSystemSyncAccessHandle =
                         JsFuture::from(meta_fh.create_sync_access_handle())
                             .await
@@ -1191,9 +737,7 @@ impl PartHandle {
                 if let Some(meta) = h.pending_meta.take() {
                     let flushed = h.flush_writable().await.is_ok();
                     if flushed {
-                        if let Ok(Some(mh)) =
-                            get_file_handle(&h.part_dir.dir, &h.part_dir.meta_name, true).await
-                        {
+                        if let Ok(mh) = ensure_file(&h.part_dir.dir, &h.part_dir.meta_name).await {
                             let _ = write_bytes_writable(&mh, &meta).await;
                         }
                     } else if !h.had_prior_file {

@@ -18,13 +18,15 @@ import {
   getBackendOptions,
   getVersion,
   initWasm,
-  isBackendSupported,
-  isWebSerialSupported,
-  isWebUsbSupported,
   setProgressCallback,
 } from "./bridge.js";
 import { detectBrowserCapabilities } from "./capabilities.js";
-import { refreshPairedDevicesStatus } from "./device.js";
+import {
+  isBackendSupported,
+  isWebSerialSupported,
+  isWebUsbSupported,
+  refreshPairedDevicesStatus,
+} from "./device.js";
 import { setupExclusiveGuards } from "./exclusive.js";
 import { appendLog, reportError } from "./logger.js";
 import { state } from "./state.js";

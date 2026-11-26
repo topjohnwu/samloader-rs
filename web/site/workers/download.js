@@ -19,6 +19,7 @@ import {
   fusDownload,
 } from "../app/bridge.js";
 import { createFusHttpTransport } from "../app/fus_bridge.js";
+import { markOpfsBuildComplete, prepareOpfsBuild } from "../app/opfs.js";
 
 let activeAbortController = null;
 let isRunning = false;
@@ -83,33 +84,47 @@ async function handleStart({ port, target, params, verbose }) {
     if (abortController.signal.aborted) {
       outgoing = { type: "CANCELLED" };
     } else {
-      transport = createFusHttpTransport(port);
+      let resolvedTarget = target;
+      if (target.kind === "opfs") {
+        const dirHandle = await prepareOpfsBuild(target.meta);
+        resolvedTarget = { kind: "opfs", dirHandle };
+      }
 
-      const onProgress = (event) => {
-        if (event && typeof event === "object") {
-          switch (event.type) {
-            case "progress":
-              self.postMessage({ ...event, type: "PROGRESS" });
-              break;
-            case "file_done":
-              self.postMessage({ ...event, type: "FILE_DONE" });
-              break;
-            case "warning":
-              self.postMessage({ ...event, type: "WARNING" });
-              break;
+      if (abortController.signal.aborted) {
+        outgoing = { type: "CANCELLED" };
+      } else {
+        transport = createFusHttpTransport(port);
+
+        const onProgress = (event) => {
+          if (event && typeof event === "object") {
+            switch (event.type) {
+              case "progress":
+                self.postMessage({ ...event, type: "PROGRESS" });
+                break;
+              case "file_done":
+                self.postMessage({ ...event, type: "FILE_DONE" });
+                break;
+              case "warning":
+                self.postMessage({ ...event, type: "WARNING" });
+                break;
+            }
           }
+        };
+
+        const result = await fusDownload(
+          params,
+          resolvedTarget,
+          transport,
+          onProgress,
+          abortController.signal
+        );
+
+        if (target.kind === "opfs" && !abortController.signal.aborted) {
+          await markOpfsBuildComplete(target.buildKey, result.files);
         }
-      };
 
-      const result = await fusDownload(
-        params,
-        target,
-        transport,
-        onProgress,
-        abortController.signal
-      );
-
-      outgoing = { type: "COMPLETE", result };
+        outgoing = { type: "COMPLETE", result };
+      }
     }
   } catch (err) {
     outgoing = abortController.signal.aborted

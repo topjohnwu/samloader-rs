@@ -39,6 +39,7 @@ const PRECACHE_URLS = [
   "./app/format.js",
   "./app/fus_bridge.js",
   "./app/logger.js",
+  "./app/opfs.js",
   "./app/server.js",
   "./app/slots.js",
   "./app/state.js",

@@ -16,10 +16,7 @@
 //! archive inspection, and parallel resumable downloads.
 
 use crate::http::JsHttpClient;
-use crate::storage::{
-    DownloadStorage, DownloadTarget, OpfsFileEntry, PartHandle, mark_opfs_build_complete,
-    prepare_opfs_build,
-};
+use crate::storage::{DownloadStorage, DownloadTarget, PartHandle};
 use crate::{js_obj, to_js_err};
 use futures::channel::oneshot;
 use futures::future::{Either, FutureExt, Shared, select, try_join_all};
@@ -830,13 +827,7 @@ fn select_entries_by_name<'a>(
     Ok(selected)
 }
 
-fn record_downloaded_file(
-    files_js: &js_sys::Array,
-    completed: &mut Vec<OpfsFileEntry>,
-    name: &str,
-    component: Option<&str>,
-    size: u64,
-) {
+fn push_downloaded_file(files_js: &js_sys::Array, name: &str, component: Option<&str>, size: u64) {
     let comp_js = match component {
         Some(c) => JsValue::from_str(c),
         None => JsValue::NULL,
@@ -845,11 +836,6 @@ fn record_downloaded_file(
         "name" => name,
         "component" => comp_js,
         "size" => size as f64,
-    });
-    completed.push(OpfsFileEntry {
-        name: name.to_string(),
-        component: component.map(str::to_string),
-        size,
     });
 }
 
@@ -960,10 +946,7 @@ pub async fn fus_download(
         return Err(JsValue::from_str(CANCELLED_ERR));
     }
 
-    if let DownloadTarget::Opfs { ref meta, .. } = target {
-        run_cancellable(&cancel, prepare_opfs_build(meta)).await?;
-    }
-    let storage = run_cancellable(&cancel, DownloadStorage::open(&target)).await?;
+    let storage = DownloadStorage::open(&target);
 
     let client = run_cancellable(
         &cancel,
@@ -984,7 +967,6 @@ pub async fn fus_download(
     let size_bounds = info.decrypted_size_bounds();
 
     let files_js = js_sys::Array::new();
-    let mut completed_files = Vec::new();
 
     match parsed.mode {
         DownloadMode::Zip => {
@@ -1003,13 +985,7 @@ pub async fn fus_download(
             if let Some(size) = existing_size {
                 progress.overall_total.set(size);
                 progress.finish_file(1, &decrypted_filename, true, size);
-                record_downloaded_file(
-                    &files_js,
-                    &mut completed_files,
-                    &decrypted_filename,
-                    None,
-                    size,
-                );
+                push_downloaded_file(&files_js, &decrypted_filename, None, size);
             } else {
                 let session = run_cancellable(&cancel, client.init_download(info)).await?;
                 let decrypted_size = session.size();
@@ -1030,13 +1006,7 @@ pub async fn fus_download(
                     .await
                     .map_err(TransferError::into_js)?;
 
-                record_downloaded_file(
-                    &files_js,
-                    &mut completed_files,
-                    &decrypted_filename,
-                    None,
-                    written,
-                );
+                push_downloaded_file(&files_js, &decrypted_filename, None, written);
             }
         }
         DownloadMode::Entries => {
@@ -1106,32 +1076,14 @@ pub async fn fus_download(
                     let written = transfer_file(&stream, entry_name, file_index, &ctx)
                         .await
                         .map_err(TransferError::into_js)?;
-                    record_downloaded_file(
-                        &files_js,
-                        &mut completed_files,
-                        entry_name,
-                        component,
-                        written,
-                    );
+                    push_downloaded_file(&files_js, entry_name, component, written);
                 } else {
                     let size = entry.uncompressed_size();
                     progress.finish_file(file_index, entry_name, true, size);
-                    record_downloaded_file(
-                        &files_js,
-                        &mut completed_files,
-                        entry_name,
-                        component,
-                        size,
-                    );
+                    push_downloaded_file(&files_js, entry_name, component, size);
                 }
             }
         }
-    }
-
-    if let DownloadTarget::Opfs { ref build_key, .. } = target {
-        mark_opfs_build_complete(build_key, &completed_files)
-            .await
-            .map_err(|e| JsValue::from_str(&e))?;
     }
 
     Ok(js_obj! {

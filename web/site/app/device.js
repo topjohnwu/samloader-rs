@@ -17,8 +17,6 @@
 import {
   detectDownloadDevice,
   deviceMode,
-  getPairedDevices,
-  isBackendSupported,
   pairDownloadDevice,
   pairSamsungDevice,
   printPit,
@@ -28,6 +26,90 @@ import {
 import { runExclusive } from "./exclusive.js";
 import { appendLog, reportError, requestOpenLog } from "./logger.js";
 import { state } from "./state.js";
+
+let mockPairedDevice = null;
+
+function createMockDevice(productId) {
+  return {
+    vendorId: 0x04e8,
+    productId,
+    productName: "Samsung SM-F968B (Simulated)",
+    serialNumber: "C1A2B3C4",
+    disconnect: async () => {
+      mockPairedDevice = null;
+    },
+  };
+}
+
+export function isWebUsbSupported() {
+  return typeof navigator !== "undefined" && "usb" in navigator;
+}
+
+export function isWebSerialSupported() {
+  return typeof navigator !== "undefined" && "serial" in navigator;
+}
+
+export function isBackendSupported(backend) {
+  if (backend === "mock") return true;
+  if (backend === "vcom") return isWebSerialSupported();
+  if (backend === "nusb") return isWebUsbSupported();
+  return false;
+}
+
+async function getPairedDevices(backend = "nusb") {
+  if (backend === "mock") {
+    return mockPairedDevice ? [mockPairedDevice] : [];
+  }
+  if (backend === "vcom") {
+    if (!isWebSerialSupported()) {
+      return [];
+    }
+    const ports = await navigator.serial.getPorts();
+    return ports
+      .map((port) => {
+        const info = port.getInfo ? port.getInfo() : {};
+        return {
+          vendorId: info.usbVendorId,
+          productId: info.usbProductId,
+          productName: "Samsung Serial Port",
+          serialNumber: undefined,
+          disconnect: async () => {
+            try {
+              await port.close();
+            } catch {
+              // Port may not be open
+            }
+            if (typeof port.forget === "function") {
+              await port.forget();
+            }
+          },
+        };
+      })
+      .filter((d) => d.vendorId != null && d.productId != null);
+  }
+  if (backend !== "nusb" || !isWebUsbSupported()) {
+    return [];
+  }
+  const devices = await navigator.usb.getDevices();
+  return devices.map((d) => ({
+    vendorId: d.vendorId,
+    productId: d.productId,
+    productName: d.productName,
+    serialNumber: d.serialNumber,
+    disconnect: async () => {
+      if (d.opened) {
+        try {
+          await d.close();
+        } catch {
+          // Device may already be closing
+        }
+      }
+      if (typeof d.forget === "function") {
+        await d.forget();
+      }
+    },
+  }));
+}
 
 const deviceListeners = new Set();
 
@@ -210,6 +292,9 @@ export async function pairDownload() {
   try {
     appendLog(`Pairing Download Mode device via ${state.selectedBackend}...`);
     await pairDownloadDevice(state.selectedBackend);
+    if (state.selectedBackend === "mock") {
+      mockPairedDevice = createMockDevice(0x685d);
+    }
     appendLog("Download Mode device paired successfully.");
     await refreshPairedDevicesStatus();
   } catch (err) {
@@ -222,6 +307,9 @@ export async function pairNormal() {
   try {
     appendLog(`Pairing Normal Mode device via ${state.selectedBackend}...`);
     await pairSamsungDevice(state.selectedBackend);
+    if (state.selectedBackend === "mock") {
+      mockPairedDevice = createMockDevice(0x6860);
+    }
     appendLog("Normal Mode Samsung device paired.");
     await refreshPairedDevicesStatus();
   } catch (err) {

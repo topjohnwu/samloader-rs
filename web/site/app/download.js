@@ -14,16 +14,16 @@
 
 // OPFS firmware cache management, download worker orchestration, and Download & Flash flows.
 
-import {
-  clearOpfsCache,
-  getOpfsBuildFiles,
-  getOpfsCacheInfo,
-} from "./bridge.js";
 import { runExclusive, runExclusiveWithSetup } from "./exclusive.js";
 import { executeFlashWithFiles } from "./flash.js";
 import { formatBytes } from "./format.js";
 import { openBridgePort } from "./fus_bridge.js";
 import { appendLog, reportError } from "./logger.js";
+import {
+  clearOpfsCache,
+  getOpfsBuildFiles,
+  getOpfsCacheInfo,
+} from "./opfs.js";
 import { loadFilesIntoSlots } from "./slots.js";
 import { state } from "./state.js";
 
