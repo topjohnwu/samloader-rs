@@ -16,20 +16,12 @@ import {
   initWasm,
   setProgressCallback,
   setVerbose,
-  takeWasmLogs,
   fusDownload,
 } from "../app/bridge.js";
 import { createFusHttpTransport } from "../app/fus_bridge.js";
 
 let activeAbortController = null;
 let isRunning = false;
-
-function flushWorkerLogs() {
-  const lines = takeWasmLogs();
-  if (lines.length > 0) {
-    self.postMessage({ type: "LOG", lines });
-  }
-}
 
 function closePortQuietly(p) {
   if (!p) return;
@@ -82,13 +74,11 @@ async function handleStart({ port, target, params, verbose }) {
   try {
     await initWasm();
     await setProgressCallback((event) => {
-      if (event?.type === "log") {
-        flushWorkerLogs();
+      if (event?.type === "log" && event.message) {
+        self.postMessage({ type: "LOG", message: event.message });
       }
     });
     await setVerbose(Boolean(verbose));
-    // Drop the initial log banner so only download logs are forwarded
-    takeWasmLogs();
 
     if (abortController.signal.aborted) {
       outgoing = { type: "CANCELLED" };
@@ -109,7 +99,6 @@ async function handleStart({ port, target, params, verbose }) {
               break;
           }
         }
-        flushWorkerLogs();
       };
 
       const result = await fusDownload(
@@ -120,11 +109,9 @@ async function handleStart({ port, target, params, verbose }) {
         abortController.signal
       );
 
-      flushWorkerLogs();
       outgoing = { type: "COMPLETE", result };
     }
   } catch (err) {
-    flushWorkerLogs();
     outgoing = abortController.signal.aborted
       ? { type: "CANCELLED" }
       : { type: "ERROR", error: err?.message || String(err) };

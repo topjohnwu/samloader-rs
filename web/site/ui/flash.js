@@ -19,8 +19,9 @@ import {
   setFlashHandlers,
   updateFlashStats,
 } from "../app/flash.js";
+import { appendLog } from "../app/logger.js";
 import { state } from "../app/state.js";
-import { openLog, scheduleLogFlush } from "./log.js";
+import { openLog } from "./log.js";
 import { announce, formatBytes, formatDuration, setBarPercent } from "./util.js";
 
 let lastAnnouncedPartition = null;
@@ -29,7 +30,7 @@ let activeCancelHandler = null;
 export function handleProgressEvent(event) {
   if (!event || typeof event !== "object") return;
   if (event.type === "log") {
-    scheduleLogFlush();
+    if (event.message) appendLog(event.message);
   } else if (event.type === "progress") {
     const { percent, partition, overallPercent } = event;
     const progressBar = document.getElementById("flash-progress-bar");

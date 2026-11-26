@@ -730,7 +730,7 @@ where
         }
 
         if restarted {
-            crate::progress::append_log(&format!(
+            crate::progress::emit_log(&format!(
                 "Existing partial download for '{filename}' is incompatible or corrupted, restarting from scratch..."
             ));
         }
@@ -742,11 +742,11 @@ where
             } else {
                 100.0
             };
-            crate::progress::append_log(&format!(
+            crate::progress::emit_log(&format!(
                 "Resuming {filename} ({start_pos} / {target_size} bytes, {pct:.1}%)"
             ));
         } else {
-            crate::progress::append_log(&format!(
+            crate::progress::emit_log(&format!(
                 "Downloading {filename} ({target_size} bytes)..."
             ));
         }

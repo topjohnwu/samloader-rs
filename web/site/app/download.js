@@ -23,7 +23,7 @@ import { runExclusive, runExclusiveWithSetup } from "./exclusive.js";
 import { executeFlashWithFiles } from "./flash.js";
 import { formatBytes } from "./format.js";
 import { openBridgePort } from "./fus_bridge.js";
-import { appendLog, appendRawLogs, reportError } from "./logger.js";
+import { appendLog, reportError } from "./logger.js";
 import { loadFilesIntoSlots } from "./slots.js";
 import { state } from "./state.js";
 
@@ -160,7 +160,7 @@ export async function runDownloadWorker({
           appendLog(`[FUS WARNING] ${data.message}`);
           break;
         case "LOG":
-          appendRawLogs(data.lines);
+          if (data.message) appendLog(data.message);
           break;
         case "COMPLETE":
           finish(() => resolve({ status: "complete", result: data.result }));

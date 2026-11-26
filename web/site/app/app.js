@@ -37,7 +37,7 @@ import {
 } from "../ui/controls.js";
 import { setupDevicePanel } from "../ui/device.js";
 import { handleProgressEvent, setupFlashPanel } from "../ui/flash.js";
-import { setupLogPanel, setupLogScroller } from "../ui/log.js";
+import { setupLogPanel } from "../ui/log.js";
 import { setupServerPanel } from "../ui/server.js";
 import { setupSlotsPanel } from "../ui/slots.js";
 import { setupThemeToggle } from "../ui/theme.js";
@@ -116,7 +116,6 @@ async function setupWasmAndEvents() {
     updateControlsState();
 
     await setProgressCallback(handleProgressEvent);
-    setupLogScroller();
     appendLog("WASM engine initialized successfully.");
 
     const version = await getVersion();

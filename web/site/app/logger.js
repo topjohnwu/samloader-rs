@@ -12,27 +12,59 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Application logging and error-reporting facade over the WASM log buffer and UI hooks.
+// Application log buffer and error-reporting hooks.
 
-import { appendRawWasmLogs, appendWasmLog } from "./bridge.js";
+const INITIAL_LOG_BANNER = "-- samloader-rs Odin Web Flasher Initialized --";
+const CLEARED_LOG_BANNER = "-- Log Cleared --";
 
-let preWasmLogHandler = null;
+let lines = [INITIAL_LOG_BANNER];
+const logListeners = new Set();
 let openLogHandler = null;
 
-export function setLogHandlers({ onPreWasmLog = null, onOpenLog = null } = {}) {
-  preWasmLogHandler = onPreWasmLog;
-  openLogHandler = onOpenLog;
+function formatLogLines(msg) {
+  const timestamp = new Date().toTimeString().slice(0, 8);
+  const [first, ...rest] = String(msg).split("\n");
+  return [`[${timestamp}] ${first}`, ...rest];
 }
 
-export function appendLog(msg) {
-  const queuedLines = appendWasmLog(msg);
-  if (queuedLines) {
-    preWasmLogHandler?.(queuedLines);
+function notifyLogChange() {
+  for (const listener of logListeners) {
+    listener();
   }
 }
 
-export function appendRawLogs(lines) {
-  appendRawWasmLogs(lines);
+export function onLogChange(listener) {
+  logListeners.add(listener);
+  return () => logListeners.delete(listener);
+}
+
+export function setOpenLogHandler(fn) {
+  openLogHandler = fn;
+}
+
+export function appendLog(msg) {
+  lines.push(...formatLogLines(msg));
+  notifyLogChange();
+}
+
+export function clearLogs() {
+  lines = [CLEARED_LOG_BANNER];
+  notifyLogChange();
+}
+
+export function exportLogs() {
+  return lines.join("\n");
+}
+
+export function getLastLogLine() {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() !== "") return lines[i];
+  }
+  return "";
+}
+
+export function getLogLines() {
+  return lines;
 }
 
 export function reportError(msg) {

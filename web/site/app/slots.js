@@ -15,7 +15,7 @@
 // Odin package slots, partition list state, and sequential MD5 worker verification queue.
 
 import { formatBytes } from "./format.js";
-import { appendLog, appendRawLogs } from "./logger.js";
+import { appendLog } from "./logger.js";
 import { PACKAGE_SLOTS, SLOTS, state } from "./state.js";
 
 const slotListeners = new Set();
@@ -108,7 +108,7 @@ function pumpMd5Queue() {
         setSlotStatus(slot, "verifying", data.percent);
         break;
       case "LOG":
-        appendRawLogs(data.lines);
+        if (data.message) appendLog(data.message);
         break;
       case "SUCCESS":
         finish("valid");

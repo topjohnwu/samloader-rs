@@ -15,20 +15,13 @@
 import init, {
   FlashOptions,
   FusDownloadOptions,
-  append_log,
-  append_raw_logs,
-  clear_log,
   clear_opfs_cache,
-  clear_progress_callback,
   detect_download_device,
   device_mode,
-  export_logs,
   fus_download,
   fus_fetch_history,
   fus_inspect_firmware,
   get_backend_options,
-  last_log_line,
-  log_line_height,
   opfs_build_files,
   opfs_cache_info,
   pair_download_device,
@@ -37,17 +30,13 @@ import init, {
   print_pit,
   reboot_from_odin,
   reboot_to_download_at,
-  render_log_viewport,
   set_progress_callback,
   set_verbose,
-  take_logs,
   verify_package_md5,
   version,
 } from "../pkg/samloader_web.js";
 
 let initPromise = null;
-let wasmReady = false;
-const pendingLogs = [];
 let mockPairedDevice = null;
 
 function createMockDevice(productId) {
@@ -67,26 +56,17 @@ function createMockDevice(productId) {
  */
 export async function initWasm() {
   if (!initPromise) {
-    initPromise = init()
-      .then((res) => {
-        wasmReady = true;
-        if (pendingLogs.length > 0) {
-          append_raw_logs(pendingLogs.splice(0));
-        }
-        return res;
-      })
-      .catch((err) => {
-        initPromise = null;
-        wasmReady = false;
-        throw err;
-      });
+    initPromise = init().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
   }
   await initPromise;
 }
 
 /**
  * Registers the thread-local callback receiving log/progress event objects.
- * @param {(event: { type: "log" } | { type: "progress", percent: number, current: number, total: number, partition: string, overallPercent?: number, partitionIndex?: number, partitionCount?: number, sent?: number }) => void} onProgress
+ * @param {(event: { type: "log", message: string } | { type: "progress", percent: number, current: number, total: number, partition: string, overallPercent?: number, partitionIndex?: number, partitionCount?: number, sent?: number }) => void} onProgress
  *   `overallPercent`, `partitionIndex`, `partitionCount` and `sent` (bytes sent to the device)
  *   are only present while flashing
  */
@@ -96,118 +76,12 @@ export async function setProgressCallback(onProgress) {
 }
 
 /**
- * Clears the thread-local progress reporter.
- */
-export async function clearProgressCallback() {
-  await initWasm();
-  clear_progress_callback();
-}
-
-/**
  * Sets whether verbose log messages are emitted by the active progress reporter.
  * @param {boolean} verbose
  */
 export async function setVerbose(verbose) {
   await initWasm();
   set_verbose(Boolean(verbose));
-}
-
-/**
- * Formats a log message like the Rust log buffer does: the first line is prefixed
- * with a local `[HH:MM:SS]` timestamp, and continuation lines are kept as-is.
- * @param {string} msg
- * @returns {string[]}
- */
-function formatLogLines(msg) {
-  const timestamp = new Date().toTimeString().slice(0, 8);
-  const [first, ...rest] = msg.split("\n");
-  return [`[${timestamp}] ${first}`, ...rest];
-}
-
-/**
- * Appends a log message to the Rust log buffer, queuing it if WASM is still initializing.
- * Queued messages are timestamped at the time they are logged, not when they are flushed.
- * @param {string} msg
- * @returns {string[] | null} null if appended directly to WASM, or the formatted lines
- *   that were queued before WASM init (so callers can display them immediately)
- */
-export function appendWasmLog(msg) {
-  const text = String(msg);
-  if (wasmReady) {
-    append_log(text);
-    return null;
-  }
-  const lines = formatLogLines(text);
-  pendingLogs.push(...lines);
-  return lines;
-}
-
-/**
- * Appends pre-formatted log lines (e.g. from a Web Worker) to the Rust log buffer.
- * @param {string[]} lines
- */
-export function appendRawWasmLogs(lines) {
-  if (!Array.isArray(lines) || lines.length === 0) return;
-  if (wasmReady) {
-    append_raw_logs(lines);
-  } else {
-    pendingLogs.push(...lines.map(String));
-  }
-}
-
-/**
- * Clears the Rust log buffer (and any queued pre-init logs).
- */
-export function clearWasmLog() {
-  pendingLogs.length = 0;
-  if (wasmReady) {
-    clear_log();
-  }
-}
-
-/**
- * Drains buffered log lines from the current thread's progress reporter.
- * @returns {string[]}
- */
-export function takeWasmLogs() {
-  if (!wasmReady) return [];
-  return take_logs();
-}
-
-/**
- * Returns the full contents of the Rust log buffer.
- * @returns {string} All log lines joined with newlines, or an empty string before WASM init
- */
-export function exportWasmLogs() {
-  return wasmReady ? export_logs() : "";
-}
-
-/**
- * Returns the most recent non-blank line of the Rust log buffer.
- * @returns {string | null} The last log line, or null before WASM init
- */
-export function lastWasmLogLine() {
-  return wasmReady ? last_log_line() : null;
-}
-
-/**
- * Returns the log line height in pixels used by the Rust log viewport virtualization.
- * @returns {number | null} Line height, or null if WASM is not initialized yet
- */
-export function logLineHeight() {
-  return wasmReady ? log_line_height() : null;
-}
-
-/**
- * Computes the visible virtualized log viewport slice in Rust.
- * @param {number} scrollTop
- * @param {number} viewportHeight
- * @param {boolean} stickToBottom
- * @returns {{ totalHeight?: number, paddingTop?: number, text?: string, scrollToBottom: boolean } | null}
- */
-export function renderLogViewport(scrollTop, viewportHeight, stickToBottom) {
-  if (!wasmReady) return null;
-  return render_log_viewport(scrollTop, viewportHeight, stickToBottom);
 }
 
 /**

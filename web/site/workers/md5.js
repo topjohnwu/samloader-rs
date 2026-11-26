@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { setProgressCallback, takeWasmLogs, verifyPackageMd5 } from "../app/bridge.js";
+import { setProgressCallback, verifyPackageMd5 } from "../app/bridge.js";
 
 // Verifies the MD5 footer of a single package file, then reports the result.
 // Each verification runs in its own worker; the main thread cancels it with terminate().
@@ -27,16 +27,11 @@ self.onmessage = async ({ data }) => {
     await setProgressCallback((event) => {
       if (event?.type === "progress") {
         self.postMessage({ type: "PROGRESS", percent: event.percent });
-      } else if (event?.type === "log") {
-        const lines = takeWasmLogs();
-        if (lines.length > 0) {
-          self.postMessage({ type: "LOG", lines });
-        }
+      } else if (event?.type === "log" && event.message) {
+        self.postMessage({ type: "LOG", message: event.message });
       }
     });
 
-    // Drop the initial log banner so only verification output is forwarded
-    takeWasmLogs();
     await verifyPackageMd5(file);
     self.postMessage({ type: "SUCCESS" });
   } catch (err) {

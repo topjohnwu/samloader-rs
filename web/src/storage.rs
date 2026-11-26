@@ -1136,7 +1136,7 @@ impl PartHandle {
                 if verbose {
                     let elapsed = js_sys::Date::now() - start_ms;
                     if elapsed >= 200.0 {
-                        crate::progress::append_log(&format!(
+                        crate::progress::emit_log(&format!(
                             "[Writer] OPFS checkpoint flush took {}ms",
                             elapsed.round() as u64
                         ));

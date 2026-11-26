@@ -12,64 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The activity log panel, rendered by the virtualized log viewport in Rust.
+// The activity log panel with fixed-line-height viewport virtualization.
 
+import { setVerbose } from "../app/bridge.js";
 import {
-  clearWasmLog,
-  exportWasmLogs,
-  lastWasmLogLine,
-  logLineHeight,
-  renderLogViewport,
-  setVerbose,
-} from "../app/bridge.js";
-import { appendLog, setLogHandlers } from "../app/logger.js";
+  appendLog,
+  clearLogs,
+  exportLogs,
+  getLastLogLine,
+  getLogLines,
+  onLogChange,
+  setOpenLogHandler,
+} from "../app/logger.js";
 import { state } from "../app/state.js";
 import { downloadFile, localTimestampForFilename } from "./util.js";
 
-// --- Virtualized Activity Log Scroller ---
+const LOG_LINE_HEIGHT = 20;
+const LOG_OVERSCAN = 20;
+
 let logStickToBottom = true;
 let logFlushScheduled = false;
-
-function renderPreWasmLines(queuedLines) {
-  // WASM is still initializing; show the queued lines until Rust takes over rendering
-  const logElem = document.getElementById("log-output");
-  if (logElem) {
-    const separator = logElem.textContent ? "\n" : "";
-    logElem.textContent += `${separator}${queuedLines.join("\n")}`;
-  }
-  const preview = document.getElementById("log-preview");
-  if (preview) preview.textContent = queuedLines.at(-1) ?? "";
-}
+let renderedStart = -1;
+let renderedEnd = -1;
+let renderedTotal = -1;
 
 function flushLogViewport(stickToBottom = logStickToBottom) {
   const container = document.querySelector(".log-terminal");
   const logElem = document.getElementById("log-output");
   if (!container || !logElem) return;
 
-  // Keep the latest line visible in the header while the log is folded. Before WASM
-  // is initialized, renderPreWasmLines() shows the queued lines instead.
   const preview = document.getElementById("log-preview");
-  const lastLine = lastWasmLogLine();
-  if (preview && lastLine !== null) preview.textContent = lastLine;
+  if (preview) preview.textContent = getLastLogLine();
 
-  const view = renderLogViewport(container.scrollTop, container.clientHeight, stickToBottom);
-  if (!view) return;
+  const lines = getLogLines();
+  const totalLines = lines.length;
+  const totalHeight = totalLines * LOG_LINE_HEIGHT;
+  const vh = container.clientHeight > 0 ? container.clientHeight : 220;
+  const effectiveScrollTop = stickToBottom
+    ? Math.max(0, totalHeight - vh)
+    : Math.max(0, container.scrollTop);
 
-  if (view.totalHeight !== undefined) {
-    logElem.style.height = `${view.totalHeight}px`;
+  const firstVisible = Math.floor(effectiveScrollTop / LOG_LINE_HEIGHT);
+  const visibleCount = Math.ceil(vh / LOG_LINE_HEIGHT);
+  const startIndex = Math.min(Math.max(0, firstVisible - LOG_OVERSCAN), totalLines);
+  const endIndex = Math.min(firstVisible + visibleCount + LOG_OVERSCAN, totalLines);
+
+  const heightChanged = renderedTotal !== totalLines;
+  renderedTotal = totalLines;
+  const sliceChanged = startIndex !== renderedStart || endIndex !== renderedEnd;
+
+  if (!heightChanged && !sliceChanged) return;
+
+  if (heightChanged) {
+    logElem.style.height = `${totalHeight}px`;
   }
-  if (view.paddingTop !== undefined) {
-    logElem.style.paddingTop = `${view.paddingTop}px`;
+  if (sliceChanged) {
+    renderedStart = startIndex;
+    renderedEnd = endIndex;
+    logElem.style.paddingTop = `${startIndex * LOG_LINE_HEIGHT}px`;
+    logElem.textContent = lines.slice(startIndex, endIndex).join("\n");
   }
-  if (view.text !== undefined) {
-    logElem.textContent = view.text;
-  }
-  if (view.scrollToBottom) {
+  if (stickToBottom && heightChanged) {
     container.scrollTop = container.scrollHeight;
   }
 }
 
-export function scheduleLogFlush() {
+function scheduleLogFlush() {
   if (logFlushScheduled) return;
   logFlushScheduled = true;
   requestAnimationFrame(() => {
@@ -78,26 +86,25 @@ export function scheduleLogFlush() {
   });
 }
 
-export function setupLogScroller() {
+function setupLogScroller() {
   const container = document.querySelector(".log-terminal");
   const logElem = document.getElementById("log-output");
   if (!container || !logElem) return;
 
-  // The virtualization in Rust assumes a fixed line height, so take it from there
-  const lineHeight = logLineHeight();
-  logElem.style.lineHeight = `${lineHeight}px`;
+  logElem.style.lineHeight = `${LOG_LINE_HEIGHT}px`;
 
   container.addEventListener(
     "scroll",
     () => {
       const distanceFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
-      logStickToBottom = distanceFromBottom <= lineHeight * 1.5;
+      logStickToBottom = distanceFromBottom <= LOG_LINE_HEIGHT * 1.5;
       flushLogViewport(false);
     },
     { passive: true }
   );
 
+  onLogChange(scheduleLogFlush);
   flushLogViewport(true);
 }
 
@@ -128,24 +135,25 @@ export function openLog() {
 }
 
 export function clearLog() {
-  clearWasmLog();
+  renderedStart = -1;
+  renderedEnd = -1;
+  renderedTotal = -1;
   logStickToBottom = true;
+  clearLogs();
   flushLogViewport(true);
 }
 
 export function saveLog() {
   downloadFile(
     `samloader-web-${localTimestampForFilename()}.log`,
-    `${exportWasmLogs()}\n`,
+    `${exportLogs()}\n`,
     "text/plain"
   );
 }
 
 export function setupLogPanel() {
-  setLogHandlers({
-    onPreWasmLog: renderPreWasmLines,
-    onOpenLog: openLog,
-  });
+  setOpenLogHandler(openLog);
+  setupLogScroller();
 
   const toggle = document.getElementById("log-toggle");
   toggle?.addEventListener("click", () => {
